@@ -1,0 +1,124 @@
+
+@import url('https://fonts.googleapis.com/css2?family=Source+Sans+Pro');
+@import url('https://fonts.googleapis.com/css?family=Ubuntu+Condensed');
+
+@font-face {
+    font-family: 'tex_gyre_adventor';
+    src: url('texgyreadventor-regular-webfont.woff');
+    font-weight: normal;
+    font-style: normal;
+}
+
+@font-face {
+    font-family: 'tex_gyre_adventor';
+    src: url('texgyreadventor-bold-webfont.woff');
+    font-weight: bold;
+    font-style: normal;
+}
+
+.navbar {
+    background-color:#045594;
+    border-color:white;
+}
+.navbar-logo {
+    height:48px;
+    padding-top:5px;
+}
+.navbar-brand {
+    color: white!important;
+    font-family: 'Ubuntu Condensed', 'tex_gyre_adventor', sans-serif;
+    font-size: 24px;
+}
+.navbar-inverse .navbar-nav>li>a:focus{
+    color:#ffffff;
+    background-color:#2d6797
+}
+.navbar-inverse .navbar-nav>li>a:hover{
+    color:#ffffff;
+    background-color:#2d6797
+}
+.navbar-inverse .navbar-nav>.active>a { 
+    color:#ffffff;
+    background-color:#2d6797;
+}
+.navbar-inverse .navbar-nav>.active>a:focus { 
+    color:#ffffff;
+    background-color:#2d6797;
+}
+
+#date_range > div > input:nth-child(1) {
+    height: 34px;
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
+}
+#date_range > div > input:nth-child(2) {
+    height: 34px;
+}
+#date_range > div > input:nth-child(3) {
+    height: 34px;
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
+}
+#id_filter {
+    height: 34px;
+    border-radius: 4px;
+}
+
+#date {
+    margin-bottom: 10px;
+}
+
+#date > input {
+    height: 34px;
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
+}
+
+
+.tabbable {
+    margin-left: 20px;  
+}
+
+/*.help-block {
+  
+}*/
+
+.form-group {
+    margin-bottom: 5px;
+}
+
+.checkbox {
+    margin-top: 1px;
+    margin-bottom: 1px;
+}
+
+.corridor_summary_table {
+    height: 400px !important;
+}
+
+#section-row-data-height-92 {
+    height: 88px !important;
+    flex: 0 0 88px !important;
+}
+
+.datatables {
+    font-size: 14px !important;
+}
+
+.shiny-download-link {
+    background-color: #636363;
+    border-color: #636363;
+}
+
+.heatmap-explanation {
+    color: #7f0000 !important;
+}
+
+button#signal_details_button {
+    background-color: #636363;
+    border-color: #636363;
+    margin-top: 25px;
+    padding: 6px 18px;
+}

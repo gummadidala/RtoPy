@@ -1,0 +1,52 @@
+# Monthly_Report config file (yaml format)
+
+agency: GDOT
+bucket: gdot-tmc-spm-sandbox
+athena:
+    staging_dir: s3://gdot-tmc-spm-athena-sandbox
+    database: gdot_spm_sandbox
+    atspm_table: atspm2
+    region: us-east-1
+atspm:
+    odbc_dsn: atspm
+    uid_env: ATSPM_USERNAME
+    pwd_env: ATSPM_PASSWORD
+    svr_env: ATSPM_SERVER_INSTANCE
+    db_env: ATSPM_DB
+
+# Sections of Monthly_Report_Calcs_ec2 to run
+run:
+    cctv: TRUE
+    rsus: FALSE
+    travel_times: TRUE
+    counts: TRUE
+    counts_based_measures: TRUE
+    etl: TRUE
+    arrivals_on_green: TRUE
+    queue_spillback: TRUE
+    ped_delay: TRUE
+    split_failures: TRUE
+    flash_events: TRUE
+
+
+start_date: first_missing  # 2 days ago
+end_date: yesterday
+
+calcs_start_date: auto
+report_end_date: yesterday
+
+corridors_filename_s3: Corridors_v5_Latest.xlsx
+corridors_TMCs_filename_s3: Corridor_TMCs_v5.xlsx
+cctv_config_filename: Cameras_v4_Latest.xlsx
+
+AM_PEAK_HOURS: [6, 7, 8, 9]
+PM_PEAK_HOURS: [15, 16, 17, 18, 19]
+
+zone_groups:
+    - Central Metro
+    - Western Metro
+    - Eastern Metro
+    - North
+    - Southeast
+    - Southwest
+    - Ramp Meters

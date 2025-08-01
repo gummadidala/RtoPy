@@ -1,0 +1,105 @@
+
+# Health Metrics Configuration Data
+
+scoring_lookup:
+    score:
+        [    1,     2,     3,     4,     5,     6,     7,     8,     9,    10]
+
+    rsu:
+        [  0.0,   0.2,   0.3,   0.4,   0.5,   0.6,   0.7,   0.8,   0.9,   1.0]
+
+    cctv:
+        [  0.0,   0.2,   0.3,   0.4,   0.5,   0.6,   0.7,   0.8,   0.9,   1.0]
+
+    comm:
+        [ 0.91,  0.92,  0.93,  0.94,  0.95,  0.96,  0.97,  0.98,  0.99,  1.00]
+
+    detection:
+        [ 0.20,  0.30,  0.40,  0.50,  0.60,  0.70,  0.80,  0.90,  0.95,  1.00]
+
+    ped_actuation:
+        [ 0.20,  0.30,  0.40,  0.50,  0.60,  0.70,  0.80,  0.90,  0.95,  1.00]
+
+    flash_events:
+        [    9,     8,     7,     6,     5,     4,     3,     2,     1,     0]
+
+    pr:
+        [ 0.00,  1.00,  1.02,  1.04,  1.06,  1.08,  1.10,  1.12,  1.14,  1.16]
+
+    ped_delay:
+        [  270,   240,   210,   180,   150,   120,    90,    60,    30,     0]
+
+    sf:
+        [0.350, 0.300, 0.250, 0.225, 0.200, 0.150, 0.100, 0.075, 0.050, 0.000]
+
+    tti:
+        [  1.9,   1.8,   1.7,   1.6,   1.5,   1.4,   1.3,   1.2,   1.1,   0.0]
+
+    bi:
+        [0.250, 0.225, 0.200, 0.175, 0.150, 0.125, 0.100, 0.075, 0.050, 0.000]
+
+    crash_rate:
+        [    9,     8,     7,     6,     5,     4,     3,     2,     1,     0]
+        
+    kabco:
+        [  900,   800,   700,   600,   500,   400,   300,   200,   100,     0]
+
+    high_speed:
+        [ 2.00,  1.20,  1.15,  1.10,  1.05,  1.00,  0.95,  0.90,  0.85,  0.00]
+        
+    ped_injury_exposure:
+        [ 1.00,  0.95,  0.85,  0.75,  0.65,  0.55,  0.45,  0.35,  0.30,  0.00]
+
+weights_lookup:
+    Context:
+        [ 1,  2,  3,  4,  5]
+
+    Context_Category:
+        [Multi-Modal with Pedestrian Focus, Multi-Modal Balanced and Coordinated, Mainline Vehicle Progression, Low Volume Coordinated, Non-Coordinated or Isolated]
+
+    Detection_Uptime_Weight:
+        [25, 12, 12, 15, 15]
+
+    Ped_Act_Uptime_Weight:
+        [15, 47, 47, 40, 40]
+
+    Comm_Uptime_Weight:
+        [40, 23, 23, 25, 25]
+
+    CCTV_Uptime_Weight:
+        [10,  6,  6,  5,  5]
+
+    RSU_Uptime_Weight:
+        [ 0,  0,  0,  0,  0]
+
+    Flash_Events_Weight:
+        [10, 12, 12, 15, 15]
+
+    Platoon_Ratio_Weight:
+        [10, 30, 30, 15,  0]
+
+    Ped_Delay_Weight:
+        [50, 20, 10,  5, 10]
+
+    Split_Failures_Weight:
+        [20, 20, 15, 30, 40]
+
+    TTI_Weight:
+        [ 5, 10, 20, 30, 25]
+
+    BI_Weight:
+        [15, 20, 25, 20, 25]
+
+    Crash_Rate_Index_Weight:
+        [50, 20, 10, 20, 35] #from DC email 3/9/21
+    
+    KABCO_Crash_Severity_Index_Weight:
+        [10, 30, 30, 20, 35] #from DC email 3/9/21
+
+    High_Speed_Index_Weight:
+        [10, 30, 45, 50, 25] #from DC email 3/9/21
+        
+    Ped_Injury_Exposure_Index_Weight:
+        [30, 20, 15, 10,  5] #from DC email 3/9/21
+
+    

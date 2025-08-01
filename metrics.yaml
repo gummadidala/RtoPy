@@ -1,0 +1,539 @@
+
+# Metrics
+# Data to define classes
+
+# - #045594   GDOT BLUE (R: 4 G: 85 B: 148 - from Branding Guidelines)
+# - #002E5E   GDOT GREEN
+
+# - #00458F - SigOps BLUE
+# - #007338 - SigOps GREEN
+# - #990000 - SigOps RED
+# - #998200 - SigOps PUKEY YELLOW
+# - #99E6BF - GREEN FILL
+# - #99C7F7 - BLUE FILL
+# - #FF9999 - RED FILL
+# - #FFF099 - YELLOW FILL
+
+# --- Volume Metrics ----------------------------
+daily_traffic_volume:
+    label: Traffic Volume [veh/day]
+    table: vpd
+    s3table: vehicles_pd
+    variable: vpd
+    weight: ones
+    data_type: integer
+    highlight_color: "#045594"
+    fill_color: "#99C7F7"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+am_peak_hour_volume:
+    label: AM Peak Volume [veh/hr]
+    table: vphpa
+    s3table: vehicles_ph
+    variable: vph
+    weight: ones
+    data_type: integer
+    highlight_color: "#045594"
+    fill_color: "#99C7F7"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+
+pm_peak_hour_volume:
+    label: PM Peak Volume [veh/hr]
+    table: vphpp
+    s3table: vehicles_ph
+    variable: vph
+    weight: ones
+    data_type: integer
+    highlight_color: "#045594"
+    fill_color: "#99C7F7"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+
+throughput:
+    label: Throughput [veh/hr]
+    table: tp
+    s3table: throughput
+    variable: vph
+    weight: ones
+    data_type: integer
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+arrivals_on_green:
+    label: Arrivals on Green [%]
+    table: aogd
+    s3table: arrivals_on_green
+    variable: aog
+    weight: vol
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: NULL
+    data_type: percent
+    hourly_table: aogh
+    has_weekly: True
+    peak_only:
+
+# --- Performance Metrics -----------------------
+progression_ratio:
+    label: Progression Ratio
+    table: prd
+    s3table: arrivals_on_green
+    variable: pr
+    weight: vol
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: NULL
+    data_type: decimal
+    hourly_table: prh
+    has_weekly: True
+    peak_only:
+
+queue_spillback_rate:
+    label: Queue Spillback Rate [%]
+    table: qsd
+    s3table: queue_spillback
+    variable: qs_freq
+    weight: cycles
+    data_type: percent
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: NULL
+    hourly_table: qsh
+    has_weekly: True
+    peak_only:
+
+peak_period_split_failures:
+    label: Peak Period Split Failures Rate [%]
+    table: sfd
+    s3table: split_failures
+    variable: sf_freq
+    weight: cycles
+    data_type: percent
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+off_peak_split_failures:
+    label: Off-Peak Split Failures Rate [%]
+    table: sfo
+    s3table: split_failures
+    variable: sf_freq
+    weight: cycles
+    data_type: percent
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+travel_time_index:
+    label: Travel Time Index (TTI)
+    table: tti
+    s3table:
+    variable: tti
+    weight: NULL
+    data_type: decimal
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: 1.2
+    hourly_table: ttih
+    has_weekly: False
+    peak_only:
+
+planning_time_index:
+    label: Planning Time Index (PTI)
+    table: pti
+    s3table:
+    variable: pti
+    weight: NULL
+    data_type: decimal
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: 1.3
+    hourly_table: ptih
+    has_weekly: False
+    peak_only:
+
+average_speed:
+    label: Average Speed [mph]
+    table: spd
+    s3table:
+    variable: speed_mph
+    weight: NULL
+    data_type: integer
+    highlight_color: "#007338"
+    fill_color: "#99E6BF"
+    goal: NULL
+    hourly_table: spdh
+    has_weekly: False
+    peak_only:
+
+daily_pedestrian_pushbuttons:
+    label: Pedestrian Activations per Day [pa/day]
+    table: papd
+    s3table: ped_actuations_pd
+    variable: papd
+    weight: ones
+    data_type: integer
+    highlight_color: "#990000"
+    fill_color: "#FF9999"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+# --- Uptime Metrics ----------------------------
+uptime:
+    label: NULL
+    table: NULL
+    s3table:
+    variable: uptime
+    weight: ones
+    data_type: percent
+    highlight_color: "#990000"
+    fill_color: "#FF9999"
+    goal: 0.95
+    hourly_table: NULL
+    has_weekly: True
+    peak_only:
+
+detector_uptime:
+    label: Detector Uptime [%]
+    table: du
+    s3table: detector_uptime_pd
+    weight: all
+
+ped_button_uptime:
+    label: Pedestrian Pushbutton Uptime [%]
+    table: pau
+    s3table: ped_detector_uptime_pd
+
+cctv_uptime:
+    label: CCTV Uptime [%]
+    table: cctv
+    s3table: cctv_uptime
+
+comm_uptime:
+    label: Communication Uptime [%]
+    table: cu
+    s3table: comm_uptime
+
+rsu_uptime:
+    label: RSU Uptime [%]
+    table: ru
+    s3table: rsus
+
+# --- TEAMS Tasks -------------------------------
+tasks_template:
+    label: NULL
+    table: NULL
+    s3table: teams
+    variable: NULL
+    weight: ones
+    data_type: integer
+    highlight_color: "#998200"
+    fill_color: "#FFF099"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: False
+    peak_only:
+
+tasks:
+    label: TEAMS Tasks This Period
+    table: tasks
+    variable: Reported
+
+tasks_by_type:
+    label: TEAMS Tasks This Period By Type
+    table: ttyp
+
+tasks_by_subtype:
+    label: TEAMS Tasks This Period By Subtype
+    table: tsub
+
+tasks_by_source:
+    label: TEAMS Tasks This Period By Source
+    table: tsou
+
+tasks_reported:
+    label: TEAMS Tasks Reported This Period
+    table: reported  # tasks
+    variable: Reported
+
+tasks_resolved:
+    label: TEAMS Tasks Resolved This Period
+    table: resolved  # tasks
+    variable: Resolved
+
+tasks_outstanding:
+    label: TEAMS Tasks Outstanding [Unresolved]
+    table: outstanding  # tasks
+    variable: Outstanding
+
+tasks_over45:
+    label: TEAMS Tasks Over 45 Days [Unresolved]
+    table: over45
+    variable: over45
+
+tasks_mttr:
+    label: TEAMS Tasks Mean Time to Resolve [Days]
+    table: mttr
+    variable: mttr
+
+# --- Health Metrics ----------------------------
+# --- Maintenance Health Metrics ----------------
+health_metrics:
+    label: NULL
+    table: NULL
+    s3table:
+    variable: NULL
+    weight: NULL
+    data_type: NULL
+    highlight_color: "#998200"
+    fill_color: "#FFF099"
+    goal: NULL
+    hourly_table: NULL
+    has_weekly: False
+    peak_only: False
+
+maint_percent_health:
+    label: Percent Health
+    table: maint_plot
+    variable: Percent Health
+    data_type: percent
+
+maint_missing_data:
+    label: Missing Data
+    table: maint_plot
+    variable: Missing Data
+    data_type: percent
+
+du_score:
+    label: Detection Uptime Score
+    table: maint_plot
+    variable: Detection Uptime Score
+    data_type: integer
+
+pau_score:
+    label: Ped Actuation Uptime Score
+    table: maint_plot
+    variable: Ped Actuation Uptime Score
+    data_type: integer
+
+cu_score:
+    label: Comm Uptime Score
+    table: maint_plot
+    variable: Comm Uptime Score
+    data_type: integer
+
+cctv_score:
+    label: CCTV Uptime Score
+    table: maint_plot
+    variable: CCTV Uptime Score
+    data_type: integer
+
+flash_score:
+    label: Flash Events Score
+    table: maint_plot
+    variable: Flash Events Score
+    data_type: integer
+
+du_health:
+    label: Detection Uptime
+    data_type: percent
+    table: maint_plot
+    variable: Detection Uptime
+
+pau_health:
+    label: Ped Actuation Uptime
+    data_type: percent
+    table: maint_plot
+    variable: Ped Actuation Uptime
+
+cu_health:
+    label: Comm Uptime
+    data_type: percent
+    table: maint_plot
+    variable: Comm Uptime
+
+cctv_health:
+    label: CCTV Uptime
+    data_type: percent
+    table: maint_plot
+    variable: CCTV Uptime
+
+flash_health:
+    label: Flash Events
+    table: maint_plot
+    variable: Flash Events
+
+# --- Operations Health Metrics -----------------
+ops_percent_health:
+    label: Percent Health
+    table: ops_plot
+    variable: Percent Health
+    data_type: percent
+
+ops_missing_data:
+    label: Missing Data
+    table: ops_plot
+    variable: Missing Data
+    data_type: percent
+
+pr_score:
+    label: Platoon Ratio Score
+    table: ops_plot
+    variable: Platoon Ratio Score
+    data_type: integer
+
+pd_score:
+    label: Ped Delay Score
+    table: ops_plot
+    variable: Ped Delay Score
+    data_type: integer
+
+sf_score:
+    label: Split Failures Score
+    table: ops_plot
+    variable: Split Failures Score
+    data_type: integer
+
+tti_score:
+    label: Travel Time Index Score
+    table: ops_plot
+    variable: Travel Time Index Score
+    data_type: integer
+
+bi_score:
+    label: Buffer Index Score
+    table: ops_plot
+    variable: Buffer Index Score
+    data_type: integer
+
+pr_health:
+    label: Platoon Ratio
+    table: ops_plot
+    variable: Platoon Ratio
+    data_type: decimal
+
+pd_health:
+    label: Ped Delay
+    table: ops_plot
+    variable: Ped Delay
+    data_type: integer
+
+sf_health:
+    label: Split Failures
+    table: ops_plot
+    variable: Split Failures
+    data_type: percent
+
+tti_health:
+    label: Travel Time Index
+    table: ops_plot
+    variable: Travel Time Index
+    data_type: decimal
+
+bi_health:
+    label: Buffer Index
+    table: ops_plot
+    variable: Buffer Index
+    data_type: decimal
+
+# --- Safety Health Metrics ---------------------
+safety_percent_health:
+    label: Percent Health
+    table: safety_plot
+    variable: Percent Health
+    data_type: percent
+
+safety_missing_data:
+    label: Missing Data
+    table: safety_plot
+    variable: Missing Data
+    data_type: percent
+
+
+bpsi_score:
+    label: Ped Injury Exposure Index Score
+    table: safety_plot
+    variable: Ped Injury Exposure Index Score
+    data_type: integer
+
+rsi_score:
+    label: High Speed Index Score
+    table: safety_plot
+    variable: High Speed Index Score
+    data_type: integer
+
+cri_score:
+    label: Crash Rate Index Score
+    table: safety_plot
+    variable: Crash Rate Index Score
+    data_type: integer
+
+kabco_score:
+    label: KABCO Crash Severity Index Score
+    table: safety_plot
+    variable: KABCO Crash Severity Index Score
+    data_type: decimal
+
+bpsi_health:
+    label: Ped Injury Exposure Index
+    table: safety_plot
+    variable: Ped Injury Exposure Index
+    data_type: decimal
+
+rsi_health:
+    label: High Speed Index
+    table: safety_plot
+    variable: High Speed Index
+    data_type: decimal
+
+cri_health:
+    label: Crash Rate Index
+    table: safety_plot
+    variable: Crash Rate Index
+    data_type: integer
+
+kabco_health:
+    label: KABCO Crash Severity Index
+    table: safety_plot
+    variable: KABCO Crash Severity Index
+    data_type: decimal
+
+
+template:
+    label:
+    table:
+    s3table:
+    variable:
+    weight:
+    data_type:
+    highlight_color:
+    fill_color:
+    goal:
+    hourly_table:
+    daily_table:
+    daily_variable:
+    has_weekly:
+    peak_only:
+
