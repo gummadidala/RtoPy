@@ -11,6 +11,7 @@ import os
 # from utilities import keep_trying, convert_to_utc, get_objectkey
 from utilities import keep_trying, convert_to_utc
 from database_functions import add_athena_partition
+from botocore.config import Config
 
 class S3ParquetHandler:
     def __init__(self, aws_access_key=None, aws_secret_key=None, region='us-east-1'):
@@ -19,7 +20,14 @@ class S3ParquetHandler:
             aws_secret_access_key=aws_secret_key,
             region_name=region
         )
-        self.s3_client = self.session.client('s3')
+        boto_config = Config(
+            retries = {
+                'max_attempts': 10,
+                'mode': 'standard'
+            },
+            max_pool_connections=500  # Increase this number as needed
+        )
+        self.s3_client = self.session.client('s3', config=boto_config)
 
 def s3_upload_parquet(df, date_, filename, bucket, table_name, conf_athena):
     """Upload dataframe as parquet to S3"""

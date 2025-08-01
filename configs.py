@@ -368,7 +368,8 @@ def get_det_config_factory(bucket: str, folder: str):
     Factory function to create detector configuration getter
     
     Args:
-        bucket: S3 bucket name
+        bu
+        cket: S3 bucket name
         folder: S3 folder name for detector configs
     
     Returns:

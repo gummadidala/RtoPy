@@ -9,6 +9,7 @@ import json
 from s3_parquet_io import s3_read_parquet
 import awswrangler as wr
 import boto3
+from botocore.config import Config
 
 def points_to_line(data, long_col, lat_col, id_field=None, sort_field=None):
     """Convert points to line geometry"""
@@ -135,8 +136,15 @@ def get_signals_sp(bucket, corridors):
     
     # Get most recent intersections data
     try:
+        boto_config = Config(
+            retries = {
+                'max_attempts': 10,
+                'mode': 'standard'
+            },
+            max_pool_connections=500  # Increase this number as needed
+        )
         session = boto3.Session()
-        bucket_objects = session.client('s3').list_objects_v2(
+        bucket_objects = session.client('s3', config=boto_config).list_objects_v2(
             Bucket=bucket,
             Prefix='maxv_atspm_intersections'
         )

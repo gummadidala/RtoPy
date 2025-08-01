@@ -12,71 +12,91 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.dataset as ds
 
+import boto3
+from botocore.config import Config
+#Patch boto3.Session to enforce custom botocore Config
+class PatchedSession(boto3.Session):
+    def client(self, *args, **kwargs):
+        kwargs["config"] = boto_config
+        return super().client(*args, **kwargs)
+
+# Global botocore config with increased pool size
+boto_config = Config(
+    retries={
+        'max_attempts': 10,
+        'mode': 'standard'
+    },
+    max_pool_connections=200  # Increased pool size
+)
+
 def get_counts2(date_, bucket, conf_athena, uptime=True, counts=True):
-    """Get counts data for a specific date"""
-    
+    """Get counts data for a specific date and upload to S3 in Parquet format."""
+
     date_str = date_.strftime('%Y-%m-%d') if hasattr(date_, 'strftime') else str(date_)
-    
+
     try:
-        # Query to get counts data from Athena
+        # SQL query for Athena
         query = f"""
-        SELECT SignalID, CallPhase, Detector, Timeperiod, 
-               EventCode, EventParam
+        SELECT DISTINCT timestamp, signalid, eventcode, eventparam
         FROM {conf_athena['database']}.{conf_athena['atspm_table']}
         WHERE date = '{date_str}'
-        AND EventCode IN (1, 82)  -- Detector events
         """
-        
-        session = boto3.Session(
+
+        # Create patched boto3 session with increased pool size
+        athena_session = PatchedSession(
             aws_access_key_id=conf_athena.get('uid'),
             aws_secret_access_key=conf_athena.get('pwd')
         )
-        
+
+        # Run Athena query using awswrangler
         df = wr.athena.read_sql_query(
             sql=query,
             database=conf_athena['database'],
             s3_output=conf_athena['staging_dir'],
-            boto3_session=session
+            boto3_session=athena_session,
+            ctas_approach=False
         )
-        
+
         if df.empty:
             print(f"No data found for {date_str}")
             return
-        
+
         # Process counts
         if counts:
             counts_1hr = process_counts_hourly(df, date_str)
             counts_15min = process_counts_15min(df, date_str)
-            
-            # Upload to S3
+
             s3_upload_parquet_date_split(
                 counts_1hr,
                 prefix="counts_1hr",
                 bucket=bucket,
-                table_name="counts_1hr", 
-                conf_athena=conf_athena
+                table_name="counts_1hr",
+                conf_athena=conf_athena,
+                boto3_session=athena_session
             )
-            
+
             s3_upload_parquet_date_split(
                 counts_15min,
-                prefix="counts_15min", 
+                prefix="counts_15min",
                 bucket=bucket,
                 table_name="counts_15min",
-                conf_athena=conf_athena
+                conf_athena=conf_athena,
+                boto3_session=athena_session
             )
-        
+
         # Process uptime
         if uptime:
             uptime_data = process_detector_uptime(df, date_str)
-            
+
             s3_upload_parquet_date_split(
                 uptime_data,
                 prefix="detector_uptime",
                 bucket=bucket,
                 table_name="detector_uptime",
-                conf_athena=conf_athena
+                conf_athena=conf_athena,
+                boto3_session=athena_session
             )
-            
+
     except Exception as e:
         print(f"Error processing counts for {date_str}: {e}")
         raise

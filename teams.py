@@ -17,8 +17,17 @@ def get_teams_locations(locations_df, conf):
     
     # Get signal data
     try:
+        from botocore.config import Config
+
+        boto_config = Config(
+            retries = {
+                'max_attempts': 10,
+                'mode': 'standard'
+            },
+            max_pool_connections=500  # Increase this number as needed
+        )
         session = boto3.Session()
-        bucket_objects = session.client('s3').list_objects_v2(
+        bucket_objects = session.client('s3', config=boto_config).list_objects_v2(
             Bucket=conf['bucket'],
             Prefix='config/maxv_atspm_intersections'
         )
@@ -220,7 +229,16 @@ def get_teams_tasks_from_s3(bucket, archived_tasks_prefix, current_tasks_key, re
     
     # Get archived tasks
     try:
-        bucket_objects = session.client('s3').list_objects_v2(
+        from botocore.config import Config
+
+        boto_config = Config(
+            retries = {
+                'max_attempts': 10,
+                'mode': 'standard'
+            },
+            max_pool_connections=500  # Increase this number as needed
+        )
+        bucket_objects = session.client('s3', config=boto_config).list_objects_v2(
             Bucket=bucket,
             Prefix=archived_tasks_prefix
         )

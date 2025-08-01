@@ -20,6 +20,8 @@ from botocore.exceptions import ClientError
 from pyathena import connect
 # from pyathena.sqlalchemy import AthenaDialect
 # import awswrangler as wr
+import boto3
+from botocore.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -320,13 +322,19 @@ def debug_athena_connection(conf_athena: Dict[str, str]):
     
     # Check AWS credentials
     try:
-        import boto3
+        boto_config = Config(
+            retries = {
+                'max_attempts': 10,
+                'mode': 'standard'
+            },
+            max_pool_connections=500  # Increase this number as needed
+        )
         session = boto3.Session(
             aws_access_key_id=conf_athena.get('uid'),
             aws_secret_access_key=conf_athena.get('pwd'),
             region_name=conf_athena.get('region', os.getenv('AWS_DEFAULT_REGION', 'us-east-1'))
         )
-        athena_client = session.client('athena')
+        athena_client = session.client('athena', config=boto_config)
         print("✓ AWS credentials valid")
         
         # Test Athena access

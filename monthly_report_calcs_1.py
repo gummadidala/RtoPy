@@ -30,7 +30,7 @@ def run_async_scripts(conf: dict):
         conf: Configuration dictionary
     """
     
-    python_env = "python"
+    python_env = "C:\\Users\\kogum\\Desktop\\JobSupport\\achyuth\\server-env\\Scripts\\python.exe"
     
     scripts_to_run = []
     
@@ -622,7 +622,7 @@ def main():
         process_counts(conf, start_date, end_date, usable_cores)
         
         # Process counts-based measures
-        get_counts_based_measures(month_abbrs, conf, end_date, usable_cores)
+        # get_counts_based_measures(month_abbrs, conf, end_date, usable_cores)
         
         # Monitor async processes
         logger.info("Checking status of async processes...")
