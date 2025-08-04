@@ -38,11 +38,6 @@ from counts import s3_upload_parquet_date_split
 from utilities import keep_trying
 from monthly_report_functions import parallel_process_dates
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 def load_init_variables():
@@ -600,7 +595,42 @@ def main():
         logger.error(f"Error in main execution: {e}")
         return False
 
+def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
+    """
+    Setup logging configuration
+    
+    Args:
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+        log_file: Optional log file path
+    """
+    
+    # Convert string level to logging constant
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    
+    # Setup root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    root_logger.addHandler(console_handler)
+    
+    # Setup file handler if specified
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
 if __name__ == "__main__":
+    setup_logging("INFO", "monthly_report_calcs_2.log")
     try:
         success = main()
         sys.exit(0 if success else 1)
