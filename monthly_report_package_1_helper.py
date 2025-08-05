@@ -1444,14 +1444,146 @@ def get_cor_monthly_ti_by_day(df, cor_monthly_vph, all_corridors):
 def get_daily_cctv_uptime(database, table_name, cam_config, start_date):
     """Get daily CCTV uptime"""
     try:
-        # This is a placeholder - would need actual database connection
-        # For now, return empty DataFrame
-        logger.warning(f"Database connection not implemented for {table_name}")
-        return pd.DataFrame()
+        # Import database connection function
+        from configs import get_athena_connection
         
+        # Get database connection
+        conn = get_athena_connection(database)
+        
+        # Query the database table
+        query = f"""
+        SELECT cameraid, date
+        FROM {table_name}
+        WHERE size > 0 AND date >= '{start_date}'
+        """
+        
+        # Execute query and get results
+        import pandas as pd
+        from sqlalchemy import text
+        
+        result_df = pd.read_sql(text(query), conn)
+        
+        if result_df.empty:
+            logger.warning(f"No CCTV data found in {table_name} for date >= {start_date}")
+            return pd.DataFrame()
+        
+        # Transform the data
+        cctv_data = result_df.copy()
+        cctv_data['CameraID'] = cctv_data['cameraid'].astype('category')
+        cctv_data['Date'] = pd.to_datetime(cctv_data['date']).dt.date
+        cctv_data = cctv_data.drop(columns=['cameraid', 'date'])
+        
+        # Add uptime indicators
+        cctv_data['up'] = 1
+        cctv_data['num'] = 1
+        cctv_data = cctv_data.drop_duplicates()
+        
+        # Ensure cam_config has the right column types
+        if not cam_config.empty:
+            cam_config = cam_config.copy()
+            cam_config['CameraID'] = cam_config['CameraID'].astype('category')
+            
+            # Right join with camera config to include all available cameras
+            merged_data = cam_config.merge(
+                cctv_data, 
+                on='CameraID', 
+                how='left'
+            )
+            
+            # Fill missing values
+            merged_data['Date'] = merged_data['Date'].fillna(pd.to_datetime(start_date).date())
+            merged_data['up'] = merged_data['up'].fillna(0)
+            merged_data['num'] = merged_data['num'].fillna(1)
+            
+            # Expand to include all available cameras on all days
+            # Get date range
+            min_date = pd.to_datetime(start_date).date()
+            max_date = merged_data['Date'].max()
+            if pd.isna(max_date):
+                max_date = min_date
+            
+            # Create complete date range
+            date_range = pd.date_range(start=min_date, end=max_date, freq='D').date
+            
+            # Create all combinations of cameras and dates
+            cameras = cam_config['CameraID'].unique()
+            all_combinations = []
+            
+            for camera in cameras:
+                for date in date_range:
+                    all_combinations.append({'CameraID': camera, 'Date': date})
+            
+            complete_df = pd.DataFrame(all_combinations)
+            complete_df['CameraID'] = complete_df['CameraID'].astype('category')
+            
+            # Merge with actual data
+            final_data = complete_df.merge(
+                merged_data.drop(columns=['Location', 'As_of_Date'] if 'Location' in merged_data.columns else []),
+                on=['CameraID', 'Date'],
+                how='left'
+            )
+            
+            # Fill missing uptime data
+            final_data['up'] = final_data['up'].fillna(0)
+            final_data['num'] = final_data['num'].fillna(1)
+            
+            # Calculate uptime
+            final_data['uptime'] = final_data['up'] / final_data['num']
+            
+            # Filter by As_of_Date if available in cam_config
+            if 'As_of_Date' in cam_config.columns:
+                final_data = final_data.merge(
+                    cam_config[['CameraID', 'As_of_Date']], 
+                    on='CameraID', 
+                    how='left'
+                )
+                final_data['As_of_Date'] = pd.to_datetime(final_data['As_of_Date']).dt.date
+                final_data = final_data[final_data['Date'] >= final_data['As_of_Date']]
+                final_data = final_data.drop(columns=['As_of_Date'])
+            
+            # Add other config columns if available
+            config_cols = ['Corridor', 'Description', 'Location']
+            available_config_cols = [col for col in config_cols if col in cam_config.columns]
+            
+            if available_config_cols:
+                final_data = final_data.merge(
+                    cam_config[['CameraID'] + available_config_cols],
+                    on='CameraID',
+                    how='left'
+                )
+                
+                # Convert categorical columns
+                for col in available_config_cols:
+                    if col in final_data.columns:
+                        final_data[col] = final_data[col].astype('category')
+            
+            # Reorder columns
+            column_order = ['CameraID', 'Date', 'up', 'num', 'uptime']
+            column_order.extend([col for col in final_data.columns if col not in column_order])
+            final_data = final_data[column_order]
+            
+            # Ensure proper data types
+            final_data['CameraID'] = final_data['CameraID'].astype('category')
+            final_data['Date'] = pd.to_datetime(final_data['Date'])
+            
+            logger.info(f"Retrieved CCTV uptime data for {len(final_data)} camera-days")
+            return final_data
+            
+        else:
+            # If no camera config, just return the raw data with uptime calculation
+            cctv_data['uptime'] = cctv_data['up'] / cctv_data['num']
+            cctv_data['Date'] = pd.to_datetime(cctv_data['Date'])
+            
+            logger.info(f"Retrieved CCTV uptime data for {len(cctv_data)} camera-days (no config)")
+            return cctv_data
+        
+    except ImportError as e:
+        logger.error(f"Could not import required modules: {e}")
+        return pd.DataFrame()
     except Exception as e:
         logger.error(f"Error getting daily CCTV uptime: {e}")
         return pd.DataFrame()
+
 
 def get_weekly_avg_by_day_cctv(df):
     """Get weekly average by day for CCTV"""
@@ -1475,17 +1607,6 @@ def get_weekly_avg_by_day_cctv(df):
         return pd.DataFrame()
 
 # Teams/Activities functions
-def get_teams_tasks_from_s3_notinscope(bucket, archived_tasks_prefix, current_tasks_key, report_start_date):
-    """Get teams tasks from S3"""
-    try:
-        # Placeholder implementation
-        logger.warning("Teams tasks S3 connection not implemented")
-        return pd.DataFrame()
-        
-    except Exception as e:
-        logger.error(f"Error getting teams tasks from S3: {e}")
-        return pd.DataFrame()
-
 def tidy_teams_tasks(teams, bucket, corridors, replicate=True):
     """Tidy teams tasks data"""
     try:
@@ -1586,13 +1707,58 @@ def get_cor_monthly_flash(df, corridors):
 def get_det_config(date):
     """Get detector configuration for a specific date"""
     try:
-        # Placeholder implementation
-        logger.warning(f"Detector config not implemented for date {date}")
-        return pd.DataFrame(columns=['SignalID', 'CallPhase', 'Detector', 'ApproachDesc', 'LaneNumber'])
+        from configs import get_det_config_factory
         
+        # Get configuration - replace with your actual config loading method
+        # This should match your conf object from the main script
+        conf = {
+            'bucket': 'your-s3-bucket-name',  # Replace with actual bucket name
+        }
+        
+        # Create the detector config function using the factory
+        get_det_config_func = get_det_config_factory(conf['bucket'], 'atspm_det_config_good')
+        
+        # Get detector configuration for the specified date
+        det_config = get_det_config_func(date)
+        
+        if det_config.empty:
+            logger.warning(f"No detector config found for date {date}")
+            return pd.DataFrame(columns=['SignalID', 'CallPhase', 'Detector', 'ApproachDesc', 'LaneNumber'])
+        
+        # Ensure required columns exist and have proper data types
+        det_config['SignalID'] = det_config['SignalID'].astype(str)
+        det_config['Detector'] = det_config['Detector'].astype(str)
+        det_config['CallPhase'] = det_config['CallPhase'].astype(str)
+        
+        # Add ApproachDesc if missing (map from MovementType or DetectionHardware)
+        if 'ApproachDesc' not in det_config.columns:
+            if 'MovementType' in det_config.columns:
+                det_config['ApproachDesc'] = det_config['MovementType'].fillna('')
+            elif 'LaneType' in det_config.columns:
+                det_config['ApproachDesc'] = det_config['LaneType'].fillna('')
+            else:
+                det_config['ApproachDesc'] = ''
+        
+        # Ensure LaneNumber exists
+        if 'LaneNumber' not in det_config.columns:
+            det_config['LaneNumber'] = 0
+        
+        # Convert LaneNumber to integer, handling NaN values
+        det_config['LaneNumber'] = pd.to_numeric(det_config['LaneNumber'], errors='coerce').fillna(0).astype(int)
+        
+        # Select and return only the required columns
+        required_columns = ['SignalID', 'CallPhase', 'Detector', 'ApproachDesc', 'LaneNumber']
+        result = det_config[required_columns].copy()
+        
+        logger.info(f"Retrieved {len(result)} detector configurations for {date}")
+        return result
+        
+    except ImportError as e:
+        logger.error(f"Could not import configs module: {e}")
+        return pd.DataFrame(columns=['SignalID', 'CallPhase', 'Detector', 'ApproachDesc', 'LaneNumber'])
     except Exception as e:
-        logger.error(f"Error getting detector config: {e}")
-        return pd.DataFrame()
+        logger.error(f"Error getting detector config for {date}: {e}")
+        return pd.DataFrame(columns=['SignalID', 'CallPhase', 'Detector', 'ApproachDesc', 'LaneNumber'])
 
 # Utility functions
 def convert_to_utc(df):
@@ -1630,75 +1796,6 @@ def addtoRDS(df, filename, metric_type, report_start_date, calcs_start_date):
     except Exception as e:
         logger.error(f"Error saving to RDS: {e}")
 
-# AWS S3 functions (placeholders - would need actual boto3 implementation)
-def s3_read_parquet_parallel_notinscope(bucket, table_name, start_date, end_date, signals_list=None, 
-                            callback=None, parallel=True):
-    """Read parquet files from S3 in parallel"""
-    try:
-        logger.warning(f"S3 read not fully implemented for {table_name}")
-        
-        # Placeholder - return empty DataFrame with expected structure
-        if table_name == "detector_uptime_pd":
-            return pd.DataFrame(columns=['SignalID', 'Date', 'uptime'])
-        elif table_name == "counts_ped_1hr":
-            return pd.DataFrame(columns=['SignalID', 'Date', 'Detector', 'CallPhase', 'Timeperiod', 'vol'])
-        elif table_name == "vehicles_pd":
-            return pd.DataFrame(columns=['SignalID', 'Date', 'CallPhase', 'vpd'])
-        elif table_name == "vehicles_ph":
-            return pd.DataFrame(columns=['SignalID', 'Date', 'CallPhase', 'Timeperiod', 'vph'])
-        else:
-            return pd.DataFrame()
-        
-    except Exception as e:
-        logger.error(f"Error reading from S3: {e}")
-        return pd.DataFrame()
-
-def s3_upload_parquet_date_split(df, bucket, prefix, table_name, conf_athena, parallel=False):
-    """Upload parquet files to S3 with date partitioning"""
-    try:
-        logger.warning(f"S3 upload not implemented for {table_name}")
-        
-    except Exception as e:
-        logger.error(f"Error uploading to S3: {e}")
-
-def s3write_using(FUN, df, object_name, bucket, opts=None):
-    """Write data to S3 using specified function"""
-    try:
-        logger.warning(f"S3 write not implemented for {object_name}")
-        
-    except Exception as e:
-        logger.error(f"Error writing to S3: {e}")
-
-def s3read_using_notinscope(read_func, bucket, object_name):
-    """Read data from S3 using specified function"""
-    try:
-        logger.warning(f"S3 read not implemented for {object_name}")
-        return pd.DataFrame()
-        
-    except Exception as e:
-        logger.error(f"Error reading from S3: {e}")
-        return pd.DataFrame()
-
-def get_bucket(bucket, prefix):
-    """Get S3 bucket contents"""
-    try:
-        logger.warning(f"S3 bucket listing not implemented")
-        return []
-        
-    except Exception as e:
-        logger.error(f"Error getting bucket contents: {e}")
-        return []
-
-def get_bucket_df(bucket, prefix):
-    """Get S3 bucket contents as DataFrame"""
-    try:
-        logger.warning(f"S3 bucket listing not implemented")
-        return pd.DataFrame()
-        
-    except Exception as e:
-        logger.error(f"Error getting bucket contents: {e}")
-        return pd.DataFrame()
-
 # Additional utility functions that may be missing
 def filter_by_signals(df, signals_list):
     """Filter DataFrame by signals list"""
@@ -1729,16 +1826,6 @@ def calculate_delta_percentage(df, value_col, group_cols):
     except Exception as e:
         logger.error(f"Error calculating delta percentage: {e}")
         return df
-
-def get_rsu_uptime(start_date):
-    """Get RSU uptime data"""
-    try:
-        logger.warning("RSU uptime not implemented")
-        return pd.DataFrame(columns=['SignalID', 'Date', 'uptime', 'total'])
-        
-    except Exception as e:
-        logger.error(f"Error getting RSU uptime: {e}")
-        return pd.DataFrame()
 
 # Helper function for reading Excel files
 def read_excel(*args, **kwargs):

@@ -9,6 +9,7 @@ covering 26 different traffic metrics and performance indicators.
 
 import sys
 import os
+import yaml
 import pandas as pd
 import numpy as np
 import pickle
@@ -68,9 +69,10 @@ def initialize_config():
         
         # Load configuration data
         config_data = load_configuration_data()
-        
+        conf, aws_conf = load_yaml_configuration()
         # Add dates to config_data
         config_data.update(dates)
+        config_data.update({'conf': conf, 'aws_conf': aws_conf})
         
         logger.info("Configuration initialized successfully")
         return config_data
@@ -132,6 +134,41 @@ def initialize_dates():
     except Exception as e:
         logger.error(f"Error initializing dates: {e}")
         return {}
+
+def load_yaml_configuration() -> Dict[str, Any]:
+    """
+    Load configuration from YAML files
+    
+    Returns:
+        Configuration dictionary
+    """
+    
+    try:
+        # Load main configuration
+        with open("Monthly_Report.yaml", 'r') as file:
+            conf = yaml.safe_load(file)
+        
+        # Load AWS configuration
+        with open("Monthly_Report_AWS.yaml", 'r') as file:
+            aws_conf = yaml.safe_load(file)
+        
+        # Set environment variables
+        os.environ['AWS_ACCESS_KEY_ID'] = aws_conf['AWS_ACCESS_KEY_ID']
+        os.environ['AWS_SECRET_ACCESS_KEY'] = aws_conf['AWS_SECRET_ACCESS_KEY']
+        os.environ['AWS_DEFAULT_REGION'] = aws_conf['AWS_DEFAULT_REGION']
+        
+        # Update Athena configuration
+        conf['athena']['uid'] = aws_conf['AWS_ACCESS_KEY_ID']
+        conf['athena']['pwd'] = aws_conf['AWS_SECRET_ACCESS_KEY']
+        
+        return conf, aws_conf
+    
+    except FileNotFoundError as e:
+        logger.error(f"Configuration file not found: {e}")
+        return {}, {}
+    except yaml.YAMLError as e:
+        logger.error(f"Error parsing YAML: {e}")
+        return {}, {}
 
 def load_configuration_data():
     """Load corridor and camera configuration data"""
