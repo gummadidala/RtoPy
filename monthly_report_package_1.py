@@ -441,7 +441,7 @@ def process_watchdog_alerts(dates, config_data):
             # Get detector configuration for each unique date
             det_config_list = []
             for date_val in sorted(bad_det['Date'].unique()):
-                config = get_det_config(date_val)
+                config = get_det_config(date_val, config_data['conf'])
                 if not config.empty:
                     config['Date'] = date_val
                     det_config_list.append(config)

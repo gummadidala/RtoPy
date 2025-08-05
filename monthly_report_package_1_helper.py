@@ -1704,16 +1704,13 @@ def get_cor_monthly_flash(df, corridors):
         return pd.DataFrame()
 
 # Configuration functions
-def get_det_config(date):
+def get_det_config(date, conf):
     """Get detector configuration for a specific date"""
     try:
         from configs import get_det_config_factory
         
         # Get configuration - replace with your actual config loading method
         # This should match your conf object from the main script
-        conf = {
-            'bucket': 'your-s3-bucket-name',  # Replace with actual bucket name
-        }
         
         # Create the detector config function using the factory
         get_det_config_func = get_det_config_factory(conf['bucket'], 'atspm_det_config_good')
