@@ -25,6 +25,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import calculation functions
 from monthly_report_package_1_helper import *
+from s3_parquet_io import s3_read_parquet_parallel, s3read_using
+from teams import get_teams_tasks_from_s3
 
 # Try to import additional modules
 try:

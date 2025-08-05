@@ -1475,7 +1475,7 @@ def get_weekly_avg_by_day_cctv(df):
         return pd.DataFrame()
 
 # Teams/Activities functions
-def get_teams_tasks_from_s3(bucket, archived_tasks_prefix, current_tasks_key, report_start_date):
+def get_teams_tasks_from_s3_notinscope(bucket, archived_tasks_prefix, current_tasks_key, report_start_date):
     """Get teams tasks from S3"""
     try:
         # Placeholder implementation
@@ -1631,7 +1631,7 @@ def addtoRDS(df, filename, metric_type, report_start_date, calcs_start_date):
         logger.error(f"Error saving to RDS: {e}")
 
 # AWS S3 functions (placeholders - would need actual boto3 implementation)
-def s3_read_parquet_parallel(bucket, table_name, start_date, end_date, signals_list=None, 
+def s3_read_parquet_parallel_notinscope(bucket, table_name, start_date, end_date, signals_list=None, 
                             callback=None, parallel=True):
     """Read parquet files from S3 in parallel"""
     try:
@@ -1669,7 +1669,7 @@ def s3write_using(FUN, df, object_name, bucket, opts=None):
     except Exception as e:
         logger.error(f"Error writing to S3: {e}")
 
-def s3read_using(read_func, bucket, object_name):
+def s3read_using_notinscope(read_func, bucket, object_name):
     """Read data from S3 using specified function"""
     try:
         logger.warning(f"S3 read not implemented for {object_name}")
