@@ -2083,3 +2083,88 @@ def safe_dropna_corridor(df, log_prefix=""):
         logger.warning(f"{log_prefix}: DataFrame missing 'Corridor' column. Available columns: {list(df.columns)}")
         return df
 
+def ensure_metric_column(df, metric_name, candidates=None):
+    """
+    Ensure DataFrame has a specific metric column
+    
+    Args:
+        df: DataFrame to check
+        metric_name: Name of the required metric column
+        candidates: List of alternative column names to check
+    
+    Returns:
+        DataFrame with the metric column
+    """
+    if df.empty:
+        return df
+    
+    # If metric already exists, we're good
+    if metric_name in df.columns:
+        return df
+    
+    # Use provided candidates or common alternatives
+    if candidates is None:
+        candidates = [
+            metric_name.capitalize(),
+            metric_name.upper(),
+            metric_name.lower(),
+            f"{metric_name}_count",
+            f"{metric_name}Count",
+            "count", "Count", "events", "Events"
+        ]
+    
+    for col in candidates:
+        if col in df.columns:
+            df = df.copy()
+            df[metric_name] = df[col]
+            logger.info(f"Created {metric_name} column from {col}")
+            return df
+    
+    # If no suitable column found, log available columns
+    logger.error(f"No suitable {metric_name} column found. Available columns: {list(df.columns)}")
+    
+    # Create a default column with zeros
+    df = df.copy()
+    df[metric_name] = 0
+    logger.warning(f"Created default {metric_name} column with zeros")
+    return df
+
+def ensure_flash_column(df):
+    """
+    Ensure DataFrame has a 'flash' column
+    
+    Args:
+        df: DataFrame to check
+    
+    Returns:
+        DataFrame with 'flash' column
+    """
+    if df.empty:
+        return df
+    
+    # If flash already exists, we're good
+    if 'flash' in df.columns:
+        return df
+    
+    # Look for alternative flash event column names
+    flash_candidates = [
+        'Flash', 'flash_events', 'Flash_Events', 'FlashEvents', 
+        'flash_event', 'Flash_Event', 'events', 'Events',
+        'flash_count', 'Flash_Count', 'count', 'Count'
+    ]
+    
+    for col in flash_candidates:
+        if col in df.columns:
+            df = df.copy()
+            df['flash'] = df[col]
+            logger.info(f"Created flash column from {col}")
+            return df
+    
+    # If no flash column found, check available columns
+    logger.error(f"No suitable flash column found. Available columns: {list(df.columns)}")
+    
+    # Create a default flash column with zeros if no suitable column found
+    df = df.copy()
+    df['flash'] = 0
+    logger.warning("Created default flash column with zeros")
+    return df

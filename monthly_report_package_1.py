@@ -1841,16 +1841,29 @@ def process_flash_events(dates, config_data):
             fe = clean_signal_ids(fe)
             fe = ensure_datetime_column(fe, 'Date')
             
+            # Define flash event column candidates
+            flash_candidates = [
+                'Flash', 'flash_events', 'Flash_Events', 'FlashEvents', 
+                'flash_event', 'Flash_Event', 'events', 'Events',
+                'flash_count', 'Flash_Count'
+            ]
+            fe = ensure_metric_column(fe, 'flash', flash_candidates)
+            
             # Monthly flash events for bar charts and % change
             monthly_flash = get_monthly_flashevent(fe)
             
-            # Group into corridors
-            cor_monthly_flash = get_cor_monthly_flash(monthly_flash, config_data['corridors'])
-            
-            # Subcorridors
-            sub_monthly_flash = get_cor_monthly_flash(
-                monthly_flash, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
+            if not monthly_flash.empty:
+                # Group into corridors
+                cor_monthly_flash = get_cor_monthly_flash(monthly_flash, config_data['corridors'])
+                
+                # Subcorridors
+                sub_monthly_flash = safe_dropna_corridor(
+                    get_cor_monthly_flash(monthly_flash, config_data['subcorridors']),
+                    "sub_monthly_flash"
+                )
+            else:
+                cor_monthly_flash = pd.DataFrame()
+                sub_monthly_flash = pd.DataFrame()
             
             # Save results
             save_data(monthly_flash, "monthly_flash.pkl")
@@ -1858,6 +1871,8 @@ def process_flash_events(dates, config_data):
             save_data(sub_monthly_flash, "sub_monthly_flash.pkl")
             
             logger.info("Flash events processing completed successfully")
+        else:
+            logger.warning("No flash events data found")
         
     except Exception as e:
         logger.error(f"Error in flash events processing: {e}")
