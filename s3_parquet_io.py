@@ -96,6 +96,7 @@ def s3_read_parquet(bucket, object_key, date_=None):
     
     try:
         s3_path = f"s3://{bucket}/{object_key}"
+        print(f"Reading parquet from S3: {s3_path}")
         df = wr.s3.read_parquet(path=s3_path)
         
         # Remove columns starting with '__'

@@ -84,7 +84,7 @@ def calculate_dates(report_end_date):
         report_start_date = report_end_date.replace(day=1)
         
         # Use the same logic as R for calcs_start_date
-        if conf.get('calcs_start_date') == "auto":
+        if conf.calcs_start_date == "auto":
             # This would need implementation of get_date_from_string equivalent
             first_missing_date = get_first_missing_date_from_db(
                 table_pattern="sig_dy_cu", 
@@ -94,7 +94,7 @@ def calculate_dates(report_end_date):
             if first_missing_date.day <= 7:
                 calcs_start_date = calcs_start_date - relativedelta(months=1)
         else:
-            calcs_start_date = conf.get('calcs_start_date', report_start_date - relativedelta(months=18))
+            calcs_start_date =  report_start_date - relativedelta(months=18)
         
         # NOW use the same logic as R
         wk_calcs_start_date = round_to_tuesday(calcs_start_date)
@@ -134,7 +134,8 @@ def get_first_missing_date_from_db(table_pattern: str, exceptions: int = 0):
     try:
         # This would need to be implemented based on your database structure
         # For now, return a reasonable default
-        return date.today() - relativedelta(months=6)
+        return date.today() - relativedelta(months=1)
+        # return date.today() - relativedelta(months=6)
         
     except Exception as e:
         logger.error(f"Error getting first missing date: {e}")
@@ -189,6 +190,8 @@ class Config:
         conf, aws_conf = load_yaml_configuration()
         self.bucket = conf.get('bucket', '')
         self.athena = conf.get('athena', {})
+        self.calcs_start_date = conf.get('calcs_start_date', 'auto')
+        self.report_end_date = conf.get('report_end_date', 'yesterday')
 
 # Initialize configuration
 conf = Config()
