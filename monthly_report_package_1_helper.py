@@ -1445,7 +1445,7 @@ def get_daily_cctv_uptime(database, table_name, cam_config, start_date):
     """Get daily CCTV uptime"""
     try:
         # Import database connection function
-        from configs import get_athena_connection
+        from database_functions import get_athena_connection
         
         # Get database connection
         conn = get_athena_connection(database)
