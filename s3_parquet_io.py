@@ -111,6 +111,56 @@ def s3_read_parquet(bucket, object_key, date_=None):
         print(f"Error reading parquet: {e}")
         return pd.DataFrame()
 
+def s3read_using_notinscope(func, bucket, object, **kwargs):
+    """
+    Read data from S3 using specified function with error handling
+    
+    Args:
+        func: Function to use for reading (e.g., pd.read_csv, pd.read_excel, pd.read_parquet)
+        bucket: S3 bucket name
+        object: S3 object key
+        **kwargs: Additional arguments for the reading function
+    
+    Returns:
+        DataFrame or data as returned by func
+    """
+    try:
+        s3_client = boto3.client('s3')
+        
+        # Check if object exists first
+        try:
+            s3_client.head_object(Bucket=bucket, Key=object)
+        except s3_client.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                print(f"S3 object not found: {object}")
+                return pd.DataFrame()
+            else:
+                raise
+        
+        # Get the object
+        response = s3_client.get_object(Bucket=bucket, Key=object)
+        content = response['Body'].read()
+        
+        # Handle different file types
+        if object.lower().endswith('.xlsx') or object.lower().endswith('.xls') or func == pd.read_excel:
+            # For Excel files, use BytesIO directly
+            return func(io.BytesIO(content), **kwargs)
+        elif object.lower().endswith('.parquet') or func == pd.read_parquet:
+            # For Parquet files, use BytesIO
+            return func(io.BytesIO(content), **kwargs)
+        else:
+            # For text files (CSV, etc.), try UTF-8 first, then fallback to BytesIO
+            try:
+                return func(io.StringIO(content.decode('utf-8')), **kwargs)
+            except UnicodeDecodeError:
+                logger.warning(f"UTF-8 decode failed for {object}, trying BytesIO")
+                return func(io.BytesIO(content), **kwargs)
+                
+    except Exception as e:
+        logger.error(f"Error reading from S3: {e}")
+        return pd.DataFrame()
+
+
 def s3read_using(func, bucket, object, **kwargs):
     """
     Read data from S3 using specified function with error handling
@@ -132,7 +182,7 @@ def s3read_using(func, bucket, object, **kwargs):
             s3_client.head_object(Bucket=bucket, Key=object)
         except s3_client.exceptions.ClientError as e:
             if e.response['Error']['Code'] == '404':
-                logger.warning(f"S3 object not found: {object}")
+                print(f"S3 object not found: {object}")
                 return pd.DataFrame()
             else:
                 raise
@@ -190,7 +240,6 @@ def s3read_using(func, bucket, object, **kwargs):
                 return func(data_io, **kwargs)
             
     except Exception as e:
-        logger.error(f"Error reading {object} from S3: {e}")
         return pd.DataFrame()  # Return empty DataFrame instead of raising
 
 def s3_read_qs_subprocess_enhanced(bucket, object_key):

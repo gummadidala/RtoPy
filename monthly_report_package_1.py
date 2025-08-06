@@ -1890,7 +1890,8 @@ def process_bike_ped_safety_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/bike_ped_safety_index/bpsi_sub_{d.strftime('%Y-%m-%d')}.parquet"
-                bpsi_data = s3read_using('read_parquet', bucket=conf.bucket, object=obj)
+                # FIX: Pass the function object, not string
+                bpsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not bpsi_data.empty:
                     # Remove system columns
@@ -1907,7 +1908,8 @@ def process_bike_ped_safety_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/bike_ped_safety_index/bpsi_cor_{d.strftime('%Y-%m-%d')}.parquet"
-                bpsi_data = s3read_using('read_parquet', bucket=conf.bucket, object=obj)
+                # FIX: Pass the function object, not string
+                bpsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not bpsi_data.empty:
                     # Remove system columns
@@ -1978,6 +1980,8 @@ def process_bike_ped_safety_index(dates, config_data):
                 save_data(sub_monthly_bpsi, "sub_monthly_bpsi.pkl")
             
             logger.info("Bike/Ped safety index processing completed successfully")
+        else:
+            logger.warning("No BPSI data found for the date range")
         
     except Exception as e:
         logger.error(f"Error in bike/ped safety index processing: {e}")
@@ -1995,7 +1999,8 @@ def process_relative_speed_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/relative_speed_index/rsi_sub_{d.strftime('%Y-%m-%d')}.parquet"
-                rsi_data = s3read_using('read_parquet', bucket=conf.bucket, object=obj)
+                # FIX: Pass the function object, not string
+                rsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not rsi_data.empty:
                     # Remove system columns
@@ -2011,7 +2016,8 @@ def process_relative_speed_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/relative_speed_index/rsi_cor_{d.strftime('%Y-%m-%d')}.parquet"
-                rsi_data = s3read_using('read_parquet', bucket=conf.bucket, object=obj)
+                # FIX: Pass the function object, not string
+                rsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not rsi_data.empty:
                     # Remove system columns
@@ -2081,6 +2087,8 @@ def process_relative_speed_index(dates, config_data):
                 save_data(sub_monthly_rsi, "sub_monthly_rsi.pkl")
             
             logger.info("Relative speed index processing completed successfully")
+        else:
+            logger.warning("No RSI data found for the date range")
         
     except Exception as e:
         logger.error(f"Error in relative speed index processing: {e}")
@@ -2091,118 +2099,175 @@ def process_crash_indices(dates, config_data):
     logger.info(f"{datetime.now()} Crash Indices [26 of 29 (mark1)]")
     
     try:
-        # Read crash data
+        # Read crash data - FIX: Pass function object, not string
         crashes = s3read_using(
-            'read_excel',
+            pd.read_excel,  # Function object, not string
             bucket=conf.bucket,
-            object="Collisions Dataset 2017-2019.xlsm"
+            object="Collisions Dataset 2017-2019.xlsm",
+            engine='openpyxl'  # Add engine for Excel files
         )
         
         if not crashes.empty:
-            crashes = crashes[[
-                'Signal_ID_Clean', 'Month', 'crashes_k', 'crashes_a', 'crashes_b',
-                'crashes_c', 'crashes_o', 'crashes_total', 'cost'
-            ]].rename(columns={'Signal_ID_Clean': 'SignalID'})
+            # Check if required columns exist
+            required_cols = ['Signal_ID_Clean', 'Month', 'crashes_k', 'crashes_a', 'crashes_b',
+                           'crashes_c', 'crashes_o', 'crashes_total', 'cost']
+            
+            # Check which columns actually exist
+            available_cols = [col for col in required_cols if col in crashes.columns]
+            missing_cols = [col for col in required_cols if col not in crashes.columns]
+            
+            if missing_cols:
+                logger.warning(f"Missing columns in crash data: {missing_cols}")
+                logger.info(f"Available columns: {list(crashes.columns)}")
+                
+                # Try alternative column names
+                col_mapping = {
+                    'Signal_ID_Clean': ['SignalID', 'Signal_ID', 'signal_id'],
+                    'crashes_total': ['total_crashes', 'Total_Crashes', 'crashes'],
+                    'crashes_k': ['k_crashes', 'K_Crashes'],
+                    'crashes_a': ['a_crashes', 'A_Crashes'],
+                    'crashes_b': ['b_crashes', 'B_Crashes'],
+                    'crashes_c': ['c_crashes', 'C_Crashes'],
+                    'crashes_o': ['o_crashes', 'O_Crashes'],
+                    'cost': ['Cost', 'total_cost', 'Total_Cost']
+                }
+                
+                # Map alternative column names
+                for standard_col, alternatives in col_mapping.items():
+                    if standard_col not in crashes.columns:
+                        for alt_col in alternatives:
+                            if alt_col in crashes.columns:
+                                crashes = crashes.rename(columns={alt_col: standard_col})
+                                logger.info(f"Mapped {alt_col} to {standard_col}")
+                                break
+            
+            # Select only available columns
+            final_cols = [col for col in required_cols if col in crashes.columns]
+            crashes = crashes[final_cols]
+            
+            if 'Signal_ID_Clean' in crashes.columns:
+                crashes = crashes.rename(columns={'Signal_ID_Clean': 'SignalID'})
             
             crashes = crashes.dropna()
-            crashes['SignalID'] = crashes['SignalID'].astype('category')
-            crashes['Month'] = pd.to_datetime(crashes['Month'])
             
-            # Aggregate by SignalID and Month
-            crashes = crashes.groupby(['SignalID', 'Month']).agg({
-                'crashes_k': 'sum',
-                'crashes_a': 'sum', 
-                'crashes_b': 'sum',
-                'crashes_c': 'sum',
-                'crashes_o': 'sum',
-                'crashes_total': 'sum',
-                'cost': 'sum'
-            }).reset_index()
-            
-            # Load monthly VPD
-            monthly_vpd = load_data("monthly_vpd.pkl")
-            
-            if not monthly_vpd.empty:
-                # Complete VPD data and calculate 12-month rolling average
-                date_range_vpd = pd.date_range(monthly_vpd['Month'].min(), monthly_vpd['Month'].max(), freq='MS')
-                signal_list = monthly_vpd['SignalID'].unique()
+            if not crashes.empty:
+                crashes['SignalID'] = crashes['SignalID'].astype('category')
+                crashes['Month'] = pd.to_datetime(crashes['Month'])
                 
-                complete_vpd = pd.MultiIndex.from_product([signal_list, date_range_vpd], names=['SignalID', 'Month']).to_frame(index=False)
-                monthly_vpd = complete_vpd.merge(monthly_vpd, on=['SignalID', 'Month'], how='left')
+                # Aggregate by SignalID and Month
+                agg_dict = {}
+                for col in crashes.columns:
+                    if col.startswith('crashes_') or col == 'cost':
+                        agg_dict[col] = 'sum'
                 
-                monthly_vpd = monthly_vpd.sort_values(['SignalID', 'Month'])
-                monthly_vpd['vpd12'] = monthly_vpd.groupby('SignalID')['vpd'].transform(
-                    lambda x: x.rolling(window=12, min_periods=1).mean()
-                )
+                crashes = crashes.groupby(['SignalID', 'Month']).agg(agg_dict).reset_index()
                 
-                # Calculate 36-month rolling crashes
-                complete_crashes = pd.MultiIndex.from_product([signal_list, date_range_vpd], names=['SignalID', 'Month']).to_frame(index=False)
-                monthly_36mo_crashes = complete_crashes.merge(crashes, on=['SignalID', 'Month'], how='left')
+                # Load monthly VPD
+                monthly_vpd = load_data("monthly_vpd.pkl")
                 
-                # Fill NaN with 0
-                crash_cols = ['crashes_k', 'crashes_a', 'crashes_b', 'crashes_c', 'crashes_o', 'crashes_total', 'cost']
-                monthly_36mo_crashes[crash_cols] = monthly_36mo_crashes[crash_cols].fillna(0)
-                
-                monthly_36mo_crashes = monthly_36mo_crashes.sort_values(['SignalID', 'Month'])
-                
-                # Calculate 36-month rolling sums
-                for col in crash_cols:
-                    monthly_36mo_crashes[col] = monthly_36mo_crashes.groupby('SignalID')[col].transform(
-                        lambda x: x.rolling(window=36, min_periods=1).sum()
+                if not monthly_vpd.empty:
+                    # Complete VPD data and calculate 12-month rolling average
+                    date_range_vpd = pd.date_range(monthly_vpd['Month'].min(), monthly_vpd['Month'].max(), freq='MS')
+                    signal_list = monthly_vpd['SignalID'].unique()
+                    
+                    complete_vpd = pd.MultiIndex.from_product([signal_list, date_range_vpd], names=['SignalID', 'Month']).to_frame(index=False)
+                    monthly_vpd = complete_vpd.merge(monthly_vpd, on=['SignalID', 'Month'], how='left')
+                    
+                    monthly_vpd = monthly_vpd.sort_values(['SignalID', 'Month'])
+                    monthly_vpd['vpd12'] = monthly_vpd.groupby('SignalID')['vpd'].transform(
+                        lambda x: x.rolling(window=12, min_periods=1).mean()
                     )
-                
-                # Use fixed 36-month period for all months (hack from R code)
-                max_month = monthly_36mo_crashes['Month'].max()
-                monthly_36mo_crashes = monthly_36mo_crashes[monthly_36mo_crashes['Month'] == max_month]
-                
-                # Replicate for all VPD months
-                all_months = monthly_vpd['Month'].unique()
-                monthly_36mo_crashes_expanded = []
-                for month in all_months:
-                    temp = monthly_36mo_crashes.copy()
-                    temp['Month'] = month
-                    monthly_36mo_crashes_expanded.append(temp)
-                
-                monthly_36mo_crashes = pd.concat(monthly_36mo_crashes_expanded, ignore_index=True)
-                
-                # Merge crashes and VPD
-                monthly_crashes = monthly_36mo_crashes.merge(monthly_vpd, on=['SignalID', 'Month'], how='outer')
-                
-                # Calculate crash indices
-                monthly_crashes['cri'] = (monthly_crashes['crashes_total'] * 1000) / (monthly_crashes['vpd'] * 3)
-                monthly_crashes['kabco'] = monthly_crashes['cost'] / (monthly_crashes['vpd'] * 3)
-                monthly_crashes['Date'] = monthly_crashes['Month']
-                monthly_crashes['CallPhase'] = 0
-                
-                # Calculate monthly indices
-                monthly_crash_rate_index = get_monthly_avg_by_day(monthly_crashes, "cri")
-                monthly_kabco_index = get_monthly_avg_by_day(monthly_crashes, "kabco")
-                
-                # Calculate corridor indices
-                cor_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
-                    monthly_crash_rate_index, config_data['corridors'], "cri"
-                )
-                cor_monthly_kabco_index = get_cor_monthly_avg_by_day(
-                    monthly_kabco_index, config_data['corridors'], "kabco"
-                )
-                
-                # Calculate subcorridor indices
-                sub_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
-                    monthly_crash_rate_index, config_data['subcorridors'], "cri"
-                )
-                sub_monthly_kabco_index = get_cor_monthly_avg_by_day(
-                    monthly_kabco_index, config_data['subcorridors'], "kabco"                )
-                
-                # Save results
-                save_data(monthly_crash_rate_index, "monthly_crash_rate_index.pkl")
-                save_data(monthly_kabco_index, "monthly_kabco_index.pkl")
-                save_data(cor_monthly_crash_rate_index, "cor_monthly_crash_rate_index.pkl")
-                save_data(cor_monthly_kabco_index, "cor_monthly_kabco_index.pkl")
-                save_data(sub_monthly_crash_rate_index, "sub_monthly_crash_rate_index.pkl")
-                save_data(sub_monthly_kabco_index, "sub_monthly_kabco_index.pkl")
-                
-                logger.info("Crash indices processing completed successfully")
+                    
+                    # Calculate 36-month rolling crashes
+                    complete_crashes = pd.MultiIndex.from_product([signal_list, date_range_vpd], names=['SignalID', 'Month']).to_frame(index=False)
+                    monthly_36mo_crashes = complete_crashes.merge(crashes, on=['SignalID', 'Month'], how='left')
+                    
+                    # Fill NaN with 0
+                    crash_cols = [col for col in crashes.columns if col.startswith('crashes_') or col == 'cost']
+                    monthly_36mo_crashes[crash_cols] = monthly_36mo_crashes[crash_cols].fillna(0)
+                    
+                    monthly_36mo_crashes = monthly_36mo_crashes.sort_values(['SignalID', 'Month'])
+                    
+                    # Calculate 36-month rolling sums
+                    for col in crash_cols:
+                        if col in monthly_36mo_crashes.columns:
+                            monthly_36mo_crashes[col] = monthly_36mo_crashes.groupby('SignalID')[col].transform(
+                                lambda x: x.rolling(window=36, min_periods=1).sum()
+                            )
+                    
+                    # Use fixed 36-month period for all months (hack from R code)
+                    max_month = monthly_36mo_crashes['Month'].max()
+                    monthly_36mo_crashes = monthly_36mo_crashes[monthly_36mo_crashes['Month'] == max_month]
+                    
+                    # Replicate for all VPD months
+                    all_months = monthly_vpd['Month'].unique()
+                    monthly_36mo_crashes_expanded = []
+                    for month in all_months:
+                        temp = monthly_36mo_crashes.copy()
+                        temp['Month'] = month
+                        monthly_36mo_crashes_expanded.append(temp)
+                    
+                    monthly_36mo_crashes = pd.concat(monthly_36mo_crashes_expanded, ignore_index=True)
+                    
+                    # Merge crashes and VPD
+                    monthly_crashes = monthly_36mo_crashes.merge(monthly_vpd, on=['SignalID', 'Month'], how='outer')
+                    
+                    # Calculate crash indices (only if required columns exist)
+                    if 'crashes_total' in monthly_crashes.columns and 'vpd' in monthly_crashes.columns:
+                        monthly_crashes['cri'] = (monthly_crashes['crashes_total'] * 1000) / (monthly_crashes['vpd'] * 3)
+                    else:
+                        monthly_crashes['cri'] = 0
+                        
+                    if 'cost' in monthly_crashes.columns and 'vpd' in monthly_crashes.columns:
+                        monthly_crashes['kabco'] = monthly_crashes['cost'] / (monthly_crashes['vpd'] * 3)
+                    else:
+                        monthly_crashes['kabco'] = 0
+                    
+                    monthly_crashes['Date'] = monthly_crashes['Month']
+                    monthly_crashes['CallPhase'] = 0
+                    
+                    # Calculate monthly indices
+                    monthly_crash_rate_index = get_monthly_avg_by_day(monthly_crashes, "cri")
+                    monthly_kabco_index = get_monthly_avg_by_day(monthly_crashes, "kabco")
+                    
+                    # Calculate corridor indices
+                    cor_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
+                        monthly_crash_rate_index, config_data['corridors'], "cri"
+                    )
+                    cor_monthly_kabco_index = get_cor_monthly_avg_by_day(
+                        monthly_kabco_index, config_data['corridors'], "kabco"
+                    )
+                    
+                    # Calculate subcorridor indices
+                    sub_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
+                        monthly_crash_rate_index, config_data['subcorridors'], "cri"
+                    )
+                    sub_monthly_kabco_index = get_cor_monthly_avg_by_day(
+                        monthly_kabco_index, config_data['subcorridors'], "kabco"
+                    )
+                    
+                    # Save results
+                    save_data(monthly_crash_rate_index, "monthly_crash_rate_index.pkl")
+                    save_data(monthly_kabco_index, "monthly_kabco_index.pkl")
+                    save_data(cor_monthly_crash_rate_index, "cor_monthly_crash_rate_index.pkl")
+                    save_data(cor_monthly_kabco_index, "cor_monthly_kabco_index.pkl")
+                    save_data(sub_monthly_crash_rate_index, "sub_monthly_crash_rate_index.pkl")
+                    save_data(sub_monthly_kabco_index, "sub_monthly_kabco_index.pkl")
+                    
+                    logger.info("Crash indices processing completed successfully")
+                else:
+                    logger.warning("No monthly VPD data available for crash index calculations")
+            else:
+                logger.warning("No valid crash data after processing")
+        else:
+            logger.warning("No crash data found in the Excel file")
         
+    except UnicodeDecodeError as e:
+        logger.error(f"Unicode decode error reading Excel file: {e}")
+        logger.info("Skipping crash indices processing due to file encoding issues")
+    except FileNotFoundError as e:
+        logger.warning(f"Crash data file not found: {e}")
+        logger.info("Skipping crash indices processing - file not available")
     except Exception as e:
         logger.error(f"Error in crash indices processing: {e}")
         logger.error(traceback.format_exc())
