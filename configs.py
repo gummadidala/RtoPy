@@ -452,7 +452,7 @@ def get_det_config_factory(bucket: str, folder: str):
                     encoding_errors='ignore',  # Ignore encoding errors
                     dtype=str  # Read all as strings initially
                 )
-            
+            print(df.columns)
             # Convert to categories for memory efficiency
             categorical_cols = ['SignalID', 'Detector', 'CallPhase', 'DetectionHardware', 
                               'LaneType', 'MovementType']
