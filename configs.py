@@ -368,8 +368,7 @@ def get_det_config_factory(bucket: str, folder: str):
     Factory function to create detector configuration getter
     
     Args:
-        bu
-        cket: S3 bucket name
+        bucket: S3 bucket name
         folder: S3 folder name for detector configs
     
     Returns:
@@ -406,27 +405,53 @@ def get_det_config_factory(bucket: str, folder: str):
             config_obj = response['Contents'][0]
             s3_key = config_obj['Key']
             
-            # Read the configuration file
-            df = s3read_using(
-                pd.read_csv,
-                bucket=bucket,
-                object=s3_key,
-                dtype={
-                    'SignalID': str,
-                    'IP': str,
-                    'PrimaryName': str,
-                    'SecondaryName': str,
-                    'Detector': str,
-                    'CallPhase': str,
-                    'TimeFromStopBar': 'float64',
-                    'DetectionHardware': str,
-                    'LaneType': str,
-                    'MovementType': str,
-                    'LaneNumber': 'Int64',
-                    'DetChannel': 'Int64',
-                    'LatencyCorrection': 'float64'
-                }
-            )
+            # Try different encoding options
+            encoding_options = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+            
+            for encoding in encoding_options:
+                try:
+                    # Read the configuration file with specific encoding
+                    df = s3read_using(
+                        pd.read_csv,
+                        bucket=bucket,
+                        object=s3_key,
+                        encoding=encoding,
+                        dtype={
+                            'SignalID': str,
+                            'IP': str,
+                            'PrimaryName': str,
+                            'SecondaryName': str,
+                            'Detector': str,
+                            'CallPhase': str,
+                            'TimeFromStopBar': 'float64',
+                            'DetectionHardware': str,
+                            'LaneType': str,
+                            'MovementType': str,
+                            'LaneNumber': 'Int64',
+                            'DetChannel': 'Int64',
+                            'LatencyCorrection': 'float64'
+                        }
+                    )
+                    logger.info(f"Successfully read detector config with {encoding} encoding")
+                    break
+                    
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    if encoding == encoding_options[-1]:  # Last encoding option
+                        raise e
+                    continue
+            else:
+                # If all encodings fail, try reading as binary and handling errors
+                logger.warning(f"All standard encodings failed for {s3_key}, trying error handling")
+                df = s3read_using(
+                    pd.read_csv,
+                    bucket=bucket,
+                    object=s3_key,
+                    encoding='utf-8',
+                    encoding_errors='ignore',  # Ignore encoding errors
+                    dtype=str  # Read all as strings initially
+                )
             
             # Convert to categories for memory efficiency
             categorical_cols = ['SignalID', 'Detector', 'CallPhase', 'DetectionHardware', 
@@ -434,6 +459,17 @@ def get_det_config_factory(bucket: str, folder: str):
             for col in categorical_cols:
                 if col in df.columns:
                     df[col] = df[col].astype('category')
+            
+            # Convert numeric columns
+            numeric_cols = {
+                'TimeFromStopBar': 'float64',
+                'LaneNumber': 'Int64',
+                'DetChannel': 'Int64',
+                'LatencyCorrection': 'float64'
+            }
+            for col, dtype in numeric_cols.items():
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').astype(dtype)
             
             # Remove duplicates keeping the first occurrence
             df = df.groupby(['SignalID', 'Detector']).first().reset_index()

@@ -111,40 +111,87 @@ def s3_read_parquet(bucket, object_key, date_=None):
         print(f"Error reading parquet: {e}")
         return pd.DataFrame()
 
-def s3read_using(read_func, bucket, object, **kwargs):
-    """Generic S3 read function that works with any pandas read function"""
-    import io
-    import tempfile
-    import os
+def s3read_using(func, bucket, object, **kwargs):
+    """
+    Read data from S3 using specified function with error handling
     
-    s3_client = boto3.client('s3')
+    Args:
+        func: Function to use for reading (e.g., pd.read_csv, pd.read_excel, pd.read_parquet)
+        bucket: S3 bucket name
+        object: S3 object key
+        **kwargs: Additional arguments for the reading function
     
+    Returns:
+        DataFrame or data as returned by func
+    """
     try:
-        # Special handling for .qs files
-        if object.endswith('.qs') or 'qs' in str(read_func):
-            return s3_read_qs(bucket, object)
+        s3_client = boto3.client('s3')
         
-        # Get object from S3
+        # Check if object exists first
+        try:
+            s3_client.head_object(Bucket=bucket, Key=object)
+        except s3_client.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                logger.warning(f"S3 object not found: {object}")
+                return pd.DataFrame()
+            else:
+                raise
+        
+        # Get the object
         response = s3_client.get_object(Bucket=bucket, Key=object)
-        
-        # Read content into memory
         content = response['Body'].read()
         
-        # Use the provided read function
-        if read_func == pd.read_csv:
-            return read_func(io.StringIO(content.decode('utf-8')), **kwargs)
-        elif read_func == pd.read_excel:
-            return read_func(io.BytesIO(content), **kwargs)
+        # Handle different file types
+        if object.endswith('.csv'):
+            # For CSV files, handle encoding issues
+            encoding = kwargs.pop('encoding', 'utf-8')
+            encoding_errors = kwargs.pop('encoding_errors', 'strict')
+            
+            # Try multiple encodings
+            encoding_options = [encoding, 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+            
+            for enc in encoding_options:
+                try:
+                    content_str = content.decode(enc, errors=encoding_errors)
+                    from io import StringIO
+                    data_io = StringIO(content_str)
+                    return func(data_io, **kwargs)
+                except UnicodeDecodeError:
+                    if enc == encoding_options[-1]:
+                        # Last option - use ignore errors
+                        content_str = content.decode('utf-8', errors='ignore')
+                        from io import StringIO
+                        data_io = StringIO(content_str)
+                        return func(data_io, **kwargs)
+                    continue
+            
+        elif object.endswith('.parquet'):
+            # For Parquet files, use BytesIO
+            from io import BytesIO
+            data_io = BytesIO(content)
+            return func(data_io, **kwargs)
+            
+        elif object.endswith(('.xlsx', '.xls')):
+            # For Excel files, use BytesIO
+            from io import BytesIO
+            data_io = BytesIO(content)
+            return func(data_io, **kwargs)
+            
         else:
-            # For other read functions, try string first, then bytes
+            # For other file types, try BytesIO first, then StringIO
             try:
-                return read_func(io.StringIO(content.decode('utf-8')), **kwargs)
+                from io import BytesIO
+                data_io = BytesIO(content)
+                return func(data_io, **kwargs)
             except:
-                return read_func(io.BytesIO(content), **kwargs)
-                
+                from io import StringIO
+                content_str = content.decode('utf-8', errors='ignore')
+                data_io = StringIO(content_str)
+                return func(data_io, **kwargs)
+            
     except Exception as e:
-        print(f"Error reading from S3: {e}")
-        raise
+        logger.error(f"Error reading {object} from S3: {e}")
+        return pd.DataFrame()  # Return empty DataFrame instead of raising
 
 def s3_read_qs_subprocess_enhanced(bucket, object_key):
     """

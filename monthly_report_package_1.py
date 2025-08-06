@@ -541,14 +541,26 @@ def process_watchdog_alerts(dates, config_data):
             bad_det = clean_signal_ids(bad_det)
             bad_det['Detector'] = bad_det['Detector'].astype('category')
             
-            # Get detector configuration for each unique date
+            # Get detector configuration with fallback
             det_config_list = []
-            for date_val in sorted(bad_det['Date'].unique()):
-                config = get_det_config(date_val, config_data['conf'])
-                if not config.empty:
-                    config['Date'] = date_val
-                    det_config_list.append(config)
+            unique_dates = sorted(bad_det['Date'].unique())
             
+            for date_val in unique_dates:
+                try:
+                    # Get detector config factory function
+                    get_det_config = get_det_config_factory(conf.bucket, 'atspm_det_config_good')
+                    config = get_det_config(date_val)
+                    
+                    if not config.empty:
+                        config['Date'] = date_val
+                        det_config_list.append(config)
+                    else:
+                        logger.warning(f"No detector config found for {date_val}")
+                        
+                except Exception as e:
+                    logger.warning(f"Error loading detector config for {date_val}: {e}")
+            
+            # Process detector data if config available
             if det_config_list:
                 det_config = pd.concat(det_config_list, ignore_index=True)
                 det_config = clean_signal_ids(det_config)
@@ -557,32 +569,32 @@ def process_watchdog_alerts(dates, config_data):
                 
                 # Join with detector configuration
                 bad_det = bad_det.merge(
-                    det_config[['SignalID', 'Detector', 'Date', 'CallPhase', 'ApproachDesc', 'LaneNumber']],
+                    det_config[['SignalID', 'Detector', 'Date', 'CallPhase', 'LaneType', 'MovementType']],
                     on=['SignalID', 'Detector', 'Date'],
                     how='left'
                 )
-                
-                # Join with corridor information
-                bad_det = bad_det.merge(
-                    config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
-                    on='SignalID',
-                    how='left'
-                ).dropna(subset=['Corridor'])
-                
-                # Format the output
-                bad_det = bad_det.assign(
-                    Alert='Bad Vehicle Detection',
-                    Name=lambda x: x['Name'].str.replace('@', '-', regex=False),
-                    ApproachDesc=lambda x: np.where(
-                        x['ApproachDesc'].isna(),
-                        '',
-                        x['ApproachDesc'].str.strip() + ' Lane ' + x['LaneNumber'].astype(str)
-                    )
-                )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
-                   'Date', 'Alert', 'Name', 'ApproachDesc']]
-                
-                # Save bad detectors data
-                save_data(bad_det, "watchdog_bad_detectors.pkl")
+            
+            # Add missing columns with defaults
+            for col in ['CallPhase', 'LaneType', 'MovementType']:
+                if col not in bad_det.columns:
+                    bad_det[col] = 'Unknown'
+            
+            # Join with corridor information
+            bad_det = bad_det.merge(
+                config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
+                on='SignalID',
+                how='left'
+            ).dropna(subset=['Corridor'])
+            
+            # Format the output
+            bad_det = bad_det.assign(
+                Alert='Bad Vehicle Detection',
+                Name=lambda x: x['Name'].str.replace('@', '-', regex=False),
+                ApproachDesc=lambda x: x['LaneType'].fillna('Unknown').astype(str)
+            )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
+               'Date', 'Alert', 'Name', 'ApproachDesc']]
+            
+            save_data(bad_det, "watchdog_bad_detectors.pkl")
         
         # Process bad pedestrian detectors
         try:
@@ -609,7 +621,7 @@ def process_watchdog_alerts(dates, config_data):
         except Exception as e:
             logger.warning(f"No bad pedestrian detectors data found: {e}")
         
-        # Process bad cameras
+        # Process bad cameras - FIXED
         try:
             bad_cam_list = []
             start_month = date.today().replace(day=1) - relativedelta(months=6)
@@ -617,37 +629,56 @@ def process_watchdog_alerts(dates, config_data):
             
             while current_month < date.today():
                 try:
-                    key = f"mark/cctv_uptime/month={current_month}/cctv_uptime_{current_month}.parquet"
-                    cctv_data = s3read_using('read_parquet', bucket=conf.bucket, object=key)
+                    key = f"mark/cctv_uptime/month={current_month.strftime('%Y-%m-%d')}/cctv_uptime_{current_month.strftime('%Y-%m-%d')}.parquet"
+                    
+                    # FIXED: Pass the function object, not string
+                    cctv_data = s3read_using(
+                        pd.read_parquet,  # Function object
+                        bucket=conf.bucket, 
+                        object=key
+                    )
                     
                     if not cctv_data.empty:
-                        bad_cameras = cctv_data[cctv_data['Size'] == 0]
+                        bad_cameras = cctv_data[cctv_data.get('Size', 0) == 0]
                         if not bad_cameras.empty:
                             bad_cam_list.append(bad_cameras)
                             
                 except Exception as e:
-                    logger.warning(f"Could not read CCTV data for {current_month}: {e}")
+                    logger.warning(f"Could not read CCTV data for {current_month.strftime('%Y-%m-%d')}: {e}")
                 
                 current_month += relativedelta(months=1)
             
             if bad_cam_list:
                 bad_cam = pd.concat(bad_cam_list, ignore_index=True)
-                bad_cam = bad_cam.merge(
-                    config_data['cam_config'], 
-                    on='CameraID', 
-                    how='left'
-                )
-                bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
                 
-                bad_cam = bad_cam[['Zone_Group', 'Zone', 'Corridor', 'CameraID', 'Date', 'Location']].assign(
-                    SignalID=lambda x: x['CameraID'],
-                    CallPhase=0,
-                    Detector=0,
-                    Alert='No Camera Image',
-                    Name=lambda x: x['Location']
-                )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
-                   'Date', 'Alert', 'Name']]
+                # Merge with camera config if available
+                if 'cam_config' in config_data and not config_data['cam_config'].empty:
+                    bad_cam = bad_cam.merge(
+                        config_data['cam_config'], 
+                        on='CameraID', 
+                        how='left'
+                    )
+                    if 'As_of_Date' in bad_cam.columns and 'Date' in bad_cam.columns:
+                        bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
                 
+                # Add required columns with defaults
+                required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
+                               'Date', 'Alert', 'Name']
+                
+                for col in required_cols:
+                    if col not in bad_cam.columns:
+                        if col == 'SignalID':
+                            bad_cam[col] = bad_cam.get('CameraID', 'Unknown')
+                        elif col in ['CallPhase', 'Detector']:
+                            bad_cam[col] = 0
+                        elif col == 'Alert':
+                            bad_cam[col] = 'No Camera Image'
+                        elif col == 'Name':
+                            bad_cam[col] = bad_cam.get('Location', bad_cam.get('CameraID', 'Unknown'))
+                        else:
+                            bad_cam[col] = 'Unknown'
+                
+                bad_cam = bad_cam[required_cols]
                 save_data(bad_cam, "watchdog_bad_cameras.pkl")
                 
         except Exception as e:
