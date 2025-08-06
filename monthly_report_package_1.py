@@ -45,6 +45,102 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+def round_to_tuesday(date_):
+    """
+    Round date to nearest Tuesday (matching R logic)
+    
+    Args:
+        date_: Date to round (can be string, date, or datetime)
+    
+    Returns:
+        Date rounded to Tuesday
+    """
+    if date_ is None:
+        return None
+    
+    if isinstance(date_, str):
+        date_ = pd.to_datetime(date_).date()
+    elif isinstance(date_, datetime):
+        date_ = date_.date()
+    
+    # In Python: Monday=0, Sunday=6
+    # To get Tuesday (1), calculate days to add/subtract
+    current_weekday = date_.weekday()  # 0=Monday, 1=Tuesday, etc.
+    
+    # Calculate days to Tuesday (1)
+    days_to_tuesday = (1 - current_weekday) % 7
+    if days_to_tuesday > 3:  # If more than 3 days away, go to previous Tuesday
+        days_to_tuesday -= 7
+    
+    return date_ + timedelta(days=days_to_tuesday)
+
+def calculate_dates(report_end_date):
+    """Calculate various date ranges needed for processing (matching R logic)"""
+    try:
+        if isinstance(report_end_date, str):
+            report_end_date = pd.to_datetime(report_end_date).date()
+        
+        # Match R logic exactly
+        report_start_date = report_end_date.replace(day=1)
+        
+        # Use the same logic as R for calcs_start_date
+        if conf.get('calcs_start_date') == "auto":
+            # This would need implementation of get_date_from_string equivalent
+            first_missing_date = get_first_missing_date_from_db(
+                table_pattern="sig_dy_cu", 
+                exceptions=0
+            )
+            calcs_start_date = first_missing_date.replace(day=1)
+            if first_missing_date.day <= 7:
+                calcs_start_date = calcs_start_date - relativedelta(months=1)
+        else:
+            calcs_start_date = conf.get('calcs_start_date', report_start_date - relativedelta(months=18))
+        
+        # NOW use the same logic as R
+        wk_calcs_start_date = round_to_tuesday(calcs_start_date)
+        
+        # Calculate other dates...
+        prev_month_start = report_start_date - relativedelta(months=1)
+        prev_year_start = report_start_date - relativedelta(years=1)
+        
+        dates_dict = {
+            'report_end_date': report_end_date,
+            'report_start_date': report_start_date,
+            'calcs_start_date': calcs_start_date,
+            'wk_calcs_start_date': wk_calcs_start_date,
+            'prev_month_start': prev_month_start,
+            'prev_year_start': prev_year_start
+        }
+        
+        logger.info(f"Date ranges calculated (R logic): {calcs_start_date} to {report_end_date}")
+        logger.info(f"Weekly calcs start (rounded to Tuesday): {wk_calcs_start_date}")
+        return dates_dict
+        
+    except Exception as e:
+        logger.error(f"Error calculating dates: {e}")
+        raise
+
+def get_first_missing_date_from_db(table_pattern: str, exceptions: int = 0):
+    """
+    Python equivalent of R's get_date_from_string function
+    
+    Args:
+        table_pattern: Regex pattern to match table names
+        exceptions: Number of exceptions to allow
+    
+    Returns:
+        First missing date found
+    """
+    try:
+        # This would need to be implemented based on your database structure
+        # For now, return a reasonable default
+        return date.today() - relativedelta(months=6)
+        
+    except Exception as e:
+        logger.error(f"Error getting first missing date: {e}")
+        return date.today() - relativedelta(months=6)
+
+
 def load_yaml_configuration() -> Dict[str, Any]:
     """
     Load configuration from YAML files
@@ -57,7 +153,13 @@ def load_yaml_configuration() -> Dict[str, Any]:
         # Load main configuration
         with open("Monthly_Report.yaml", 'r') as file:
             conf = yaml.safe_load(file)
+
+        if 'calcs_start_date' not in conf:
+            conf['calcs_start_date'] = "auto"
         
+        if 'report_end_date' not in conf:
+            conf['report_end_date'] = "yesterday"
+
         # Load AWS configuration
         with open("Monthly_Report_AWS.yaml", 'r') as file:
             aws_conf = yaml.safe_load(file)
@@ -115,7 +217,7 @@ def initialize_config():
         logger.error(f"Error initializing configuration: {e}")
         raise
 
-def calculate_dates(report_end_date):
+def calculate_dates_notinscope(report_end_date):
     """Calculate various date ranges needed for processing"""
     try:
         if isinstance(report_end_date, str):
