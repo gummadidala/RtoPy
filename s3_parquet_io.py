@@ -9,7 +9,7 @@ import pyarrow as pa
 from pathlib import Path
 import os
 # from utilities import keep_trying, convert_to_utc, get_objectkey
-from utilities import keep_trying, convert_to_utc
+from utilities import keep_trying
 from database_functions import add_athena_partition
 from botocore.config import Config
 
@@ -104,7 +104,6 @@ def s3_read_parquet(bucket, object_key, date_=None):
         # Add Date column
         if date_:
             df['Date'] = pd.to_datetime(date_).date()
-        
         return convert_to_utc(df)
         
     except Exception as e:
@@ -342,6 +341,20 @@ def s3write_using(write_func, bucket, object, **kwargs):
     except Exception as e:
         print(f"Error writing to S3: {e}")
         raise
+
+def convert_to_utc(df):
+    """Convert datetime columns to UTC"""
+    try:
+        datetime_cols = df.select_dtypes(include=['datetime64']).columns
+        for col in datetime_cols:
+            if df[col].dt.tz is None:
+                df[col] = df[col].dt.tz_localize('UTC')
+            else:
+                df[col] = df[col].dt.tz_convert('UTC')
+        return df
+        
+    except Exception as e:
+        return df
 
 def s3_read_parquet_parallel(table_name, start_date, end_date, signals_list=None, 
                            bucket=None, callback=None, parallel=False, s3root='mark'):
