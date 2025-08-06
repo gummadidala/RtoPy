@@ -2022,3 +2022,64 @@ def ensure_timeperiod_column(df, time_col_candidates=['Timeperiod', 'Date_Hour',
     logger.error("No suitable time column found for Timeperiod")
     return df
 
+def ensure_throughput_column(df):
+    """
+    Ensure DataFrame has a 'throughput' column
+    
+    Args:
+        df: DataFrame to check
+    
+    Returns:
+        DataFrame with 'throughput' column
+    """
+    if df.empty:
+        return df
+    
+    # If throughput already exists, we're good
+    if 'throughput' in df.columns:
+        return df
+    
+    # Look for alternative throughput column names
+    throughput_candidates = ['Throughput', 'thruput', 'Thruput', 'volume', 'Volume', 'vol']
+    
+    for col in throughput_candidates:
+        if col in df.columns:
+            df = df.copy()
+            df['throughput'] = df[col]
+            logger.info(f"Created throughput column from {col}")
+            return df
+    
+    # If no throughput column found, check available columns
+    logger.error(f"No suitable throughput column found. Available columns: {list(df.columns)}")
+    
+    # Create a default throughput column with zeros if no suitable column found
+    df = df.copy()
+    df['throughput'] = 0
+    logger.warning("Created default throughput column with zeros")
+    return df
+
+def safe_dropna_corridor(df, log_prefix=""):
+    """
+    Safely drop NaN values from Corridor column if it exists
+    
+    Args:
+        df: DataFrame to check
+        log_prefix: Prefix for log messages
+    
+    Returns:
+        DataFrame with NaN Corridor values dropped (if column exists)
+    """
+    if df.empty:
+        return df
+    
+    if 'Corridor' in df.columns:
+        original_len = len(df)
+        df = df.dropna(subset=['Corridor'])
+        dropped_rows = original_len - len(df)
+        if dropped_rows > 0:
+            logger.info(f"{log_prefix}: Dropped {dropped_rows} rows with NaN Corridor values")
+        return df
+    else:
+        logger.warning(f"{log_prefix}: DataFrame missing 'Corridor' column. Available columns: {list(df.columns)}")
+        return df
+

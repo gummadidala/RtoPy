@@ -1052,21 +1052,24 @@ def process_daily_throughput(dates, config_data):
             throughput = clean_signal_ids(throughput)
             throughput['CallPhase'] = throughput['CallPhase'].astype(int).astype('category')
             throughput = ensure_datetime_column(throughput, 'Date')
+            throughput = ensure_throughput_column(throughput)
             
             weekly_throughput = get_weekly_thruput(throughput)
             monthly_throughput = get_monthly_thruput(throughput)
             
             # Weekly throughput - Group into corridors
             cor_weekly_throughput = get_cor_weekly_thruput(weekly_throughput, config_data['corridors'])
-            sub_weekly_throughput = get_cor_weekly_thruput(
-                weekly_throughput, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
+            sub_weekly_throughput = safe_dropna_corridor(
+                get_cor_weekly_thruput(weekly_throughput, config_data['subcorridors']),
+                "sub_weekly_throughput"
+            )
             
             # Monthly throughput - Group into corridors
             cor_monthly_throughput = get_cor_monthly_thruput(monthly_throughput, config_data['corridors'])
-            sub_monthly_throughput = get_cor_monthly_thruput(
-                monthly_throughput, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
+            sub_monthly_throughput = safe_dropna_corridor(
+                get_cor_monthly_thruput(monthly_throughput, config_data['subcorridors']),
+                "sub_monthly_throughput"
+            )
             
             # Save results
             save_data(weekly_throughput, "weekly_throughput.pkl")
@@ -1077,6 +1080,8 @@ def process_daily_throughput(dates, config_data):
             save_data(sub_monthly_throughput, "sub_monthly_throughput.pkl")
             
             logger.info("Daily throughput processing completed successfully")
+        else:
+            logger.warning("No throughput data found")
         
     except Exception as e:
         logger.error(f"Error in daily throughput processing: {e}")
