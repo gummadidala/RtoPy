@@ -959,32 +959,61 @@ def process_hourly_volumes(dates, config_data):
             vph = clean_signal_ids(vph)
             vph['CallPhase'] = 2  # Hack because next function needs a CallPhase
             vph = ensure_datetime_column(vph, 'Date')
+            vph = ensure_timeperiod_column(vph)  # Ensure Timeperiod column exists
             
             weekly_vph = get_weekly_vph(vph)
-            weekly_vph_peak = get_weekly_vph_peak(weekly_vph)
-            
-            # Group into corridors
-            cor_weekly_vph = get_cor_weekly_vph(weekly_vph, config_data['corridors'])
-            cor_weekly_vph_peak = get_cor_weekly_vph_peak(cor_weekly_vph)
-            
-            # Group into Subcorridors
-            sub_weekly_vph = get_cor_weekly_vph(
-                weekly_vph, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            sub_weekly_vph_peak = get_cor_weekly_vph_peak(sub_weekly_vph)
+            if not weekly_vph.empty:
+                weekly_vph_peak = get_weekly_vph_peak(weekly_vph)
+                
+                # Group into corridors
+                cor_weekly_vph = get_cor_weekly_vph(weekly_vph, config_data['corridors'])
+                if not cor_weekly_vph.empty:
+                    cor_weekly_vph_peak = get_cor_weekly_vph_peak(cor_weekly_vph)
+                else:
+                    cor_weekly_vph_peak = pd.DataFrame()
+                
+                # Group into Subcorridors
+                sub_weekly_vph = get_cor_weekly_vph(
+                    weekly_vph, config_data['subcorridors']
+                )
+                if not sub_weekly_vph.empty and 'Corridor' in sub_weekly_vph.columns:
+                    sub_weekly_vph = sub_weekly_vph.dropna(subset=['Corridor'])
+                    sub_weekly_vph_peak = get_cor_weekly_vph_peak(sub_weekly_vph)
+                else:
+                    sub_weekly_vph_peak = pd.DataFrame()
+            else:
+                weekly_vph_peak = pd.DataFrame()
+                cor_weekly_vph = pd.DataFrame()
+                cor_weekly_vph_peak = pd.DataFrame()
+                sub_weekly_vph = pd.DataFrame()
+                sub_weekly_vph_peak = pd.DataFrame()
             
             monthly_vph = get_monthly_vph(vph)
-            monthly_vph_peak = get_monthly_vph_peak(monthly_vph)
-            
-            # Hourly volumes by Corridor
-            cor_monthly_vph = get_cor_monthly_vph(monthly_vph, config_data['corridors'])
-            cor_monthly_vph_peak = get_cor_monthly_vph_peak(cor_monthly_vph)
-            
-            # Hourly volumes by Subcorridor
-            sub_monthly_vph = get_cor_monthly_vph(
-                monthly_vph, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            sub_monthly_vph_peak = get_cor_monthly_vph_peak(sub_monthly_vph)
+            if not monthly_vph.empty:
+                monthly_vph_peak = get_monthly_vph_peak(monthly_vph)
+                
+                # Hourly volumes by Corridor
+                cor_monthly_vph = get_cor_monthly_vph(monthly_vph, config_data['corridors'])
+                if not cor_monthly_vph.empty:
+                    cor_monthly_vph_peak = get_cor_monthly_vph_peak(cor_monthly_vph)
+                else:
+                    cor_monthly_vph_peak = pd.DataFrame()
+                
+                # Hourly volumes by Subcorridor
+                sub_monthly_vph = get_cor_monthly_vph(
+                    monthly_vph, config_data['subcorridors']
+                )
+                if not sub_monthly_vph.empty and 'Corridor' in sub_monthly_vph.columns:
+                    sub_monthly_vph = sub_monthly_vph.dropna(subset=['Corridor'])
+                    sub_monthly_vph_peak = get_cor_monthly_vph_peak(sub_monthly_vph)
+                else:
+                    sub_monthly_vph_peak = pd.DataFrame()
+            else:
+                monthly_vph_peak = pd.DataFrame()
+                cor_monthly_vph = pd.DataFrame()
+                cor_monthly_vph_peak = pd.DataFrame()
+                sub_monthly_vph = pd.DataFrame()
+                sub_monthly_vph_peak = pd.DataFrame()
             
             # Save results
             save_data(weekly_vph, "weekly_vph.pkl")

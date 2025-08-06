@@ -1985,3 +1985,40 @@ def reduce_memory_usage(df):
     except Exception as e:
         logger.error(f"Error reducing memory usage: {e}")
         return df
+
+def ensure_timeperiod_column(df, time_col_candidates=['Timeperiod', 'Date_Hour', 'Hour']):
+    """
+    Ensure DataFrame has a 'Timeperiod' column
+    
+    Args:
+        df: DataFrame to check
+        time_col_candidates: List of potential time column names
+    
+    Returns:
+        DataFrame with 'Timeperiod' column
+    """
+    if df.empty:
+        return df
+    
+    # If Timeperiod already exists, we're good
+    if 'Timeperiod' in df.columns:
+        return df
+    
+    # Look for alternative time columns
+    for col in time_col_candidates:
+        if col in df.columns:
+            df = df.copy()
+            df['Timeperiod'] = pd.to_datetime(df[col])
+            logger.info(f"Created Timeperiod column from {col}")
+            return df
+    
+    # If no time column found, create a default
+    if 'Date' in df.columns:
+        df = df.copy()
+        df['Timeperiod'] = pd.to_datetime(df['Date'])
+        logger.warning("Created Timeperiod column from Date column")
+        return df
+    
+    logger.error("No suitable time column found for Timeperiod")
+    return df
+
