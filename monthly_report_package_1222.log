@@ -1,0 +1,457 @@
+2025-08-06 14:41:05,755 - __main__ - INFO - Starting Monthly Report Package Processing
+2025-08-06 14:41:05,755 - __main__ - INFO - Configuration initialized successfully
+2025-08-06 14:41:05,755 - __main__ - INFO - Date ranges calculated (R logic): 2025-06-01 to 2025-08-05
+2025-08-06 14:41:05,755 - __main__ - INFO - Weekly calcs start (rounded to Tuesday): 2025-06-03
+2025-08-06 14:41:05,755 - __main__ - INFO - Processing data from 2025-06-01 to 2025-08-05
+2025-08-06 14:41:05,755 - __main__ - INFO - Starting Vehicle Detector Uptime [1 of 26]
+2025-08-06 14:41:05,771 - __main__ - INFO - 2025-08-06 14:41:05.771806 Vehicle Detector Uptime [1 of 29 (mark1)]
+2025-08-06 14:41:05,778 - botocore.credentials - INFO - Found credentials in environment variables.
+2025-08-06 14:47:13,500 - __main__ - INFO - Saved avg_daily_detector_uptime.pkl with 525965 rows
+2025-08-06 14:47:13,517 - __main__ - INFO - Saved weekly_detector_uptime.pkl with 87030 rows
+2025-08-06 14:47:13,517 - __main__ - INFO - Saved monthly_detector_uptime.pkl with 26109 rows
+2025-08-06 14:47:13,533 - __main__ - INFO - Saved cor_avg_daily_detector_uptime.pkl with 0 rows
+2025-08-06 14:47:13,533 - __main__ - INFO - Saved cor_weekly_detector_uptime.pkl with 0 rows
+2025-08-06 14:47:13,533 - __main__ - INFO - Saved cor_monthly_detector_uptime.pkl with 0 rows
+2025-08-06 14:47:13,549 - __main__ - INFO - Saved sub_avg_daily_detector_uptime.pkl with 0 rows
+2025-08-06 14:47:13,549 - __main__ - INFO - Saved sub_weekly_detector_uptime.pkl with 0 rows
+2025-08-06 14:47:13,549 - __main__ - INFO - Saved sub_monthly_detector_uptime.pkl with 0 rows
+2025-08-06 14:47:13,549 - __main__ - INFO - Detector uptime processing completed successfully
+2025-08-06 14:47:13,564 - __main__ - INFO - Completed Vehicle Detector Uptime [1 of 26]
+2025-08-06 14:47:13,564 - __main__ - INFO - Starting Pedestrian Pushbutton Uptime [2 of 26]
+2025-08-06 14:47:13,564 - __main__ - INFO - 2025-08-06 14:47:13.564765 Ped Pushbutton Uptime [2 of 29 (mark1)]
+2025-08-06 15:04:18,225 - __main__ - ERROR - Error in pedestrian pushbutton uptime processing: Unable to allocate 187. GiB for an array with shape (100322420562,) and data type int16
+2025-08-06 15:04:18,473 - __main__ - ERROR - Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1.py", line 444, in process_ped_pushbutton_uptime
+    ])['vol'].sum().reset_index()
+              ^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\pandas\core\groupby\groupby.py", line 3159, in sum
+    return self._reindex_output(result, fill_value=0)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\pandas\core\groupby\groupby.py", line 5626, in _reindex_output
+    index = MultiIndex.from_product(levels_list, names=names)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\pandas\core\indexes\multi.py", line 685, in from_product
+    codes = cartesian_product(codes)
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\pandas\core\reshape\util.py", line 65, in cartesian_product
+    np.repeat(x, b[i]),
+    ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\numpy\_core\fromnumeric.py", line 506, in repeat
+    return _wrapfunc(a, 'repeat', repeats, axis=axis)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\numpy\_core\fromnumeric.py", line 57, in _wrapfunc
+    return bound(*args, **kwds)
+           ^^^^^^^^^^^^^^^^^^^^
+numpy._core._exceptions._ArrayMemoryError: Unable to allocate 187. GiB for an array with shape (100322420562,) and data type int16
+
+2025-08-06 15:04:18,724 - __main__ - INFO - Completed Pedestrian Pushbutton Uptime [2 of 26]
+2025-08-06 15:04:18,726 - __main__ - INFO - Starting Watchdog Alerts [3 of 26]
+2025-08-06 15:04:18,726 - __main__ - INFO - 2025-08-06 15:04:18.726274 Watchdog alerts [3 of 29 (mark1)]
+2025-08-06 15:11:05,816 - configs - ERROR - Error loading detector config for 2025-05-08: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:05,819 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-08
+2025-08-06 15:11:14,198 - configs - ERROR - Error loading detector config for 2025-05-09: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:14,214 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-09
+2025-08-06 15:11:20,581 - configs - ERROR - Error loading detector config for 2025-05-10: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:20,584 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-10
+2025-08-06 15:11:26,590 - configs - ERROR - Error loading detector config for 2025-05-11: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:26,595 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-11
+2025-08-06 15:11:32,803 - configs - ERROR - Error loading detector config for 2025-05-12: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:32,807 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-12
+2025-08-06 15:11:38,626 - configs - ERROR - Error loading detector config for 2025-05-13: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:38,626 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-13
+2025-08-06 15:11:44,946 - configs - ERROR - Error loading detector config for 2025-05-14: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:44,950 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-14
+2025-08-06 15:11:51,097 - configs - ERROR - Error loading detector config for 2025-05-15: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:51,100 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-15
+2025-08-06 15:11:56,904 - configs - ERROR - Error loading detector config for 2025-05-16: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:11:56,908 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-16
+2025-08-06 15:12:16,557 - configs - ERROR - Error loading detector config for 2025-05-17: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:16,560 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-17
+2025-08-06 15:12:22,262 - configs - ERROR - Error loading detector config for 2025-05-18: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:22,265 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-18
+2025-08-06 15:12:28,274 - configs - ERROR - Error loading detector config for 2025-05-19: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:28,278 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-19
+2025-08-06 15:12:34,084 - configs - ERROR - Error loading detector config for 2025-05-20: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:34,087 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-20
+2025-08-06 15:12:39,932 - configs - ERROR - Error loading detector config for 2025-05-21: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:39,932 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-21
+2025-08-06 15:12:47,689 - configs - ERROR - Error loading detector config for 2025-05-22: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:47,693 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-22
+2025-08-06 15:12:53,360 - configs - ERROR - Error loading detector config for 2025-05-23: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:53,367 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-23
+2025-08-06 15:12:59,593 - configs - ERROR - Error loading detector config for 2025-05-24: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:12:59,593 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-24
+2025-08-06 15:13:06,130 - configs - ERROR - Error loading detector config for 2025-05-25: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:06,133 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-25
+2025-08-06 15:13:12,097 - configs - ERROR - Error loading detector config for 2025-05-26: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:12,101 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-26
+2025-08-06 15:13:18,656 - configs - ERROR - Error loading detector config for 2025-05-27: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:18,661 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-27
+2025-08-06 15:13:24,926 - configs - ERROR - Error loading detector config for 2025-05-28: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:24,931 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-28
+2025-08-06 15:13:30,892 - configs - ERROR - Error loading detector config for 2025-05-29: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:30,897 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-29
+2025-08-06 15:13:39,904 - configs - ERROR - Error loading detector config for 2025-05-30: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:39,908 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-30
+2025-08-06 15:13:45,990 - configs - ERROR - Error loading detector config for 2025-05-31: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:45,994 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-05-31
+2025-08-06 15:13:54,776 - configs - ERROR - Error loading detector config for 2025-06-01: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:13:54,779 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-01
+2025-08-06 15:14:00,427 - configs - ERROR - Error loading detector config for 2025-06-02: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:00,427 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-02
+2025-08-06 15:14:06,191 - configs - ERROR - Error loading detector config for 2025-06-03: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:06,196 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-03
+2025-08-06 15:14:13,595 - configs - ERROR - Error loading detector config for 2025-06-04: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:13,598 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-04
+2025-08-06 15:14:20,233 - configs - ERROR - Error loading detector config for 2025-06-05: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:20,237 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-05
+2025-08-06 15:14:26,619 - configs - ERROR - Error loading detector config for 2025-06-06: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:26,623 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-06
+2025-08-06 15:14:32,753 - configs - ERROR - Error loading detector config for 2025-06-07: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:32,757 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-07
+2025-08-06 15:14:38,822 - configs - ERROR - Error loading detector config for 2025-06-08: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:38,825 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-08
+2025-08-06 15:14:44,848 - configs - ERROR - Error loading detector config for 2025-06-09: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:44,848 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-09
+2025-08-06 15:14:51,331 - configs - ERROR - Error loading detector config for 2025-06-10: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:51,334 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-10
+2025-08-06 15:14:58,310 - configs - ERROR - Error loading detector config for 2025-06-11: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:14:58,314 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-11
+2025-08-06 15:15:04,703 - configs - ERROR - Error loading detector config for 2025-06-12: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:04,707 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-12
+2025-08-06 15:15:10,336 - configs - ERROR - Error loading detector config for 2025-06-13: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:10,340 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-13
+2025-08-06 15:15:17,279 - configs - ERROR - Error loading detector config for 2025-06-14: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:17,282 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-14
+2025-08-06 15:15:23,499 - configs - ERROR - Error loading detector config for 2025-06-15: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:23,502 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-15
+2025-08-06 15:15:29,189 - configs - ERROR - Error loading detector config for 2025-06-16: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:29,193 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-16
+2025-08-06 15:15:35,081 - configs - ERROR - Error loading detector config for 2025-06-17: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:35,085 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-17
+2025-08-06 15:15:41,317 - configs - ERROR - Error loading detector config for 2025-06-18: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:41,321 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-18
+2025-08-06 15:15:47,250 - configs - ERROR - Error loading detector config for 2025-06-19: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:47,253 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-19
+2025-08-06 15:15:53,780 - configs - ERROR - Error loading detector config for 2025-06-20: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:15:53,783 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-20
+2025-08-06 15:16:00,997 - configs - ERROR - Error loading detector config for 2025-06-21: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:01,000 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-21
+2025-08-06 15:16:07,959 - configs - ERROR - Error loading detector config for 2025-06-22: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:07,962 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-22
+2025-08-06 15:16:14,525 - configs - ERROR - Error loading detector config for 2025-06-23: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:14,525 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-23
+2025-08-06 15:16:20,616 - configs - ERROR - Error loading detector config for 2025-06-24: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:20,619 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-24
+2025-08-06 15:16:26,640 - configs - ERROR - Error loading detector config for 2025-06-25: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:26,644 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-25
+2025-08-06 15:16:32,846 - configs - ERROR - Error loading detector config for 2025-06-26: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:32,850 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-26
+2025-08-06 15:16:39,268 - configs - ERROR - Error loading detector config for 2025-06-27: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:39,272 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-27
+2025-08-06 15:16:45,425 - configs - ERROR - Error loading detector config for 2025-06-28: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:45,428 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-28
+2025-08-06 15:16:51,188 - configs - ERROR - Error loading detector config for 2025-06-29: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:51,192 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-29
+2025-08-06 15:16:57,377 - configs - ERROR - Error loading detector config for 2025-06-30: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:16:57,380 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-06-30
+2025-08-06 15:17:03,493 - configs - ERROR - Error loading detector config for 2025-07-01: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:03,497 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-01
+2025-08-06 15:17:09,204 - configs - ERROR - Error loading detector config for 2025-07-02: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:09,208 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-02
+2025-08-06 15:17:15,800 - configs - ERROR - Error loading detector config for 2025-07-03: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:15,803 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-03
+2025-08-06 15:17:21,863 - configs - ERROR - Error loading detector config for 2025-07-04: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:21,866 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-04
+2025-08-06 15:17:28,069 - configs - ERROR - Error loading detector config for 2025-07-05: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:28,073 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-05
+2025-08-06 15:17:34,335 - configs - ERROR - Error loading detector config for 2025-07-06: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:34,339 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-06
+2025-08-06 15:17:40,017 - configs - ERROR - Error loading detector config for 2025-07-07: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:40,021 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-07
+2025-08-06 15:17:46,261 - configs - ERROR - Error loading detector config for 2025-07-08: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:46,267 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-08
+2025-08-06 15:17:52,260 - configs - ERROR - Error loading detector config for 2025-07-09: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:52,263 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-09
+2025-08-06 15:17:59,692 - configs - ERROR - Error loading detector config for 2025-07-10: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:17:59,696 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-10
+2025-08-06 15:18:06,140 - configs - ERROR - Error loading detector config for 2025-07-11: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:06,144 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-11
+2025-08-06 15:18:12,319 - configs - ERROR - Error loading detector config for 2025-07-12: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:12,322 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-12
+2025-08-06 15:18:18,592 - configs - ERROR - Error loading detector config for 2025-07-13: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:18,596 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-13
+2025-08-06 15:18:24,528 - configs - ERROR - Error loading detector config for 2025-07-14: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:24,528 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-14
+2025-08-06 15:18:35,099 - configs - ERROR - Error loading detector config for 2025-07-15: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:35,102 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-15
+2025-08-06 15:18:41,059 - configs - ERROR - Error loading detector config for 2025-07-16: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:41,063 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-16
+2025-08-06 15:18:47,126 - configs - ERROR - Error loading detector config for 2025-07-17: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:47,130 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-17
+2025-08-06 15:18:53,633 - configs - ERROR - Error loading detector config for 2025-07-18: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:18:53,636 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-18
+2025-08-06 15:19:00,164 - configs - ERROR - Error loading detector config for 2025-07-19: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:00,168 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-19
+2025-08-06 15:19:06,744 - configs - ERROR - Error loading detector config for 2025-07-20: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:06,744 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-20
+2025-08-06 15:19:13,134 - configs - ERROR - Error loading detector config for 2025-07-21: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:13,137 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-21
+2025-08-06 15:19:18,933 - configs - ERROR - Error loading detector config for 2025-07-22: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:18,936 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-22
+2025-08-06 15:19:25,203 - configs - ERROR - Error loading detector config for 2025-07-23: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:25,206 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-23
+2025-08-06 15:19:31,408 - configs - ERROR - Error loading detector config for 2025-07-24: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:31,411 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-24
+2025-08-06 15:19:37,493 - configs - ERROR - Error loading detector config for 2025-07-25: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:37,496 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-25
+2025-08-06 15:19:43,870 - configs - ERROR - Error loading detector config for 2025-07-26: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:43,875 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-26
+2025-08-06 15:19:50,040 - configs - ERROR - Error loading detector config for 2025-07-27: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:50,045 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-27
+2025-08-06 15:19:55,794 - configs - ERROR - Error loading detector config for 2025-07-28: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:19:55,794 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-28
+2025-08-06 15:20:01,847 - configs - ERROR - Error loading detector config for 2025-07-29: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:01,850 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-29
+2025-08-06 15:20:08,255 - configs - ERROR - Error loading detector config for 2025-07-30: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:08,287 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-30
+2025-08-06 15:20:14,733 - configs - ERROR - Error loading detector config for 2025-07-31: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:14,737 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-07-31
+2025-08-06 15:20:21,221 - configs - ERROR - Error loading detector config for 2025-08-01: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:21,231 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-08-01
+2025-08-06 15:20:27,816 - configs - ERROR - Error loading detector config for 2025-08-02: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:27,821 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-08-02
+2025-08-06 15:20:33,745 - configs - ERROR - Error loading detector config for 2025-08-03: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:33,749 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-08-03
+2025-08-06 15:20:39,469 - configs - ERROR - Error loading detector config for 2025-08-04: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:39,479 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-08-04
+2025-08-06 15:20:46,375 - configs - ERROR - Error loading detector config for 2025-08-05: 'utf-8' codec can't decode byte 0xff in position 8: invalid start byte
+2025-08-06 15:20:46,377 - monthly_report_package_1_helper - WARNING - No detector config found for date 2025-08-05
+2025-08-06 15:26:41,731 - __main__ - INFO - Saved watchdog_bad_ped_pushbuttons.pkl with 149274 rows
+2025-08-06 15:26:45,181 - __main__ - WARNING - Could not read CCTV data for 2025-02-01: 'str' object is not callable
+2025-08-06 15:26:48,408 - __main__ - WARNING - Could not read CCTV data for 2025-03-01: 'str' object is not callable
+2025-08-06 15:26:52,228 - __main__ - WARNING - Could not read CCTV data for 2025-04-01: 'str' object is not callable
+2025-08-06 15:26:55,416 - __main__ - WARNING - Could not read CCTV data for 2025-05-01: 'str' object is not callable
+2025-08-06 15:26:58,896 - __main__ - WARNING - Could not read CCTV data for 2025-06-01: 'str' object is not callable
+2025-08-06 15:27:02,082 - __main__ - WARNING - Could not read CCTV data for 2025-07-01: 'str' object is not callable
+2025-08-06 15:27:04,986 - __main__ - WARNING - Could not read CCTV data for 2025-08-01: 'str' object is not callable
+2025-08-06 15:27:04,992 - __main__ - INFO - Watchdog alerts processing completed successfully
+2025-08-06 15:27:05,003 - __main__ - INFO - Completed Watchdog Alerts [3 of 26]
+2025-08-06 15:27:05,003 - __main__ - INFO - Starting Daily Pedestrian Activations [4 of 26]
+2025-08-06 15:27:05,003 - __main__ - INFO - 2025-08-06 15:27:05.003810 Daily Pedestrian Activations [4 of 29 (mark1)]
+2025-08-06 15:27:05,003 - __main__ - WARNING - File pa_uptime.pkl not found
+2025-08-06 15:27:05,003 - __main__ - INFO - Completed Daily Pedestrian Activations [4 of 26]
+2025-08-06 15:27:05,003 - __main__ - INFO - Starting Hourly Pedestrian Activations [5 of 26]
+2025-08-06 15:27:05,003 - __main__ - INFO - 2025-08-06 15:27:05.003810 Hourly Pedestrian Activations [5 of 29 (mark1)]
+2025-08-06 15:27:05,003 - __main__ - WARNING - File pa_uptime.pkl not found
+2025-08-06 15:27:05,003 - __main__ - INFO - Completed Hourly Pedestrian Activations [5 of 26]
+2025-08-06 15:27:05,003 - __main__ - INFO - Starting Pedestrian Delay [6 of 26]
+2025-08-06 15:27:05,003 - __main__ - INFO - 2025-08-06 15:27:05.003810 Pedestrian Delay [6 of 29 (mark1)]
+2025-08-06 15:30:45,801 - __main__ - INFO - Saved weekly_pd_by_day.pkl with 175420 rows
+2025-08-06 15:30:45,817 - __main__ - INFO - Saved monthly_pd_by_day.pkl with 50120 rows
+2025-08-06 15:30:45,817 - __main__ - INFO - Saved cor_weekly_pd_by_day.pkl with 0 rows
+2025-08-06 15:30:45,817 - __main__ - INFO - Saved cor_monthly_pd_by_day.pkl with 0 rows
+2025-08-06 15:30:45,817 - __main__ - INFO - Saved sub_weekly_pd_by_day.pkl with 0 rows
+2025-08-06 15:30:45,817 - __main__ - INFO - Saved sub_monthly_pd_by_day.pkl with 0 rows
+2025-08-06 15:30:45,817 - __main__ - INFO - Pedestrian delay processing completed successfully
+2025-08-06 15:30:45,833 - __main__ - INFO - Completed Pedestrian Delay [6 of 26]
+2025-08-06 15:30:45,833 - __main__ - INFO - Starting Communications Uptime [7 of 26]
+2025-08-06 15:30:45,833 - __main__ - INFO - 2025-08-06 15:30:45.833463 Communication Uptime [7 of 29 (mark1)]
+2025-08-06 15:36:00,866 - __main__ - INFO - Saved daily_comm_uptime.pkl with 3726464 rows
+2025-08-06 15:36:00,882 - __main__ - INFO - Saved cor_daily_comm_uptime.pkl with 0 rows
+2025-08-06 15:36:00,882 - __main__ - INFO - Saved sub_daily_comm_uptime.pkl with 0 rows
+2025-08-06 15:36:00,915 - __main__ - INFO - Saved weekly_comm_uptime.pkl with 582260 rows
+2025-08-06 15:36:00,915 - __main__ - INFO - Saved cor_weekly_comm_uptime.pkl with 0 rows
+2025-08-06 15:36:00,915 - __main__ - INFO - Saved sub_weekly_comm_uptime.pkl with 0 rows
+2025-08-06 15:36:00,931 - __main__ - INFO - Saved monthly_comm_uptime.pkl with 174678 rows
+2025-08-06 15:36:00,947 - __main__ - INFO - Saved cor_monthly_comm_uptime.pkl with 0 rows
+2025-08-06 15:36:00,947 - __main__ - INFO - Saved sub_monthly_comm_uptime.pkl with 0 rows
+2025-08-06 15:36:00,947 - __main__ - INFO - Communications uptime processing completed successfully
+2025-08-06 15:36:00,962 - __main__ - INFO - Completed Communications Uptime [7 of 26]
+2025-08-06 15:36:00,962 - __main__ - INFO - Starting Daily Volumes [8 of 26]
+2025-08-06 15:36:00,962 - __main__ - INFO - 2025-08-06 15:36:00.962962 Daily Volumes [8 of 29 (mark1)]
+2025-08-06 15:41:03,615 - __main__ - INFO - Saved weekly_vpd.pkl with 126540 rows
+2025-08-06 15:41:03,615 - __main__ - INFO - Saved monthly_vpd.pkl with 37962 rows
+2025-08-06 15:41:03,631 - __main__ - INFO - Saved cor_weekly_vpd.pkl with 0 rows
+2025-08-06 15:41:03,631 - __main__ - INFO - Saved cor_monthly_vpd.pkl with 0 rows
+2025-08-06 15:41:03,631 - __main__ - INFO - Saved sub_weekly_vpd.pkl with 0 rows
+2025-08-06 15:41:03,631 - __main__ - INFO - Saved sub_monthly_vpd.pkl with 0 rows
+2025-08-06 15:41:03,631 - __main__ - INFO - Daily volumes processing completed successfully
+2025-08-06 15:41:03,647 - __main__ - INFO - Completed Daily Volumes [8 of 26]
+2025-08-06 15:41:03,647 - __main__ - INFO - Starting Hourly Volumes [9 of 26]
+2025-08-06 15:41:03,647 - __main__ - INFO - 2025-08-06 15:41:03.647186 Hourly Volumes [9 of 29 (mark1)]
+2025-08-06 15:46:41,227 - monthly_report_package_1_helper - ERROR - Error calculating weekly VPH: 'Timeperiod'
+2025-08-06 15:46:41,227 - monthly_report_package_1_helper - ERROR - Error calculating corridor weekly VPH peak: 'Timeperiod'
+2025-08-06 15:46:41,227 - __main__ - ERROR - Error in hourly volumes processing: ['Corridor']
+2025-08-06 15:46:41,306 - __main__ - ERROR - Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1.py", line 942, in process_hourly_volumes
+    ).dropna(subset=['Corridor'])
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\pandas\core\frame.py", line 6677, in dropna
+    raise KeyError(np.array(subset)[check].tolist())
+KeyError: ['Corridor']
+
+2025-08-06 15:46:41,369 - __main__ - INFO - Completed Hourly Volumes [9 of 26]
+2025-08-06 15:46:41,369 - __main__ - INFO - Starting Daily Throughput [10 of 26]
+2025-08-06 15:46:41,369 - __main__ - INFO - 2025-08-06 15:46:41.369833 Daily Throughput [10 of 29 (mark1)]
+2025-08-06 15:51:38,609 - monthly_report_package_1_helper - ERROR - Error calculating weekly throughput: "Column(s) ['throughput'] do not exist"
+2025-08-06 15:51:38,864 - monthly_report_package_1_helper - ERROR - Error calculating monthly throughput: "Column(s) ['throughput'] do not exist"
+2025-08-06 15:51:38,864 - __main__ - ERROR - Error in daily throughput processing: ['Corridor']
+2025-08-06 15:51:38,864 - __main__ - ERROR - Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1.py", line 1003, in process_daily_throughput
+    ).dropna(subset=['Corridor'])
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\pandas\core\frame.py", line 6677, in dropna
+    raise KeyError(np.array(subset)[check].tolist())
+KeyError: ['Corridor']
+
+2025-08-06 15:51:38,864 - __main__ - INFO - Completed Daily Throughput [10 of 26]
+2025-08-06 15:51:38,884 - __main__ - INFO - Starting Arrivals on Green [11 of 26]
+2025-08-06 15:51:38,907 - __main__ - INFO - 2025-08-06 15:51:38.907179 Daily AOG [11 of 29 (mark1)]
+2025-08-06 16:00:00,258 - __main__ - INFO - Saved weekly_aog_by_day.pkl with 4959360 rows
+2025-08-06 16:00:00,318 - __main__ - INFO - Saved monthly_aog_by_day.pkl with 1487808 rows
+2025-08-06 16:00:00,318 - __main__ - INFO - Saved cor_weekly_aog_by_day.pkl with 0 rows
+2025-08-06 16:00:00,318 - __main__ - INFO - Saved cor_monthly_aog_by_day.pkl with 0 rows
+2025-08-06 16:00:00,318 - __main__ - INFO - Saved sub_weekly_aog_by_day.pkl with 0 rows
+2025-08-06 16:00:00,334 - __main__ - INFO - Saved sub_monthly_aog_by_day.pkl with 0 rows
+2025-08-06 16:00:03,576 - __main__ - INFO - Saved aog_data.pkl with 16063754 rows
+2025-08-06 16:00:03,576 - __main__ - INFO - Daily arrivals on green processing completed successfully
+2025-08-06 16:00:03,768 - __main__ - INFO - Completed Arrivals on Green [11 of 26]
+2025-08-06 16:00:03,768 - __main__ - INFO - Starting Hourly Arrivals on Green [12 of 26]
+2025-08-06 16:00:03,768 - __main__ - INFO - 2025-08-06 16:00:03.768633 Hourly AOG [12 of 29 (mark1)]
+2025-08-06 16:02:43,109 - __main__ - INFO - Saved monthly_aog_by_hr.pkl with 5101056 rows
+2025-08-06 16:02:43,141 - __main__ - INFO - Saved cor_monthly_aog_by_hr.pkl with 0 rows
+2025-08-06 16:02:43,141 - __main__ - INFO - Saved sub_monthly_aog_by_hr.pkl with 0 rows
+2025-08-06 16:02:43,141 - __main__ - INFO - Hourly arrivals on green processing completed successfully
+2025-08-06 16:02:43,824 - __main__ - INFO - Completed Hourly Arrivals on Green [12 of 26]
+2025-08-06 16:02:43,824 - __main__ - INFO - Starting Daily Progression Ratio [13 of 26]
+2025-08-06 16:02:43,824 - __main__ - INFO - 2025-08-06 16:02:43.824340 Daily Progression Ratio [13 of 29 (mark1)]
+2025-08-06 16:03:21,676 - __main__ - INFO - Saved weekly_pr_by_day.pkl with 4959360 rows
+2025-08-06 16:03:21,739 - __main__ - INFO - Saved monthly_pr_by_day.pkl with 1487808 rows
+2025-08-06 16:03:21,739 - __main__ - INFO - Saved cor_weekly_pr_by_day.pkl with 0 rows
+2025-08-06 16:03:21,739 - __main__ - INFO - Saved cor_monthly_pr_by_day.pkl with 0 rows
+2025-08-06 16:03:21,756 - __main__ - INFO - Saved sub_weekly_pr_by_day.pkl with 0 rows
+2025-08-06 16:03:21,756 - __main__ - INFO - Saved sub_monthly_pr_by_day.pkl with 0 rows
+2025-08-06 16:03:21,756 - __main__ - INFO - Daily progression ratio processing completed successfully
+2025-08-06 16:03:21,928 - __main__ - INFO - Completed Daily Progression Ratio [13 of 26]
+2025-08-06 16:03:21,928 - __main__ - INFO - Starting Hourly Progression Ratio [14 of 26]
+2025-08-06 16:03:21,928 - __main__ - INFO - 2025-08-06 16:03:21.928416 Hourly Progression Ratio [14 of 29 (mark1)]
+2025-08-06 16:05:54,301 - __main__ - INFO - Saved monthly_pr_by_hr.pkl with 5101056 rows
+2025-08-06 16:05:54,301 - __main__ - INFO - Saved cor_monthly_pr_by_hr.pkl with 0 rows
+2025-08-06 16:05:54,301 - __main__ - INFO - Saved sub_monthly_pr_by_hr.pkl with 0 rows
+2025-08-06 16:05:54,301 - __main__ - INFO - Hourly progression ratio processing completed successfully
+2025-08-06 16:05:54,948 - __main__ - INFO - Completed Hourly Progression Ratio [14 of 26]
+2025-08-06 16:05:54,948 - __main__ - INFO - Starting Daily Split Failures [15 of 26]
+2025-08-06 16:05:54,966 - __main__ - INFO - 2025-08-06 16:05:54.964572 Daily Split Failures [15 of 29 (mark1)]
+2025-08-06 16:10:34,749 - __main__ - INFO - Completed Daily Split Failures [15 of 26]
+2025-08-06 16:10:34,749 - __main__ - INFO - Starting Hourly Split Failures [16 of 26]
+2025-08-06 16:10:34,749 - __main__ - INFO - 2025-08-06 16:10:34.749596 Hourly Split Failures [16 of 29 (mark1)]
+2025-08-06 16:10:34,749 - __main__ - WARNING - File sf_data.pkl not found
+2025-08-06 16:10:34,749 - __main__ - INFO - Completed Hourly Split Failures [16 of 26]
+2025-08-06 16:10:34,749 - __main__ - INFO - Starting Daily Queue Spillback [17 of 26]
+2025-08-06 16:10:34,749 - __main__ - INFO - 2025-08-06 16:10:34.749596 Daily Queue Spillback [17 of 29 (mark1)]
+2025-08-06 16:15:47,627 - __main__ - INFO - Saved wqs.pkl with 2764090 rows
+2025-08-06 16:15:47,672 - __main__ - INFO - Saved monthly_qsd.pkl with 789740 rows
+2025-08-06 16:15:47,672 - __main__ - INFO - Saved cor_wqs.pkl with 0 rows
+2025-08-06 16:15:47,672 - __main__ - INFO - Saved cor_monthly_qsd.pkl with 0 rows
+2025-08-06 16:15:47,672 - __main__ - INFO - Saved sub_wqs.pkl with 0 rows
+2025-08-06 16:15:47,672 - __main__ - INFO - Saved sub_monthly_qsd.pkl with 0 rows
+2025-08-06 16:15:49,033 - __main__ - INFO - Saved qs_data.pkl with 10215198 rows
+2025-08-06 16:15:49,036 - __main__ - INFO - Daily queue spillback processing completed successfully
+2025-08-06 16:15:49,117 - __main__ - INFO - Completed Daily Queue Spillback [17 of 26]
+2025-08-06 16:15:49,117 - __main__ - INFO - Starting Hourly Queue Spillback [18 of 26]
+2025-08-06 16:15:49,117 - __main__ - INFO - 2025-08-06 16:15:49.117721 Hourly Queue Spillback [18 of 29 (mark1)]
+2025-08-06 16:17:12,280 - __main__ - INFO - Saved mqsh.pkl with 2707680 rows
+2025-08-06 16:17:12,280 - __main__ - INFO - Saved cor_mqsh.pkl with 0 rows
+2025-08-06 16:17:12,292 - __main__ - INFO - Saved sub_mqsh.pkl with 0 rows
+2025-08-06 16:17:12,292 - __main__ - INFO - Hourly queue spillback processing completed successfully
+2025-08-06 16:17:12,589 - __main__ - INFO - Completed Hourly Queue Spillback [18 of 26]
+2025-08-06 16:17:12,589 - __main__ - INFO - Starting Travel Time Indexes [19 of 26]
+2025-08-06 16:17:12,589 - __main__ - INFO - 2025-08-06 16:17:12.589921 Travel Time Indexes [19 of 29 (mark1)]
+2025-08-06 16:19:11,455 - __main__ - WARNING - File cor_monthly_vph.pkl not found
+2025-08-06 16:21:11,020 - __main__ - WARNING - File sub_monthly_vph.pkl not found
+2025-08-06 16:21:11,028 - __main__ - INFO - Travel time indexes processing completed successfully
+2025-08-06 16:21:11,028 - __main__ - INFO - Completed Travel Time Indexes [19 of 26]
+2025-08-06 16:21:11,028 - __main__ - INFO - Starting CCTV Uptime [20 of 26]
+2025-08-06 16:21:11,028 - __main__ - INFO - 2025-08-06 16:21:11.028493 CCTV Uptimes [20 of 29 (mark1)]
+2025-08-06 16:21:11,028 - monthly_report_package_1_helper - ERROR - Could not import required modules: cannot import name 'get_athena_connection' from 'configs' (C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\configs.py)
+2025-08-06 16:21:11,028 - __main__ - ERROR - Error in CCTV uptime processing: cannot access local variable 'pd' where it is not associated with a value
+2025-08-06 16:21:11,028 - __main__ - ERROR - Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1_helper.py", line 1448, in get_daily_cctv_uptime
+    from configs import get_athena_connection
+ImportError: cannot import name 'get_athena_connection' from 'configs' (C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\configs.py)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1.py", line 1482, in process_cctv_uptime
+    daily_cctv_uptime_511 = get_daily_cctv_uptime(
+                            ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1_helper.py", line 1582, in get_daily_cctv_uptime
+    return pd.DataFrame()
+           ^^
+UnboundLocalError: cannot access local variable 'pd' where it is not associated with a value
+
+2025-08-06 16:21:11,028 - __main__ - INFO - Completed CCTV Uptime [20 of 26]
+2025-08-06 16:21:11,028 - __main__ - INFO - Starting TEAMS Activities [21 of 26]
+2025-08-06 16:21:11,028 - __main__ - INFO - 2025-08-06 16:21:11.028493 TEAMS [21 of 29 (mark1)]
+2025-08-06 16:21:11,044 - botocore.credentials - INFO - Found credentials in environment variables.
+2025-08-06 16:21:34,803 - __main__ - INFO - Completed TEAMS Activities [21 of 26]
+2025-08-06 16:21:34,803 - __main__ - INFO - Starting User Delay Costs [22 of 26]
+2025-08-06 16:21:34,803 - __main__ - INFO - 2025-08-06 16:21:34.803838 User Delay Costs [22 of 29 (mark1)]
+2025-08-06 16:21:36,512 - __main__ - WARNING - Could not read UDC data for 2025-08-01 00:00:00: An error occurred (NoSuchKey) when calling the GetObject operation: The specified key does not exist.
+2025-08-06 16:21:36,517 - __main__ - INFO - Completed User Delay Costs [22 of 26]
+2025-08-06 16:21:36,517 - __main__ - INFO - Starting Flash Events [23 of 26]
+2025-08-06 16:21:36,517 - __main__ - INFO - 2025-08-06 16:21:36.517164 Flash Events [23 of 29 (mark1)]
+2025-08-06 16:25:01,398 - monthly_report_package_1_helper - ERROR - Error calculating monthly flash events: "Column(s) ['flash'] do not exist"
+2025-08-06 16:25:01,403 - __main__ - ERROR - Error in flash events processing: ['Corridor']
+2025-08-06 16:25:01,403 - __main__ - ERROR - Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1.py", line 1788, in process_flash_events
+    ).dropna(subset=['Corridor'])
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\server-env\Lib\site-packages\pandas\core\frame.py", line 6677, in dropna
+    raise KeyError(np.array(subset)[check].tolist())
+KeyError: ['Corridor']
+
+2025-08-06 16:25:01,403 - __main__ - INFO - Completed Flash Events [23 of 26]
+2025-08-06 16:25:01,403 - __main__ - INFO - Starting Bike/Ped Safety Index [24 of 26]
+2025-08-06 16:25:01,403 - __main__ - INFO - 2025-08-06 16:25:01.403081 Bike/Ped Safety Index [24 of 29 (mark1)]
+2025-08-06 16:25:03,233 - __main__ - WARNING - Could not read subcorridor BPSI for 2025-06-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:04,942 - __main__ - WARNING - Could not read subcorridor BPSI for 2025-07-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:06,609 - __main__ - WARNING - Could not read subcorridor BPSI for 2025-08-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:08,301 - __main__ - WARNING - Could not read corridor BPSI for 2025-06-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:09,985 - __main__ - WARNING - Could not read corridor BPSI for 2025-07-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:11,655 - __main__ - WARNING - Could not read corridor BPSI for 2025-08-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:11,665 - __main__ - INFO - Completed Bike/Ped Safety Index [24 of 26]
+2025-08-06 16:25:11,665 - __main__ - INFO - Starting Relative Speed Index [25 of 26]
+2025-08-06 16:25:11,665 - __main__ - INFO - 2025-08-06 16:25:11.665701 Relative Speed Index [25 of 29 (mark1)]
+2025-08-06 16:25:13,166 - __main__ - WARNING - Could not read subcorridor RSI for 2025-06-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:15,044 - __main__ - WARNING - Could not read subcorridor RSI for 2025-07-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:17,043 - __main__ - WARNING - Could not read subcorridor RSI for 2025-08-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:18,722 - __main__ - WARNING - Could not read corridor RSI for 2025-06-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:20,423 - __main__ - WARNING - Could not read corridor RSI for 2025-07-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:22,064 - __main__ - WARNING - Could not read corridor RSI for 2025-08-01 00:00:00: 'str' object is not callable
+2025-08-06 16:25:22,066 - __main__ - INFO - Completed Relative Speed Index [25 of 26]
+2025-08-06 16:25:22,066 - __main__ - INFO - Starting Crash Indices [26 of 26]
+2025-08-06 16:25:22,066 - __main__ - INFO - 2025-08-06 16:25:22.066005 Crash Indices [26 of 29 (mark1)]
+2025-08-06 16:25:30,090 - __main__ - ERROR - Error in crash indices processing: 'str' object is not callable
+2025-08-06 16:25:30,093 - __main__ - ERROR - Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\s3_parquet_io.py", line 141, in s3read_using
+    return read_func(io.StringIO(content.decode('utf-8')), **kwargs)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0xf2 in position 14: invalid continuation byte
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\monthly_report_package_1.py", line 2015, in process_crash_indices
+    crashes = s3read_using(
+              ^^^^^^^^^^^^^
+  File "C:\Users\kogum\Desktop\JobSupport\achyuth\RtoPy\s3_parquet_io.py", line 143, in s3read_using
+    return read_func(io.BytesIO(content), **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'str' object is not callable
+
+2025-08-06 16:25:30,099 - __main__ - INFO - Completed Crash Indices [26 of 26]
+2025-08-06 16:25:30,101 - __main__ - INFO - Monthly Report Package Processing completed successfully
+2025-08-06 16:25:30,191 - __main__ - INFO - Cleaned up connections and memory
