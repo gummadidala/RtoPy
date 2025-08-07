@@ -432,7 +432,9 @@ def get_det_config_factory(bucket: str, folder: str):
                             'LatencyCorrection': 'float64'
                         }
                     )
+                    logger.info(f"bucket: {bucket}, s3_key: {s3_key}, encoding: {encoding}")
                     logger.info(f"Successfully read detector config with {encoding} encoding")
+                    print(df.columns)
                     break
                     
                 except UnicodeDecodeError:

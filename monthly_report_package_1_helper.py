@@ -1452,10 +1452,11 @@ def get_daily_cctv_uptime(database, table_name, cam_config, start_date):
         
         # Query the database table
         query = f"""
-        SELECT cameraid, date
-        FROM {table_name}
-        WHERE size > 0 AND date >= '{start_date}'
-        """
+                    SELECT cameraid, date
+                    FROM {table_name}
+                    WHERE size > 0 AND date >= DATE '{start_date}'
+                """
+
         
         # Execute query and get results
         import pandas as pd

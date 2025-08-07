@@ -219,31 +219,39 @@ def get_aurora_connection_pool():
 
 def get_athena_connection(conf_athena: Dict[str, str], use_pool: bool = False):
     """
-    Get Athena database connection using PyAthena
+    Get Athena database connection using SQLAlchemy and PyAthena
     
     Args:
-        conf_athena: Athena configuration dictionary
-        use_pool: Whether to use connection pooling
+        conf_athena (dict): Athena configuration dictionary with keys:
+            - 'database': Athena database name
+            - 'staging_dir': S3 location for query results
+            - 'region' (optional): AWS region (default from env or 'us-east-1')
+            - 'uid' and 'pwd' (optional): Only needed for federated connectors
+        use_pool (bool): If True, returns SQLAlchemy engine with pooling.
     
     Returns:
-        Database connection or connection pool
+        sqlalchemy Connection or Engine
     """
-    
     try:
-        # Validate required configuration
-        required_keys = ['uid', 'pwd', 'database', 'staging_dir']
+        required_keys = ['database', 'staging_dir']
         missing_keys = [key for key in required_keys if key not in conf_athena]
         if missing_keys:
-            raise ValueError(f"Missing required configuration keys: {missing_keys}")
-        
+            raise ValueError(f"Missing required Athena config keys: {missing_keys}")
+
         region = conf_athena.get('region', os.getenv('AWS_DEFAULT_REGION', 'us-east-1'))
-        
+
+        uid = conf_athena.get('uid', '')
+        pwd = conf_athena.get('pwd', '')
+
+        # Create connection string (UID/PWD optional; used for federated connectors only)
+        auth_part = f"{uid}:{pwd}@" if uid and pwd else ""
         connection_string = (
-            f"awsathena+rest://{conf_athena['uid']}:{conf_athena['pwd']}"
-            f"@athena.{region}.amazonaws.com:443/"
+            f"awsathena+rest://{auth_part}athena.{region}.amazonaws.com:443/"
             f"{conf_athena['database']}?s3_staging_dir={conf_athena['staging_dir']}"
         )
-        
+
+        logger.info("Creating Athena connection...")
+
         if use_pool:
             from sqlalchemy.pool import QueuePool
             engine = create_engine(
@@ -252,19 +260,21 @@ def get_athena_connection(conf_athena: Dict[str, str], use_pool: bool = False):
                 pool_size=5,
                 max_overflow=10,
                 pool_timeout=30,
-                pool_recycle=3600
+                pool_recycle=3600,
             )
+            logger.info("Athena connection pool created")
             return engine
         else:
             engine = create_engine(connection_string)
-            return engine.connect()
-            
+            conn = engine.connect()
+            logger.info("Athena connection established")
+            return conn
+
     except ImportError:
-        logger.error("PyAthena not installed. Install with: pip install PyAthena (without SQLAlchemy extras)")
-        logger.error("Or try: pip install awswrangler (recommended alternative)")
+        logger.error("Missing dependencies. Install PyAthena with:\n  pip install 'PyAthena[SQLAlchemy]'")
         raise
     except Exception as e:
-        logger.error(f"Error connecting to Athena: {e}")
+        logger.error(f"Error creating Athena connection: {e}")
         raise
 
 def get_athena_connection_pool(conf_athena: Dict[str, str]):

@@ -6,7 +6,8 @@ Main Monthly Report Package - Python version of R script
 This script processes traffic data to generate comprehensive monthly reports
 covering 26 different traffic metrics and performance indicators.
 """
-
+import gc
+import tracemalloc
 import sys
 import os
 import yaml
@@ -348,7 +349,6 @@ def load_data(filename):
 def process_detector_uptime(dates, config_data):
     """Process vehicle detector uptime [1 of 29]"""
     logger.info(f"{datetime.now()} Vehicle Detector Uptime [1 of 29 (mark1)]")
-    
     try:
         def callback(x):
             return get_avg_daily_detector_uptime(x)
@@ -404,7 +404,17 @@ def process_detector_uptime(dates, config_data):
             save_data(sub_monthly_detector_uptime, "sub_monthly_detector_uptime.pkl")
             
             logger.info("Detector uptime processing completed successfully")
-        
+            # Cleanup memory
+            del avg_daily_detector_uptime
+            del cor_avg_daily_detector_uptime
+            del sub_avg_daily_detector_uptime
+            del weekly_detector_uptime
+            del cor_weekly_detector_uptime
+            del sub_weekly_detector_uptime
+            del monthly_detector_uptime
+            del cor_monthly_detector_uptime
+            del sub_monthly_detector_uptime
+            gc.collect()
     except Exception as e:
         logger.error(f"Error in detector uptime processing: {e}")
         logger.error(traceback.format_exc())
@@ -518,7 +528,18 @@ def process_ped_pushbutton_uptime(dates, config_data):
                 save_data(monthly_pa_uptime, "monthly_pa_uptime.pkl")
                 save_data(cor_monthly_pa_uptime, "cor_monthly_pa_uptime.pkl")
                 save_data(sub_monthly_pa_uptime, "sub_monthly_pa_uptime.pkl")
-                
+                # Cleanup memory
+                del daily_pa_uptime
+                del cor_daily_pa_uptime
+                del sub_daily_pa_uptime
+                del weekly_pa_uptime
+                del cor_weekly_pa_uptime
+                del sub_weekly_pa_uptime
+                del monthly_pa_uptime
+                del cor_monthly_pa_uptime
+                del sub_monthly_pa_uptime
+                del pau
+                gc.collect()
                 logger.info("Pedestrian pushbutton uptime processing completed successfully")
         
     except Exception as e:
@@ -596,7 +617,7 @@ def process_watchdog_alerts(dates, config_data):
                'Date', 'Alert', 'Name', 'ApproachDesc']]
             
             save_data(bad_det, "watchdog_bad_detectors.pkl")
-        
+            del bad_det  # Cleanup memory
         # Process bad pedestrian detectors
         try:
             bad_ped = s3_read_parquet_parallel(
@@ -619,6 +640,7 @@ def process_watchdog_alerts(dates, config_data):
                 )
                 
                 save_data(bad_ped, "watchdog_bad_ped_pushbuttons.pkl")
+                del bad_ped  # Cleanup memory
         except Exception as e:
             logger.warning(f"No bad pedestrian detectors data found: {e}")
         
@@ -643,7 +665,7 @@ def process_watchdog_alerts(dates, config_data):
                         bad_cameras = cctv_data[cctv_data.get('Size', 0) == 0]
                         if not bad_cameras.empty:
                             bad_cam_list.append(bad_cameras)
-                            
+                    del cctv_data  # Cleanup memory
                 except Exception as e:
                     logger.warning(f"Could not read CCTV data for {current_month.strftime('%Y-%m-%d')}: {e}")
                 
@@ -681,6 +703,7 @@ def process_watchdog_alerts(dates, config_data):
                 
                 bad_cam = bad_cam[required_cols]
                 save_data(bad_cam, "watchdog_bad_cameras.pkl")
+                del bad_cam  # Cleanup memory
                 
         except Exception as e:
             logger.warning(f"Could not process camera data: {e}")
@@ -730,6 +753,15 @@ def process_daily_ped_activations(dates, config_data):
             save_data(sub_weekly_papd, "sub_weekly_papd.pkl")
             save_data(sub_monthly_papd, "sub_monthly_papd.pkl")
             
+            # Cleanup memory
+            del weekly_papd
+            del monthly_papd
+            del cor_weekly_papd
+            del cor_monthly_papd
+            del sub_weekly_papd
+            del sub_monthly_papd
+            gc.collect()
+
             logger.info("Daily pedestrian activations processing completed successfully")
         
     except Exception as e:
@@ -767,6 +799,15 @@ def process_hourly_ped_activations(dates, config_data):
             save_data(cor_monthly_paph, "cor_monthly_paph.pkl")
             save_data(sub_weekly_paph, "sub_weekly_paph.pkl")
             save_data(sub_monthly_paph, "sub_monthly_paph.pkl")
+
+            # Cleanup memory
+            del weekly_paph
+            del monthly_paph
+            del cor_weekly_paph
+            del cor_monthly_paph
+            del sub_weekly_paph
+            del sub_monthly_paph
+            gc.collect()
             
             logger.info("Hourly pedestrian activations processing completed successfully")
         
@@ -825,6 +866,15 @@ def process_pedestrian_delay(dates, config_data):
             save_data(cor_monthly_pd_by_day, "cor_monthly_pd_by_day.pkl")
             save_data(sub_weekly_pd_by_day, "sub_weekly_pd_by_day.pkl")
             save_data(sub_monthly_pd_by_day, "sub_monthly_pd_by_day.pkl")
+
+            # Cleanup memory
+            del weekly_pd_by_day
+            del monthly_pd_by_day
+            del cor_weekly_pd_by_day
+            del cor_monthly_pd_by_day
+            del sub_weekly_pd_by_day
+            del sub_monthly_pd_by_day
+            gc.collect()
             
             logger.info("Pedestrian delay processing completed successfully")
         
@@ -884,6 +934,18 @@ def process_communications_uptime(dates, config_data):
             save_data(monthly_comm_uptime, "monthly_comm_uptime.pkl")
             save_data(cor_monthly_comm_uptime, "cor_monthly_comm_uptime.pkl")
             save_data(sub_monthly_comm_uptime, "sub_monthly_comm_uptime.pkl")
+
+            # Cleanup memory
+            del daily_comm_uptime
+            del cor_daily_comm_uptime
+            del sub_daily_comm_uptime
+            del weekly_comm_uptime
+            del cor_weekly_comm_uptime
+            del sub_weekly_comm_uptime
+            del monthly_comm_uptime
+            del cor_monthly_comm_uptime
+            del sub_monthly_comm_uptime
+            gc.collect()
             
             logger.info("Communications uptime processing completed successfully")
         
@@ -936,6 +998,15 @@ def process_daily_volumes(dates, config_data):
             save_data(cor_monthly_vpd, "cor_monthly_vpd.pkl")
             save_data(sub_weekly_vpd, "sub_weekly_vpd.pkl")
             save_data(sub_monthly_vpd, "sub_monthly_vpd.pkl")
+
+            # Cleanup memory
+            del weekly_vpd
+            del monthly_vpd
+            del cor_weekly_vpd
+            del cor_monthly_vpd
+            del sub_weekly_vpd
+            del sub_monthly_vpd
+            gc.collect()
             
             logger.info("Daily volumes processing completed successfully")
         
@@ -1029,6 +1100,21 @@ def process_hourly_volumes(dates, config_data):
             save_data(cor_monthly_vph_peak, "cor_monthly_vph_peak.pkl")
             save_data(sub_weekly_vph_peak, "sub_weekly_vph_peak.pkl")
             save_data(sub_monthly_vph_peak, "sub_monthly_vph_peak.pkl")
+
+            # Cleanup memory
+            del weekly_vph
+            del monthly_vph
+            del cor_weekly_vph
+            del cor_monthly_vph
+            del sub_weekly_vph
+            del sub_monthly_vph
+            del weekly_vph_peak
+            del monthly_vph_peak
+            del cor_weekly_vph_peak
+            del cor_monthly_vph_peak
+            del sub_weekly_vph_peak
+            del sub_monthly_vph_peak
+            gc.collect()
             
             logger.info("Hourly volumes processing completed successfully")
         
@@ -1079,6 +1165,15 @@ def process_daily_throughput(dates, config_data):
             save_data(cor_monthly_throughput, "cor_monthly_throughput.pkl")
             save_data(sub_weekly_throughput, "sub_weekly_throughput.pkl")
             save_data(sub_monthly_throughput, "sub_monthly_throughput.pkl")
+
+            # Cleanup memory
+            del weekly_throughput
+            del monthly_throughput
+            del cor_weekly_throughput
+            del cor_monthly_throughput
+            del sub_weekly_throughput
+            del sub_monthly_throughput
+            gc.collect()
             
             logger.info("Daily throughput processing completed successfully")
         else:
@@ -1127,6 +1222,15 @@ def process_arrivals_on_green(dates, config_data):
             save_data(cor_monthly_aog_by_day, "cor_monthly_aog_by_day.pkl")
             save_data(sub_weekly_aog_by_day, "sub_weekly_aog_by_day.pkl")
             save_data(sub_monthly_aog_by_day, "sub_monthly_aog_by_day.pkl")
+
+            # Cleanup memory
+            del weekly_aog_by_day
+            del monthly_aog_by_day
+            del cor_weekly_aog_by_day
+            del cor_monthly_aog_by_day
+            del sub_weekly_aog_by_day
+            del sub_monthly_aog_by_day
+            gc.collect()
             
             # Store aog for use in progression ratio calculations
             save_data(aog, "aog_data.pkl")
@@ -1159,6 +1263,12 @@ def process_hourly_arrivals_on_green(dates, config_data):
             save_data(monthly_aog_by_hr, "monthly_aog_by_hr.pkl")
             save_data(cor_monthly_aog_by_hr, "cor_monthly_aog_by_hr.pkl")
             save_data(sub_monthly_aog_by_hr, "sub_monthly_aog_by_hr.pkl")
+
+            # Cleanup memory
+            del monthly_aog_by_hr
+            del cor_monthly_aog_by_hr
+            del sub_monthly_aog_by_hr
+            gc.collect()
             
             logger.info("Hourly arrivals on green processing completed successfully")
         
@@ -1195,6 +1305,15 @@ def process_daily_progression_ratio(dates, config_data):
             save_data(cor_monthly_pr_by_day, "cor_monthly_pr_by_day.pkl")
             save_data(sub_weekly_pr_by_day, "sub_weekly_pr_by_day.pkl")
             save_data(sub_monthly_pr_by_day, "sub_monthly_pr_by_day.pkl")
+
+            # Cleanup memory
+            del weekly_pr_by_day
+            del monthly_pr_by_day
+            del cor_weekly_pr_by_day
+            del cor_monthly_pr_by_day
+            del sub_weekly_pr_by_day
+            del sub_monthly_pr_by_day
+            gc.collect()
             
             logger.info("Daily progression ratio processing completed successfully")
         
@@ -1224,6 +1343,12 @@ def process_hourly_progression_ratio(dates, config_data):
             save_data(monthly_pr_by_hr, "monthly_pr_by_hr.pkl")
             save_data(cor_monthly_pr_by_hr, "cor_monthly_pr_by_hr.pkl")
             save_data(sub_monthly_pr_by_hr, "sub_monthly_pr_by_hr.pkl")
+
+            # Cleanup memory
+            del monthly_pr_by_hr
+            del cor_monthly_pr_by_hr
+            del sub_monthly_pr_by_hr
+            gc.collect()
             
             logger.info("Hourly progression ratio processing completed successfully")
         
@@ -1304,6 +1429,21 @@ def process_daily_split_failures(dates, config_data):
             save_data(cor_monthly_sfo_by_day, "cor_monthly_sfo.pkl")
             save_data(sub_weekly_sfo_by_day, "sub_wsfo.pkl")
             save_data(sub_monthly_sfo_by_day, "sub_monthly_sfo.pkl")
+
+            # Cleanup memory
+            del weekly_sf_by_day
+            del monthly_sf_by_day
+            del cor_weekly_sf_by_day
+            del cor_monthly_sf_by_day
+            del sub_weekly_sf_by_day
+            del sub_monthly_sf_by_day
+            del weekly_sfo_by_day
+            del monthly_sfo_by_day
+            del cor_weekly_sfo_by_day
+            del cor_monthly_sfo_by_day
+            del sub_weekly_sfo_by_day
+            del sub_monthly_sfo_by_day
+            gc.collect()
             
             # Store sf for hourly processing
             save_data(sf, "sf_data.pkl")
@@ -1336,6 +1476,12 @@ def process_hourly_split_failures(dates, config_data):
             save_data(msfh, "msfh.pkl")
             save_data(cor_msfh, "cor_msfh.pkl")
             save_data(sub_msfh, "sub_msfh.pkl")
+
+            # Cleanup memory
+            del msfh
+            del cor_msfh
+            del sub_msfh
+            gc.collect()
             
             logger.info("Hourly split failures processing completed successfully")
         
@@ -1380,6 +1526,15 @@ def process_daily_queue_spillback(dates, config_data):
             save_data(cor_monthly_qsd, "cor_monthly_qsd.pkl")
             save_data(sub_wqs, "sub_wqs.pkl")
             save_data(sub_monthly_qsd, "sub_monthly_qsd.pkl")
+
+            # Cleanup memory
+            del wqs
+            del monthly_qsd
+            del cor_wqs
+            del cor_monthly_qsd
+            del sub_wqs
+            del sub_monthly_qsd
+            gc.collect()
             
             # Store qs for hourly processing
             save_data(qs, "qs_data.pkl")
@@ -1412,6 +1567,12 @@ def process_hourly_queue_spillback(dates, config_data):
             save_data(mqsh, "mqsh.pkl")
             save_data(cor_mqsh, "cor_mqsh.pkl")
             save_data(sub_mqsh, "sub_mqsh.pkl")
+
+            # Cleanup memory
+            del mqsh
+            del cor_mqsh
+            del sub_mqsh
+            gc.collect()
             
             logger.info("Hourly queue spillback processing completed successfully")
         
@@ -1475,6 +1636,17 @@ def process_travel_time_indexes(dates, config_data):
                 save_data(cor_monthly_bi_by_hr, "cor_monthly_bi_by_hr.pkl")
                 save_data(cor_monthly_spd, "cor_monthly_spd.pkl")
                 save_data(cor_monthly_spd_by_hr, "cor_monthly_spd_by_hr.pkl")
+
+                # Cleanup memory
+                del cor_monthly_tti
+                del cor_monthly_tti_by_hr
+                del cor_monthly_pti
+                del cor_monthly_pti_by_hr
+                del cor_monthly_bi
+                del cor_monthly_bi_by_hr
+                del cor_monthly_spd
+                del cor_monthly_spd_by_hr
+                gc.collect()
         
         # ------- Subcorridor Travel Time Metrics ------- #
         tt_sub = s3_read_parquet_parallel(
@@ -1532,6 +1704,17 @@ def process_travel_time_indexes(dates, config_data):
                 save_data(sub_monthly_bi_by_hr, "sub_monthly_bi_by_hr.pkl")
                 save_data(sub_monthly_spd, "sub_monthly_spd.pkl")
                 save_data(sub_monthly_spd_by_hr, "sub_monthly_spd_by_hr.pkl")
+
+                # Cleanup memory
+                del sub_monthly_tti
+                del sub_monthly_tti_by_hr
+                del sub_monthly_pti
+                del sub_monthly_pti_by_hr
+                del sub_monthly_bi
+                del sub_monthly_bi_by_hr
+                del sub_monthly_spd
+                del sub_monthly_spd_by_hr
+                gc.collect()
         
         logger.info("Travel time indexes processing completed successfully")
         
@@ -1546,12 +1729,24 @@ def process_cctv_uptime(dates, config_data):
     try:
         # Get CCTV uptime from 511 and encoders
         daily_cctv_uptime_511 = get_daily_cctv_uptime(
-            conf.athena['database'], "cctv_uptime", config_data['cam_config'], dates['wk_calcs_start_date']
+            conf.athena, "cctv_uptime", config_data['cam_config'], dates['wk_calcs_start_date']
         )
         daily_cctv_uptime_encoders = get_daily_cctv_uptime(
-            conf.athena['database'], "cctv_uptime_encoders", config_data['cam_config'], dates['wk_calcs_start_date']
+            conf.athena, "cctv_uptime_encoders", config_data['cam_config'], dates['wk_calcs_start_date']
         )
-        
+
+        if 'Corridor' not in daily_cctv_uptime_511.columns or 'Corridor' not in daily_cctv_uptime_encoders.columns:
+            daily_cctv_uptime_511['Corridor'] = daily_cctv_uptime_511['Corridor_x']
+            daily_cctv_uptime_encoders['Corridor'] = daily_cctv_uptime_encoders['Corridor_x']
+
+        if 'Subcorridor' not in daily_cctv_uptime_511.columns or 'Subcorridor' not in daily_cctv_uptime_encoders.columns:
+            daily_cctv_uptime_511['Subcorridor'] = daily_cctv_uptime_511['Corridor_y']
+            daily_cctv_uptime_encoders['Subcorridor'] = daily_cctv_uptime_encoders['Corridor_y']
+
+        if 'Description' not in daily_cctv_uptime_511.columns or 'Description' not in daily_cctv_uptime_encoders.columns:
+            daily_cctv_uptime_511['Description'] = "NA"
+            daily_cctv_uptime_encoders['Description'] = "NA"
+
         if not daily_cctv_uptime_511.empty or not daily_cctv_uptime_encoders.empty:
             # Merge 511 and encoder data
             daily_cctv_uptime = pd.merge(
@@ -1561,16 +1756,29 @@ def process_cctv_uptime(dates, config_data):
                 how='outer',
                 suffixes=('_511', '_enc')
             )
-            
-            # Fill missing dates
-            camera_dates = pd.MultiIndex.from_product([
-                daily_cctv_uptime[['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'CameraID', 'Description']].drop_duplicates().values,
-                pd.date_range(dates['wk_calcs_start_date'], dates['report_end_date'])
-            ], names=['camera_info', 'Date'])
-            
-            # Create complete DataFrame
-            daily_cctv_uptime = daily_cctv_uptime.set_index(['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'CameraID', 'Description', 'Date']).reindex(camera_dates).reset_index()
-            
+            columns = ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'CameraID', 'Description']
+
+            camera_info = (
+                daily_cctv_uptime[columns]
+                .drop_duplicates()
+            )
+
+            # Create MultiIndex with 7 levels: the 6 camera info fields + Date
+            camera_dates = pd.MultiIndex.from_product(
+                [
+                    camera_info[col].unique() for col in columns
+                ] + [pd.date_range(dates['wk_calcs_start_date'], dates['report_end_date'])],
+                names=columns + ['Date']
+            )
+
+            # Now set index to the same 7 columns
+            daily_cctv_uptime = (
+                daily_cctv_uptime
+                .set_index(columns + ['Date'])
+                .reindex(camera_dates)
+                .reset_index()
+            )
+
             # Fill NaN values
             fill_cols = ['up_enc', 'num_enc', 'uptime_enc', 'up_511', 'num_511', 'uptime_511']
             for col in fill_cols:
@@ -1659,6 +1867,18 @@ def process_cctv_uptime(dates, config_data):
             save_data(sub_daily_cctv_uptime, "sub_daily_cctv_uptime.pkl")
             save_data(sub_weekly_cctv_uptime, "sub_weekly_cctv_uptime.pkl")
             save_data(sub_monthly_cctv_uptime, "sub_monthly_cctv_uptime.pkl")
+
+            # Cleanup memory
+            del daily_cctv_uptime
+            del weekly_cctv_uptime
+            del monthly_cctv_uptime
+            del cor_daily_cctv_uptime
+            del cor_weekly_cctv_uptime
+            del cor_monthly_cctv_uptime
+            del sub_daily_cctv_uptime
+            del sub_weekly_cctv_uptime
+            del sub_monthly_cctv_uptime
+            gc.collect()
             
             logger.info("CCTV uptime processing completed successfully")
         
@@ -1727,6 +1947,17 @@ def process_teams_activities(dates, config_data):
             save_data(tasks_all, "tasks_all.pkl")
             save_data(cor_outstanding_tasks_by_day_range, "cor_tasks_by_date.pkl")
             save_data(sig_outstanding_tasks_by_day_range, "sig_tasks_by_date.pkl")
+
+            # Cleanup memory
+            del teams
+            del tasks_by_type
+            del tasks_by_subtype
+            del tasks_by_priority
+            del tasks_by_source
+            del tasks_all
+            del cor_outstanding_tasks_by_day_range
+            del sig_outstanding_tasks_by_day_range
+            gc.collect()
             
             logger.info("TEAMS activities processing completed successfully")
         
@@ -1818,6 +2049,12 @@ def process_user_delay_costs(dates, config_data):
             # Save results
             save_data(hourly_udc, "hourly_udc.pkl")
             save_data(udc_trend_table_list, "udc_trend_table_list.pkl")
+
+            # Cleanup memory
+            del udc
+            del hourly_udc
+            del udc_trend_table_list
+            gc.collect()
             
             logger.info("User delay costs processing completed successfully")
         
@@ -1870,6 +2107,13 @@ def process_flash_events(dates, config_data):
             save_data(monthly_flash, "monthly_flash.pkl")
             save_data(cor_monthly_flash, "cor_monthly_flash.pkl")
             save_data(sub_monthly_flash, "sub_monthly_flash.pkl")
+
+            # Cleanup memory
+            del fe
+            del monthly_flash
+            del cor_monthly_flash
+            del sub_monthly_flash
+            gc.collect()
             
             logger.info("Flash events processing completed successfully")
         else:
@@ -1979,6 +2223,11 @@ def process_bike_ped_safety_index(dates, config_data):
                 save_data(cor_monthly_bpsi, "cor_monthly_bpsi.pkl")
             if not sub_monthly_bpsi.empty:
                 save_data(sub_monthly_bpsi, "sub_monthly_bpsi.pkl")
+
+            # Cleanup memory
+            del cor_monthly_bpsi
+            del sub_monthly_bpsi
+            gc.collect()
             
             logger.info("Bike/Ped safety index processing completed successfully")
         else:
@@ -2086,6 +2335,11 @@ def process_relative_speed_index(dates, config_data):
                 save_data(cor_monthly_rsi, "cor_monthly_rsi.pkl")
             if not sub_monthly_rsi.empty:
                 save_data(sub_monthly_rsi, "sub_monthly_rsi.pkl")
+            
+            # Cleanup memory
+            del cor_monthly_rsi
+            del sub_monthly_rsi
+            gc.collect()
             
             logger.info("Relative speed index processing completed successfully")
         else:
@@ -2254,6 +2508,16 @@ def process_crash_indices(dates, config_data):
                     save_data(cor_monthly_kabco_index, "cor_monthly_kabco_index.pkl")
                     save_data(sub_monthly_crash_rate_index, "sub_monthly_crash_rate_index.pkl")
                     save_data(sub_monthly_kabco_index, "sub_monthly_kabco_index.pkl")
+
+                    # Cleanup memory
+                    del monthly_crashes
+                    del monthly_crash_rate_index
+                    del monthly_kabco_index
+                    del cor_monthly_crash_rate_index
+                    del cor_monthly_kabco_index
+                    del sub_monthly_crash_rate_index
+                    del sub_monthly_kabco_index
+                    gc.collect()
                     
                     logger.info("Crash indices processing completed successfully")
                 else:
@@ -2286,32 +2550,32 @@ def main():
         
         # Process each section sequentially
         processing_functions = [
-            (process_detector_uptime, "Vehicle Detector Uptime"),
-            (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
-            (process_watchdog_alerts, "Watchdog Alerts"),
-            (process_daily_ped_activations, "Daily Pedestrian Activations"),
-            (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
-            (process_pedestrian_delay, "Pedestrian Delay"),
-            (process_communications_uptime, "Communications Uptime"),
-            (process_daily_volumes, "Daily Volumes"),
-            (process_hourly_volumes, "Hourly Volumes"),
-            (process_daily_throughput, "Daily Throughput"),
-            (process_arrivals_on_green, "Arrivals on Green"),
-            (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
-            (process_daily_progression_ratio, "Daily Progression Ratio"),
-            (process_hourly_progression_ratio, "Hourly Progression Ratio"),
-            (process_daily_split_failures, "Daily Split Failures"),
-            (process_hourly_split_failures, "Hourly Split Failures"),
-            (process_daily_queue_spillback, "Daily Queue Spillback"),
-            (process_hourly_queue_spillback, "Hourly Queue Spillback"),
-            (process_travel_time_indexes, "Travel Time Indexes"),
+            # (process_detector_uptime, "Vehicle Detector Uptime"),
+            # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
+            # (process_watchdog_alerts, "Watchdog Alerts"),
+            # (process_daily_ped_activations, "Daily Pedestrian Activations"),
+            # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
+            # (process_pedestrian_delay, "Pedestrian Delay"),
+            # (process_communications_uptime, "Communications Uptime"),
+            # (process_daily_volumes, "Daily Volumes"),
+            # (process_hourly_volumes, "Hourly Volumes"),
+            # (process_daily_throughput, "Daily Throughput"),
+            # (process_arrivals_on_green, "Arrivals on Green"),
+            # (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
+            # (process_daily_progression_ratio, "Daily Progression Ratio"),
+            # (process_hourly_progression_ratio, "Hourly Progression Ratio"),
+            # (process_daily_split_failures, "Daily Split Failures"),
+            # (process_hourly_split_failures, "Hourly Split Failures"),
+            # (process_daily_queue_spillback, "Daily Queue Spillback"),
+            # (process_hourly_queue_spillback, "Hourly Queue Spillback"),
+            # (process_travel_time_indexes, "Travel Time Indexes"),
             (process_cctv_uptime, "CCTV Uptime"),
-            (process_teams_activities, "TEAMS Activities"),
-            (process_user_delay_costs, "User Delay Costs"),
-            (process_flash_events, "Flash Events"),
-            (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
-            (process_relative_speed_index, "Relative Speed Index"),
-            (process_crash_indices, "Crash Indices")
+            # (process_teams_activities, "TEAMS Activities"),
+            # (process_user_delay_costs, "User Delay Costs"),
+            # (process_flash_events, "Flash Events"),
+            # (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
+            # (process_relative_speed_index, "Relative Speed Index"),
+            # (process_crash_indices, "Crash Indices")
         ]
         
         # Track progress
