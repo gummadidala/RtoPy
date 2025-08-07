@@ -2552,7 +2552,7 @@ def main():
         processing_functions = [
             # (process_detector_uptime, "Vehicle Detector Uptime"),
             # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
-            # (process_watchdog_alerts, "Watchdog Alerts"),
+            (process_watchdog_alerts, "Watchdog Alerts"),
             # (process_daily_ped_activations, "Daily Pedestrian Activations"),
             # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
             # (process_pedestrian_delay, "Pedestrian Delay"),
@@ -2569,7 +2569,7 @@ def main():
             # (process_daily_queue_spillback, "Daily Queue Spillback"),
             # (process_hourly_queue_spillback, "Hourly Queue Spillback"),
             # (process_travel_time_indexes, "Travel Time Indexes"),
-            (process_cctv_uptime, "CCTV Uptime"),
+            # (process_cctv_uptime, "CCTV Uptime"),
             # (process_teams_activities, "TEAMS Activities"),
             # (process_user_delay_costs, "User Delay Costs"),
             # (process_flash_events, "Flash Events"),

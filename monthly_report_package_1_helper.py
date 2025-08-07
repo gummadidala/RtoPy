@@ -365,9 +365,15 @@ def get_cor_monthly_avg_by_day(df, corridors, metric_col, weight_col=None):
     try:
         if df.empty or corridors.empty:
             return pd.DataFrame()
+
+        # Ensure consistent dtype for SignalID
+        df['SignalID'] = df['SignalID'].astype(str)
+        corridors['SignalID'] = corridors['SignalID'].astype(str)
         
-        merged = df.merge(corridors[['SignalID', 'Zone_Group', 'Zone', 'Corridor']], 
-                         on='SignalID', how='left')
+        merged = df.merge(
+            corridors[['SignalID', 'Zone_Group', 'Zone', 'Corridor']], 
+            on='SignalID', how='left'
+        )
         
         group_cols = ['Zone_Group', 'Zone', 'Corridor']
         if 'Month' in merged.columns:
@@ -377,7 +383,8 @@ def get_cor_monthly_avg_by_day(df, corridors, metric_col, weight_col=None):
         
         if weight_col and weight_col in merged.columns:
             merged['weighted_metric'] = merged[metric_col] * merged[weight_col]
-            cor_avg = merged.groupby(group_cols).agg({'weighted_metric': 'sum',
+            cor_avg = merged.groupby(group_cols).agg({
+                'weighted_metric': 'sum',
                 weight_col: 'sum'
             }).reset_index()
             cor_avg[metric_col] = cor_avg['weighted_metric'] / cor_avg[weight_col]
@@ -388,7 +395,7 @@ def get_cor_monthly_avg_by_day(df, corridors, metric_col, weight_col=None):
             }).reset_index()
         
         return cor_avg
-        
+
     except Exception as e:
         logger.error(f"Error calculating corridor monthly average by day: {e}")
         return pd.DataFrame()
