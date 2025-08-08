@@ -25,8 +25,9 @@ setup_logging("INFO")
 logger = logging.getLogger(__name__)
 
 def main():
-    """Main initialization function"""
+    """Main initialization function - exact equivalent of Monthly_Report_Calcs_init.R"""
     
+    # R: writeLines(glue("\n\n{Sys.time()} Starting Calcs Script"))
     print(f"\n\n{datetime.now()} Starting Calcs Script")
     
     # Load configuration
@@ -36,12 +37,12 @@ def main():
         logger.error("Failed to load configuration")
         sys.exit(1)
     
-    # Setup parallel processing
+    # R: usable_cores <- get_usable_cores()
     usable_cores = get_usable_cores()
     logger.info(f"Using {usable_cores} cores for parallel processing")
     
-    # Define date range for calculations
-    
+    # R: start_date <- get_date_from_string(conf$start_date, s3bucket = conf$bucket, s3prefix = "mark/split_failures")
+    # R: end_date <- get_date_from_string(conf$end_date)
     start_date = get_date_from_string(
         conf['start_date'], 
         s3bucket=conf['bucket'], 
@@ -49,36 +50,122 @@ def main():
     )
     end_date = get_date_from_string(conf['end_date'])
     
-    # Manual overrides (uncomment if needed)
+    # Manual overrides (commented in R, keeping as comment)
     # start_date = "2020-01-04"
     # end_date = "2020-01-04"
     
-    # Validate date range
-    if not validate_date_range(start_date, end_date):
-        logger.error("Invalid date range")
-        sys.exit(1)
-    
-    logger.info(f"Processing date range: {start_date} to {end_date}")
-    
+    # R: month_abbrs <- get_month_abbrs(start_date, end_date)
     month_abbrs = get_month_abbrs(start_date, end_date)
-    logger.info(f"Month abbreviations: {month_abbrs}")
     
-    # Get corridors configuration
-    logger.info("Loading corridors configuration...")
-    update_corridors_files(conf)
+    # GET CORRIDORS (exact equivalent of R code block)
+    # R: corridors <- get_corridors(conf$corridors_filename_s3, filter_signals = TRUE)
+    corridors = get_corridors(conf['corridors_filename_s3'], filter_signals=True)
     
-    # Get signals list
-    logger.info("Getting signals list...")
-    signals_list = get_signals_list(start_date, end_date, usable_cores, conf)
-    logger.info(f"Found {len(signals_list)} unique signals")
+    # R: feather_filename <- sub("\\..*", ".feather", conf$corridors_filename_s3)
+    # R: write_feather(corridors, feather_filename)
+    feather_filename = conf['corridors_filename_s3'].replace('.xlsx', '.feather').replace('.xls', '.feather')
+    corridors.to_feather(feather_filename)
     
-    # Update detector configuration
-    logger.info("Updating detector configuration...")
-    update_detector_config(conf)
+    # R: qs_filename <- sub("\\..*", ".qs", conf$corridors_filename_s3)
+    # R: qsave(corridors, qs_filename)
+    parquet_filename = conf['corridors_filename_s3'].replace('.xlsx', '.parquet').replace('.xls', '.parquet')
+    corridors.to_parquet(parquet_filename)
     
-    # Setup Athena partitions
-    logger.info("Setting up Athena partitions...")
-    setup_athena_partitions(conf, start_date, end_date)
+    # R: all_corridors <- get_corridors(conf$corridors_filename_s3, filter_signals = FALSE)
+    all_corridors = get_corridors(conf['corridors_filename_s3'], filter_signals=False)
+    
+    # R: feather_filename <- sub("\\..*", ".feather", paste0("all_", conf$corridors_filename_s3))
+    # R: write_feather(all_corridors, feather_filename)
+    all_feather_filename = "all_" + feather_filename
+    all_corridors.to_feather(all_feather_filename)
+    
+    # R: qs_filename <- sub("\\..*", ".qs", paste0("all_", conf$corridors_filename_s3))
+    # R: qsave(all_corridors, qs_filename)
+    all_parquet_filename = "all_" + parquet_filename
+    all_corridors.to_parquet(all_parquet_filename)
+    
+    # R: signals_list <- mclapply(seq(as_date(start_date), as_date(end_date), by = "1 day"),
+    #                            mc.cores = usable_cores, FUN = get_signalids_from_s3) %>%
+    #                   unlist() %>% unique()
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
+    
+    # Create partial function with bucket parameter
+    get_signalids_with_bucket = partial(get_signalids_from_s3, bucket=conf['bucket'])
+    
+    # Process dates in parallel (equivalent to mclapply)
+    with ProcessPoolExecutor(max_workers=usable_cores) as executor:
+        results = list(executor.map(get_signalids_with_bucket, date_strings))
+    
+    # Flatten and get unique signals (equivalent to unlist() %>% unique())
+    signals_list = []
+    for result in results:
+        if result:
+            signals_list.extend(result)
+    
+    signals_list = list(set(signals_list))  # unique()
+    
+    # R: get_latest_det_config(conf) %>% s3write_using(qsave, bucket = conf$bucket, object = "ATSPM_Det_Config_Good_Latest.qs")
+    det_config = get_latest_det_config(conf)
+    if not det_config.empty:
+        det_config.to_parquet("ATSPM_Det_Config_Good_Latest.parquet")
+        s3write_using(
+            det_config.to_parquet,
+            bucket=conf['bucket'],
+            object="ATSPM_Det_Config_Good_Latest.parquet"
+        )
+    
+    # Add partitions that don't already exist to Athena ATSPM table (exact equivalent of R code)
+    try:
+        # R: athena <- get_athena_connection(conf$athena)
+        athena = get_athena_connection(conf['athena'])
+        
+        if athena:
+            # R: partitions <- dbGetQuery(athena, glue("SHOW PARTITIONS {conf$athena$atspm_table}"))$partition
+            partitions_query = f"SHOW PARTITIONS {conf['athena']['atspm_table']}"
+            try:
+                partitions_df = pd.read_sql(partitions_query, athena)
+                # R: partitions <- sapply(stringr::str_split(partitions, "="), last)
+                partitions = [
+                    partition.split('=')[-1] 
+                    for partition in partitions_df['partition'].tolist()
+                ]
+            except:
+                partitions = []
+            
+            # R: date_range <- seq(as_date(start_date), as_date(end_date), by = "1 day") %>% as.character()
+            # R: missing_partitions <- setdiff(date_range, partitions)
+            missing_partitions = [
+                date for date in date_strings 
+                if date not in partitions
+            ]
+            
+            # R: if (length(missing_partitions) > 10) {
+            if len(missing_partitions) > 10:
+                # R: print(glue("Adding missing partition: date={missing_partitions}"))
+                # R: dbExecute(athena, glue("MSCK REPAIR TABLE {conf$athena$atspm_table}"))
+                print(f"Adding missing partition: date={missing_partitions}")
+                repair_query = f"MSCK REPAIR TABLE {conf['athena']['atspm_table']}"
+                athena.execute(repair_query)
+            # R: } else if (length(missing_partitions) > 0) {
+            elif len(missing_partitions) > 0:
+                # R: print("Adding missing partitions:")
+                # R: for (date_ in missing_partitions) {
+                #        add_athena_partition(conf$athena, conf$bucket, conf$athena$atspm_table, date_)
+                #    }
+                print("Adding missing partitions:")
+                for date_ in missing_partitions:
+                    add_athena_partition(
+                        conf['athena'], 
+                        conf['bucket'], 
+                        conf['athena']['atspm_table'], 
+                        date_
+                    )
+            
+            # R: dbDisconnect(athena)
+            athena.close()
+    except Exception as e:
+        logger.error(f"Error setting up Athena partitions: {e}")
     
     logger.info("Initialization completed successfully")
 
@@ -91,265 +178,16 @@ def main():
         'usable_cores': usable_cores
     }
 
-def update_corridors_files(conf: dict):
-    """
-    Update corridors files from Excel and save in multiple formats
-    
-    Args:
-        conf: Configuration dictionary
-    """
-    
-    try:
-        # Get corridors with filtered signals
-        corridors = get_corridors(conf['corridors_filename_s3'], filter_signals=True)
-        
-        # Save as feather
-        feather_filename = conf['corridors_filename_s3'].replace('.xlsx', '.feather').replace('.xls', '.feather')
-        corridors.to_feather(feather_filename)
-        
-        # Save as parquet (more compatible than feather)
-        parquet_filename = conf['corridors_filename_s3'].replace('.xlsx', '.parquet').replace('.xls', '.parquet')
-        corridors.to_parquet(parquet_filename)
-        
-        # Get all corridors (including inactive signals)
-        all_corridors = get_corridors(conf['corridors_filename_s3'], filter_signals=False)
-        
-        # Save all corridors
-        all_feather_filename = "all_" + feather_filename
-        all_corridors.to_feather(all_feather_filename)
-        
-        all_parquet_filename = "all_" + parquet_filename
-        all_corridors.to_parquet(all_parquet_filename)
-        
-        # Upload to S3
-        s3write_using(
-            corridors.to_feather,
-            bucket=conf['bucket'],
-            object=feather_filename
-        )
-        
-        s3write_using(
-            all_corridors.to_feather,
-            bucket=conf['bucket'],
-            object=all_feather_filename
-        )
-        
-        logger.info("Successfully updated corridors files")
-        
-    except Exception as e:
-        logger.error(f"Error updating corridors files: {e}")
-        raise
-
-from functools import partial
-
-def get_signals_list(start_date: str, end_date: str, usable_cores: int, conf: dict) -> list:
-    """
-    Get list of unique signal IDs for the date range
-    
-    Args:
-        start_date: Start date string
-        end_date: End date string
-        usable_cores: Number of cores for parallel processing
-        conf: Configuration dictionary
-    
-    Returns:
-        List of unique signal IDs
-    """
-    
-    try:
-        # Generate date range
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
-        
-        # Create partial function with bucket parameter
-        get_signalids_with_bucket = partial(get_signalids_from_s3, bucket=conf['bucket'])
-        
-        # Process dates in parallel
-        with ProcessPoolExecutor(max_workers=usable_cores) as executor:
-            results = list(executor.map(get_signalids_with_bucket, date_strings))
-        
-        # Flatten and get unique signals
-        signals_list = []
-        for result in results:
-            if result:
-                signals_list.extend(result)
-        
-        unique_signals = list(set(signals_list))
-        unique_signals.sort()
-        
-        return unique_signals
-        
-    except Exception as e:
-        logger.error(f"Error getting signals list: {e}")
-        return []
-
-def update_detector_config(conf: dict):
-    """
-    Update detector configuration and save to S3
-    
-    Args:
-        conf: Configuration dictionary
-    """
-    
-    try:
-        # Get latest detector config
-        det_config = get_latest_det_config(conf)
-        
-        if det_config.empty:
-            logger.warning("No detector configuration found")
-            return
-        
-        # Save as parquet for better compatibility with Python
-        parquet_filename = "ATSPM_Det_Config_Good_Latest.parquet"
-        det_config.to_parquet(parquet_filename)
-        
-        # Upload to S3
-        s3write_using(
-            det_config.to_parquet,
-            bucket=conf['bucket'],
-            object=parquet_filename
-        )
-        
-        logger.info("Successfully updated detector configuration")
-        
-    except Exception as e:
-        logger.error(f"Error updating detector configuration: {e}")
-
-def setup_athena_partitions(conf: dict, start_date: str, end_date: str):
-    """
-    Setup Athena partitions for the date range
-    
-    Args:
-        conf: Configuration dictionary
-        start_date: Start date string
-        end_date: End date string
-    """
-    
-    try:
-        # Connect to Athena
-        athena_conn = get_athena_connection(conf['athena'])
-        
-        # Get existing partitions
-        partitions_query = f"SHOW PARTITIONS {conf['athena']['atspm_table']}"
-        partitions_df = pd.read_sql(partitions_query, athena_conn)
-        
-        if 'partition' in partitions_df.columns:
-            existing_partitions = [
-                partition.split('=')[1] 
-                for partition in partitions_df['partition'].tolist()
-            ]
-        else:
-            existing_partitions = []
-        
-        # Generate date range
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
-        
-        # Find missing partitions
-        missing_partitions = [
-            date for date in date_strings 
-            if date not in existing_partitions
-        ]
-        
-        if len(missing_partitions) > 10:
-            # Too many missing partitions, use MSCK REPAIR
-            logger.info("Adding missing partitions with MSCK REPAIR TABLE")
-            repair_query = f"MSCK REPAIR TABLE {conf['athena']['atspm_table']}"
-            athena_conn.execute(repair_query)
-            
-        elif missing_partitions:
-            # Add individual partitions
-            logger.info(f"Adding {len(missing_partitions)} missing partitions")
-            for date_str in missing_partitions:
-                add_athena_partition(
-                    conf['athena'], 
-                    conf['bucket'], 
-                    conf['athena']['atspm_table'], 
-                    date_str
-                )
-        else:
-            logger.info("All partitions already exist")
-        
-        athena_conn.close()
-        
-    except Exception as e:
-        logger.error(f"Error setting up Athena partitions: {e}")
-
-def validate_initialization(conf: dict, signals_list: list) -> bool:
-    """
-    Validate that initialization completed successfully
-    
-    Args:
-        conf: Configuration dictionary
-        signals_list: List of signal IDs
-    
-    Returns:
-        Boolean indicating if validation passed
-    """
-    
-    validation_checks = []
-    
-    # Check S3 connectivity
-    s3_valid = validate_s3_connectivity(conf['bucket'])
-    validation_checks.append(('S3 Connectivity', s3_valid))
-    
-    # Check signals list
-    signals_valid = len(signals_list) > 0
-    validation_checks.append(('Signals List', signals_valid))
-    
-    # Check corridors file exists
-    corridors_exist = os.path.exists('corridors.feather') or os.path.exists('corridors.parquet')
-    validation_checks.append(('Corridors File', corridors_exist))
-    
-    # Log validation results
-    logger.info("Validation Results:")
-    all_valid = True
-    for check_name, result in validation_checks:
-        status = "PASS" if result else "FAIL"
-        logger.info(f"  {check_name}: {status}")
-        if not result:
-            all_valid = False
-    
-    return all_valid
-
-def create_initialization_summary(start_time: datetime, 
-                                end_time: datetime,
-                                conf: dict,
-                                signals_list: list) -> str:
-    """
-    Create summary of initialization process
-    
-    Args:
-        start_time: Initialization start time
-        end_time: Initialization end time
-        conf: Configuration dictionary
-        signals_list: List of signal IDs
-    
-    Returns:
-        Summary string
-    """
-    
-    duration = end_time - start_time
-    
-    summary = f"""
-    Initialization Summary
-    =====================
-    Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}
-    End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}
-    Duration: {duration}
-    
-    Configuration:
-    - Bucket: {conf.get('bucket', 'N/A')}
-    - Start Date: {conf.get('start_date', 'N/A')}
-    - End Date: {conf.get('end_date', 'N/A')}
-    
-    Results:
-    - Signals Found: {len(signals_list)}
-    - Usable Cores: {get_usable_cores()}
-    
-    """
-    
-    return summary
+# Make these variables globally available (equivalent to R's global environment)
+def load_init_variables():
+    """Load initialization variables (equivalent to sourcing the init script)"""
+    init_results = main()
+    return (
+        init_results['conf'],
+        init_results['start_date'], 
+        init_results['end_date'],
+        init_results['signals_list']
+    )
 
 if __name__ == "__main__":
     """Run initialization if called directly"""
@@ -360,56 +198,29 @@ if __name__ == "__main__":
         # Run main initialization
         init_results = main()
         
-        # Validate results
-        validation_passed = validate_initialization(
-            init_results['conf'], 
-            init_results['signals_list']
-        )
-        
         end_time = datetime.now()
+        duration = end_time - start_time
         
-        # Create summary
-        summary = create_initialization_summary(
-            start_time, 
-            end_time,
-            init_results['conf'],
-            init_results['signals_list']
-        )
+        print(f"""
+        Initialization Summary
+        =====================
+        Start Time: {start_time.strftime('%Y-%m-%d %H:%M:%S')}
+        End Time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}
+        Duration: {duration}
         
-        print(summary)
+        Configuration:
+        - Bucket: {init_results['conf'].get('bucket', 'N/A')}
+        - Start Date: {init_results['start_date']}
+        - End Date: {init_results['end_date']}
         
-        if validation_passed:
-            logger.info("Initialization completed successfully")
-            
-            # Create checkpoint
-            create_checkpoint_file(
-                'initialization_complete',
-                {
-                    'timestamp': end_time.isoformat(),
-                    'start_date': init_results['start_date'],
-                    'end_date': init_results['end_date'],
-                    'signals_count': len(init_results['signals_list']),
-                    'validation_passed': validation_passed
-                },
-                init_results['conf']['bucket']
-            )
-            
-            sys.exit(0)
-        else:
-            logger.error("Initialization validation failed")
-            sys.exit(1)
+        Results:
+        - Signals Found: {len(init_results['signals_list'])}
+        - Usable Cores: {init_results['usable_cores']}
+        """)
+        
+        logger.info("Initialization completed successfully")
+        sys.exit(0)
             
     except Exception as e:
-        end_time = datetime.now()
         logger.error(f"Initialization failed: {e}")
-        
-        # Send error notification if configured
-        if conf.get('notifications'):
-            send_notification(
-                f"Monthly Report initialization failed: {e}",
-                "error",
-                conf['notifications'].get('email'),
-                conf['notifications'].get('slack')
-            )
-        
         sys.exit(1)
