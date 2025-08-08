@@ -23,12 +23,14 @@ logger = logging.getLogger(__name__)
 def load_rds_data(filename):
     """Load RDS file data (assuming converted to pickle format)"""
     try:
-        pkl_filename = filename.replace('.rds', '.pkl')
-        if os.path.exists(pkl_filename):
-            with open(pkl_filename, 'rb') as f:
+        pkl_filename = Path(filename).with_suffix('.pkl')  # change .rds to .pkl
+        file_path = Path('data_output') / pkl_filename.name  # only use filename, not full path
+
+        if file_path.exists():
+            with open(file_path, 'rb') as f:
                 return pickle.load(f)
         else:
-            logger.warning(f"File not found: {pkl_filename}")
+            logger.warning(f"File not found: {file_path.resolve()}")
             return pd.DataFrame()
     except Exception as e:
         logger.error(f"Error loading {filename}: {e}")
