@@ -363,7 +363,7 @@ def get_ped_config_cel_factory(bucket: str, conf_athena: Dict):
     
     return get_ped_config_cel
 
-def get_det_config_factory(bucket: str, folder: str):
+def get_det_config_factory_notinscope(bucket: str, folder: str):
     """
     Factory function to create detector configuration getter
     
@@ -484,6 +484,176 @@ def get_det_config_factory(bucket: str, folder: str):
             return pd.DataFrame()
     
     return get_det_config
+
+def get_det_config_factory(bucket: str, folder: str):
+    """
+    Factory function to create detector configuration getter
+    
+    Args:
+        bucket: S3 bucket name
+        folder: S3 folder name for detector configs
+    
+    Returns:
+        Function that takes date and returns detector config
+    """
+    
+    def get_det_config(date_: Union[str, date, datetime]) -> pd.DataFrame:
+        """
+        Get detector configuration for a specific date
+        
+        Args:
+            date_: Date for configuration
+        
+        Returns:
+            DataFrame with detector configuration
+        """
+        
+        if isinstance(date_, str):
+            date_str = date_
+        else:
+            date_str = date_.strftime('%Y-%m-%d') if hasattr(date_, 'strftime') else str(date_)
+        
+        try:
+            s3_prefix = f"config/{folder}/date={date_str}"
+            
+            # List objects with this prefix
+            s3_client = boto3.client('s3')
+            response = s3_client.list_objects_v2(Bucket=bucket, Prefix=s3_prefix)
+            
+            if 'Contents' not in response:
+                raise ValueError(f"No detector config found for {date_str}")
+            
+            # Get the detector config file
+            config_obj = response['Contents'][0]
+            s3_key = config_obj['Key']
+            
+            # Try different encoding options
+            encoding_options = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+            
+            for encoding in encoding_options:
+                try:
+                    # Read the configuration file with specific encoding
+                    df = s3read_using(
+                        pd.read_csv,
+                        bucket=bucket,
+                        object=s3_key,
+                        encoding=encoding,
+                        dtype={
+                            'SignalID': str,
+                            'IP': str,
+                            'PrimaryName': str,
+                            'SecondaryName': str,
+                            'Detector': str,
+                            'CallPhase': str,
+                            'TimeFromStopBar': 'float64',
+                            'DetectionHardware': str,
+                            'LaneType': str,
+                            'MovementType': str,
+                            'LaneNumber': 'Int64',
+                            'DetChannel': 'Int64',
+                            'LatencyCorrection': 'float64'
+                        }
+                    )
+                    logger.info(f"bucket: {bucket}, s3_key: {s3_key}, encoding: {encoding}")
+                    logger.info(f"Successfully read detector config with {encoding} encoding")
+                    
+                    # Debug: Check DataFrame immediately after reading
+                    logger.info(f"DataFrame shape after reading: {df.shape}")
+                    logger.info(f"DataFrame columns after reading: {list(df.columns)}")
+                    logger.info(f"SignalID column exists: {'SignalID' in df.columns}")
+                    
+                    if 'SignalID' not in df.columns:
+                        logger.error(f"SignalID column missing after reading. Available columns: {list(df.columns)}")
+                        continue
+                    
+                    break
+                    
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    logger.error(f"Error reading with encoding {encoding}: {e}")
+                    if encoding == encoding_options[-1]:  # Last encoding option
+                        raise e
+                    continue
+            else:
+                # If all encodings fail, try reading as binary and handling errors
+                logger.warning(f"All standard encodings failed for {s3_key}, trying error handling")
+                df = s3read_using(
+                    pd.read_csv,
+                    bucket=bucket,
+                    object=s3_key,
+                    encoding='utf-8',
+                    encoding_errors='ignore',  # Ignore encoding errors
+                    dtype=str  # Read all as strings initially
+                )
+            
+            # Verify DataFrame is valid and has SignalID column
+            if df is None or df.empty:
+                logger.error(f"DataFrame is None or empty for {date_str}")
+                return pd.DataFrame()
+            
+            if 'SignalID' not in df.columns:
+                logger.error(f"SignalID column not found. Available columns: {list(df.columns)}")
+                return pd.DataFrame()
+            
+            logger.info(f"DataFrame validation passed. Shape: {df.shape}")
+            
+            # Convert to categories for memory efficiency
+            try:
+                categorical_cols = ['SignalID', 'Detector', 'CallPhase', 'DetectionHardware', 
+                                  'LaneType', 'MovementType']
+                for col in categorical_cols:
+                    if col in df.columns:
+                        logger.debug(f"Converting {col} to category")
+                        df[col] = df[col].astype('category')
+            except Exception as e:
+                logger.error(f"Error converting to categories: {e}")
+                # Continue without category conversion
+            
+            # Convert numeric columns
+            try:
+                numeric_cols = {
+                    'TimeFromStopBar': 'float64',
+                    'LaneNumber': 'Int64',
+                    'DetChannel': 'Int64',
+                    'LatencyCorrection': 'float64'
+                }
+                for col, dtype in numeric_cols.items():
+                    if col in df.columns:
+                        logger.debug(f"Converting {col} to {dtype}")
+                        df[col] = pd.to_numeric(df[col], errors='coerce').astype(dtype)
+            except Exception as e:
+                logger.error(f"Error converting numeric columns: {e}")
+                # Continue without numeric conversion
+            
+            # Remove duplicates keeping the first occurrence
+            try:
+                if 'Detector' not in df.columns:
+                    logger.warning("Detector column not found, skipping duplicate removal")
+                    logger.info(f"Available columns for duplicate removal: {list(df.columns)}")
+                else:
+                    logger.debug("Removing duplicates based on SignalID and Detector")
+                    initial_count = len(df)
+                    df = df.groupby(['SignalID', 'Detector']).first().reset_index()
+                    final_count = len(df)
+                    logger.info(f"Duplicate removal: {initial_count} -> {final_count} rows")
+            except Exception as e:
+                logger.error(f"Error during duplicate removal: {e}")
+                logger.error(f"DataFrame columns at error: {list(df.columns)}")
+                # Return the DataFrame without duplicate removal
+                pass
+            
+            logger.info(f"Loaded {len(df)} detector configurations for {date_str}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error loading detector config for {date_str}: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            return pd.DataFrame()
+    
+    return get_det_config
+
 
 def get_latest_det_config(conf: Dict) -> pd.DataFrame:
     """

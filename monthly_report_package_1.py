@@ -546,7 +546,7 @@ def process_ped_pushbutton_uptime(dates, config_data):
         logger.error(f"Error in pedestrian pushbutton uptime processing: {e}")
         logger.error(traceback.format_exc())
 
-def process_watchdog_alerts(dates, config_data):
+def process_watchdog_alerts_notinscope(dates, config_data):
     """Process watchdog alerts [3 of 29]"""
     logger.info(f"{datetime.now()} Watchdog alerts [3 of 29 (mark1)]")
     
@@ -682,6 +682,183 @@ def process_watchdog_alerts(dates, config_data):
                         how='left'
                     )
                     if 'As_of_Date' in bad_cam.columns and 'Date' in bad_cam.columns:
+                        bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
+                
+                # Add required columns with defaults
+                required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
+                               'Date', 'Alert', 'Name']
+                
+                for col in required_cols:
+                    if col not in bad_cam.columns:
+                        if col == 'SignalID':
+                            bad_cam[col] = bad_cam.get('CameraID', 'Unknown')
+                        elif col in ['CallPhase', 'Detector']:
+                            bad_cam[col] = 0
+                        elif col == 'Alert':
+                            bad_cam[col] = 'No Camera Image'
+                        elif col == 'Name':
+                            bad_cam[col] = bad_cam.get('Location', bad_cam.get('CameraID', 'Unknown'))
+                        else:
+                            bad_cam[col] = 'Unknown'
+                
+                bad_cam = bad_cam[required_cols]
+                save_data(bad_cam, "watchdog_bad_cameras.pkl")
+                del bad_cam  # Cleanup memory
+                
+        except Exception as e:
+            logger.warning(f"Could not process camera data: {e}")
+        
+        logger.info("Watchdog alerts processing completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Error in watchdog alerts processing: {e}")
+        logger.error(traceback.format_exc())
+
+def process_watchdog_alerts(dates, config_data):
+    """Process watchdog alerts [3 of 29]"""
+    logger.info(f"{datetime.now()} Watchdog alerts [3 of 29 (mark1)]")
+    
+    try:
+        # Process bad vehicle detectors
+        bad_det = s3_read_parquet_parallel(
+            table_name="bad_detectors",
+            start_date=date.today() - timedelta(days=90),
+            end_date=date.today() - timedelta(days=1),
+            bucket=conf.bucket
+        )
+        
+        if not bad_det.empty:
+            bad_det = clean_signal_ids(bad_det)
+            bad_det['Detector'] = bad_det['Detector'].astype('category')
+            
+            # Get detector configuration with fallback
+            det_config_list = []
+            unique_dates = sorted(bad_det['Date'].unique())
+            
+            for date_val in unique_dates:
+                try:
+                    # Get detector config factory function
+                    get_det_config = get_det_config_factory(conf.bucket, 'atspm_det_config_good')
+                    config = get_det_config(date_val)
+                    
+                    if not config.empty:
+                        config['Date'] = date_val
+                        det_config_list.append(config)
+                    else:
+                        logger.warning(f"No detector config found for {date_val}")
+                        
+                except Exception as e:
+                    logger.warning(f"Error loading detector config for {date_val}: {e}")
+            
+            # Process detector data if config available
+            if det_config_list:
+                det_config = pd.concat(det_config_list, ignore_index=True)
+                det_config = clean_signal_ids(det_config)
+                det_config['CallPhase'] = det_config['CallPhase'].astype('category')
+                det_config['Detector'] = det_config['Detector'].astype('category')
+                
+                # Join with detector configuration
+                bad_det = bad_det.merge(
+                    det_config[['SignalID', 'Detector', 'Date', 'CallPhase', 'LaneType', 'MovementType']],
+                    on=['SignalID', 'Detector', 'Date'],
+                    how='left'
+                )
+            
+            # Add missing columns with defaults
+            for col in ['CallPhase', 'LaneType', 'MovementType']:
+                if col not in bad_det.columns:
+                    bad_det[col] = 'Unknown'
+            
+            # Join with corridor information
+            bad_det = bad_det.merge(
+                config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
+                on='SignalID',
+                how='left'
+            ).dropna(subset=['Corridor'])
+            
+            # Format the output
+            bad_det = bad_det.assign(
+                Alert='Bad Vehicle Detection',
+                Name=lambda x: x['Name'].str.replace('@', '-', regex=False),
+                ApproachDesc=lambda x: x['LaneType'].fillna('Unknown').astype(str)
+            )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
+               'Date', 'Alert', 'Name', 'ApproachDesc']]
+            
+            save_data(bad_det, "watchdog_bad_detectors.pkl")
+            del bad_det  # Cleanup memory
+        
+        # Process bad pedestrian detectors
+        try:
+            bad_ped = s3_read_parquet_parallel(
+                table_name="bad_ped_detectors",
+                start_date=date.today() - timedelta(days=90),
+                end_date=date.today() - timedelta(days=1),
+                bucket=conf.bucket
+            )
+            
+            if not bad_ped.empty:
+                bad_ped = clean_signal_ids(bad_ped)
+                bad_ped['Detector'] = bad_ped['Detector'].astype('category')
+                
+                bad_ped = bad_ped.merge(
+                    config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
+                    on='SignalID',
+                    how='left'
+                )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'Detector', 'Date', 'Name']].assign(
+                    Alert='Bad Ped Detection'
+                )
+                
+                save_data(bad_ped, "watchdog_bad_ped_pushbuttons.pkl")
+                del bad_ped  # Cleanup memory
+        except Exception as e:
+            logger.warning(f"No bad pedestrian detectors data found: {e}")
+        
+        # Process bad cameras - FIXED
+        try:
+            bad_cam_list = []
+            start_month = date.today().replace(day=1) - relativedelta(months=6)
+            current_month = start_month
+            
+            while current_month < date.today():
+                try:
+                    key = f"mark/cctv_uptime/month={current_month.strftime('%Y-%m-%d')}/cctv_uptime_{current_month.strftime('%Y-%m-%d')}.parquet"
+                    
+                    # FIXED: Pass the function object, not string
+                    cctv_data = s3read_using(
+                        pd.read_parquet,  # Function object
+                        bucket=conf.bucket, 
+                        object=key
+                    )
+                    
+                    if not cctv_data.empty:
+                        bad_cameras = cctv_data[cctv_data.get('Size', 0) == 0]
+                        if not bad_cameras.empty:
+                            bad_cam_list.append(bad_cameras)
+                    del cctv_data  # Cleanup memory
+                except Exception as e:
+                    logger.warning(f"Could not read CCTV data for {current_month.strftime('%Y-%m-%d')}: {e}")
+                
+                current_month += relativedelta(months=1)
+            
+            if bad_cam_list:
+                bad_cam = pd.concat(bad_cam_list, ignore_index=True)
+                
+                # FIX: Ensure CameraID data types match before merge
+                if 'cam_config' in config_data and not config_data['cam_config'].empty:
+                    # Convert CameraID to string in both DataFrames to ensure compatibility
+                    bad_cam['CameraID'] = bad_cam['CameraID'].astype(str)
+                    config_data['cam_config']['CameraID'] = config_data['cam_config']['CameraID'].astype(str)
+                    
+                    bad_cam = bad_cam.merge(
+                        config_data['cam_config'], 
+                        on='CameraID', 
+                        how='left'
+                    )
+                    
+                    if 'As_of_Date' in bad_cam.columns and 'Date' in bad_cam.columns:
+                        # Ensure both date columns are datetime
+                        bad_cam['As_of_Date'] = pd.to_datetime(bad_cam['As_of_Date'])
+                        bad_cam['Date'] = pd.to_datetime(bad_cam['Date'])
                         bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
                 
                 # Add required columns with defaults
@@ -2550,32 +2727,32 @@ def main():
         
         # Process each section sequentially
         processing_functions = [
-            (process_detector_uptime, "Vehicle Detector Uptime"),
-            (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
+            # (process_detector_uptime, "Vehicle Detector Uptime"),
+            # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
             (process_watchdog_alerts, "Watchdog Alerts"),
-            (process_daily_ped_activations, "Daily Pedestrian Activations"),
-            (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
-            (process_pedestrian_delay, "Pedestrian Delay"),
-            (process_communications_uptime, "Communications Uptime"),
-            (process_daily_volumes, "Daily Volumes"),
-            (process_hourly_volumes, "Hourly Volumes"),
-            (process_daily_throughput, "Daily Throughput"),
-            (process_arrivals_on_green, "Arrivals on Green"),
-            (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
-            (process_daily_progression_ratio, "Daily Progression Ratio"),
-            (process_hourly_progression_ratio, "Hourly Progression Ratio"),
-            (process_daily_split_failures, "Daily Split Failures"),
-            (process_hourly_split_failures, "Hourly Split Failures"),
-            (process_daily_queue_spillback, "Daily Queue Spillback"),
-            (process_hourly_queue_spillback, "Hourly Queue Spillback"),
-            (process_travel_time_indexes, "Travel Time Indexes"),
-            (process_cctv_uptime, "CCTV Uptime"),
-            (process_teams_activities, "TEAMS Activities"),
-            (process_user_delay_costs, "User Delay Costs"),
-            (process_flash_events, "Flash Events"),
-            (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
-            (process_relative_speed_index, "Relative Speed Index"),
-            (process_crash_indices, "Crash Indices")
+            # (process_daily_ped_activations, "Daily Pedestrian Activations"),
+            # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
+            # (process_pedestrian_delay, "Pedestrian Delay"),
+            # (process_communications_uptime, "Communications Uptime"),
+            # (process_daily_volumes, "Daily Volumes"),
+            # (process_hourly_volumes, "Hourly Volumes"),
+            # (process_daily_throughput, "Daily Throughput"),
+            # (process_arrivals_on_green, "Arrivals on Green"),
+            # (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
+            # (process_daily_progression_ratio, "Daily Progression Ratio"),
+            # (process_hourly_progression_ratio, "Hourly Progression Ratio"),
+            # (process_daily_split_failures, "Daily Split Failures"),
+            # (process_hourly_split_failures, "Hourly Split Failures"),
+            # (process_daily_queue_spillback, "Daily Queue Spillback"),
+            # (process_hourly_queue_spillback, "Hourly Queue Spillback"),
+            # (process_travel_time_indexes, "Travel Time Indexes"),
+            # (process_cctv_uptime, "CCTV Uptime"),
+            # (process_teams_activities, "TEAMS Activities"),
+            # (process_user_delay_costs, "User Delay Costs"),
+            # (process_flash_events, "Flash Events"),
+            # (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
+            # (process_relative_speed_index, "Relative Speed Index"),
+            # (process_crash_indices, "Crash Indices")
         ]
         
         # Track progress
