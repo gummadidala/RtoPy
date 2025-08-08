@@ -68,19 +68,18 @@ def load_init_variables():
         logger.error(f"Error loading initialization variables: {e}")
         raise
 
-def get_signals_list_from_config2(conf: Dict) -> List[str]:
+def get_signals_list_from_config(conf: Dict) -> List[str]:
     """Get signals list from configuration"""
     try:
         # Try to get from S3/Athena
         session = boto3.Session(
-            aws_access_key_id=conf['athena'].get('uid'),
-            aws_secret_access_key=conf['athena'].get('pwd')
+            # aws_access_key_id=conf['athena'].get('uid'),
+            # aws_secret_access_key=conf['athena'].get('pwd')
         )
         
         query = f"""
         SELECT DISTINCT SignalID 
-        FROM {conf['athena']['database']}.corridors 
-        WHERE Include = true
+        FROM {conf['athena']['database']}.signal_details 
         """
         
         df = wr.athena.read_sql_query(
@@ -90,7 +89,7 @@ def get_signals_list_from_config2(conf: Dict) -> List[str]:
             boto3_session=session,
             ctas_approach=False
         )
-        
+        print(df)
         return df['SignalID'].astype(str).tolist()
         
     except Exception as e:
@@ -98,103 +97,6 @@ def get_signals_list_from_config2(conf: Dict) -> List[str]:
         print(traceback.format_exc())
         logger.warning(f"Could not get signals from config: {e}")
         return []
-
-def get_signals_list_from_config(conf: Dict) -> List[str]:
-    """Get signals list from configuration"""
-    try:
-        session = boto3.Session(
-            aws_access_key_id=conf['athena'].get('uid'),
-            aws_secret_access_key=conf['athena'].get('pwd')
-        )
-        
-        # First check if database exists
-        try:
-            show_databases_query = "SHOW DATABASES"
-            databases_df = wr.athena.read_sql_query(
-                sql=show_databases_query,
-                database='default',  # Use default database for this query
-                s3_output=conf['athena']['staging_dir'],
-                boto3_session=session,
-                ctas_approach=False
-            )
-            
-            print("Available databases:")
-            print(databases_df)
-            
-            # Check if our database exists
-            db_name = conf['athena']['database']
-            if db_name not in databases_df.values:
-                logger.error(f"Database '{db_name}' does not exist")
-                raise Exception(f"Database '{db_name}' not found")
-                
-        except Exception as db_error:
-            logger.error(f"Error checking databases: {db_error}")
-            raise
-        
-        # Now check tables in the database
-        show_tables_query = f"SHOW TABLES IN {conf['athena']['database']}"
-        
-        tables_df = wr.athena.read_sql_query(
-            sql=show_tables_query,
-            database=conf['athena']['database'],
-            s3_output=conf['athena']['staging_dir'],
-            boto3_session=session,
-            ctas_approach=False
-        )
-        
-        print("Available tables:")
-        print(tables_df)
-        print(f"Table columns: {tables_df.columns.tolist()}")
-        
-        if tables_df.empty:
-            logger.warning(f"No tables found in database {conf['athena']['database']}")
-            raise Exception("No tables found in database")
-        
-        # The column name might be different, let's check what columns we have
-        table_col = None
-        for col in ['tab_name', 'table_name', 'Tables_in_' + conf['athena']['database']]:
-            if col in tables_df.columns:
-                table_col = col
-                break
-        
-        if table_col is None:
-            # Use the first column if we can't find the expected one
-            table_col = tables_df.columns[0]
-            logger.warning(f"Using first column '{table_col}' as table name column")
-        
-        # Check for corridor-related tables
-        corridor_tables = tables_df[tables_df[table_col].str.contains('corridor', case=False, na=False)]
-        
-        if not corridor_tables.empty:
-            table_name = corridor_tables.iloc[0][table_col]
-            logger.info(f"Found corridor table: {table_name}")
-            
-            query = f"""
-            SELECT DISTINCT SignalID 
-            FROM {conf['athena']['database']}.{table_name}
-            WHERE Include = true
-            """
-        else:
-            logger.warning("No corridor tables found, trying alternative approaches")
-            raise Exception("No corridors table found")
-        
-        df = wr.athena.read_sql_query(
-            sql=query,
-            database=conf['athena']['database'],
-            s3_output=conf['athena']['staging_dir'],
-            boto3_session=session,
-            ctas_approach=False
-        )
-        
-        return df['SignalID'].astype(str).tolist()
-        
-    except Exception as e:
-        import traceback
-        print(traceback.format_exc())
-        logger.warning(f"Could not get signals from config: {e}")
-        
-        # Fallback to config file
-        return get_signals_from_config_file(conf)
 
 def get_signals_from_config_file(conf: Dict) -> List[str]:
     """Get signals list from config file as fallback"""

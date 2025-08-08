@@ -7,17 +7,17 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 import logging
-from sqlalchemy import create_engine, text, MetaData, Table
-from sqlalchemy.exc import SQLAlchemyError
-import pymysql
-import pyodbc
+from sqlalchemy import create_engine, text
+# from sqlalchemy.exc import SQLAlchemyError
+# import pymysql
+# import pyodbc
 import yaml
 from datetime import datetime, timedelta
 import boto3
-from botocore.exceptions import ClientError
-from pyathena import connect
+# from botocore.exceptions import ClientError
+# from pyathena import connect
 # from pyathena.sqlalchemy import AthenaDialect
 # import awswrangler as wr
 import boto3
