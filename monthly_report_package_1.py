@@ -47,6 +47,34 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+import psutil
+import gc
+
+def log_memory_usage(step_name: str):
+    """Log current memory usage"""
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / 1024 / 1024
+    available_memory = psutil.virtual_memory().available / 1024 / 1024
+    
+    logger.info(f"{step_name} - Memory usage: {memory_mb:.1f} MB, Available: {available_memory:.1f} MB")
+    
+    # Force garbage collection if memory usage is high
+    if memory_mb > 24000:  # 8GB threshold
+        gc.collect()
+        logger.info(f"Forced garbage collection due to high memory usage")
+
+def check_memory_limit(max_memory_mb: int = 24000):
+    """Check if memory usage exceeds limit"""
+    process = psutil.Process()
+    memory_mb = process.memory_info().rss / 1024 / 1024
+    
+    if memory_mb > max_memory_mb:
+        gc.collect()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        if memory_mb > max_memory_mb:
+            raise MemoryError(f"Memory usage {memory_mb:.1f} MB exceeds limit {max_memory_mb} MB")
+
 def round_to_tuesday(date_):
     """
     Round date to nearest Tuesday (matching R logic)
@@ -143,7 +171,6 @@ def get_first_missing_date_from_db(table_pattern: str, exceptions: int = 0):
         logger.error(f"Error getting first missing date: {e}")
         return date.today() - relativedelta(months=6)
 
-
 def load_yaml_configuration() -> Dict[str, Any]:
     """
     Load configuration from YAML files
@@ -184,7 +211,6 @@ def load_yaml_configuration() -> Dict[str, Any]:
     except yaml.YAMLError as e:
         logger.error(f"Error parsing YAML: {e}")
         return {}, {}
-
 
 # Global configuration (would typically be loaded from config file)
 class Config:
@@ -347,13 +373,17 @@ def load_data(filename):
         return pd.DataFrame()
 
 def process_detector_uptime(dates, config_data):
-    """Process vehicle detector uptime [1 of 29]"""
+    """Process vehicle detector uptime [1 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Vehicle Detector Uptime [1 of 29 (mark1)]")
+    log_memory_usage("Start detector uptime")
+    
     try:
         def callback(x):
-            return get_avg_daily_detector_uptime(x)
+            result = get_avg_daily_detector_uptime(x)
+            del x
+            gc.collect()
+            return result
         
-        # Read detector uptime data
         avg_daily_detector_uptime = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="detector_uptime_pd",
@@ -362,75 +392,88 @@ def process_detector_uptime(dates, config_data):
             signals_list=config_data['signals_list'],
             callback=callback
         )
+        
         if not avg_daily_detector_uptime.empty:
+            log_memory_usage("After reading detector uptime data")
             avg_daily_detector_uptime['SignalID'] = avg_daily_detector_uptime['SignalID'].astype('category')
             
-            # Calculate corridor and subcorridor metrics
+            # Process corridor metrics
             cor_avg_daily_detector_uptime = get_cor_avg_daily_detector_uptime(
                 avg_daily_detector_uptime, config_data['corridors']
             )
+            save_data(cor_avg_daily_detector_uptime, "cor_avg_daily_detector_uptime.pkl")
+            del cor_avg_daily_detector_uptime
+            gc.collect()
             
             sub_avg_daily_detector_uptime = get_cor_avg_daily_detector_uptime(
                 avg_daily_detector_uptime, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_avg_daily_detector_uptime, "sub_avg_daily_detector_uptime.pkl")
+            del sub_avg_daily_detector_uptime
+            gc.collect()
             
-            # Calculate weekly metrics
+            # Weekly metrics
             weekly_detector_uptime = get_weekly_detector_uptime(avg_daily_detector_uptime)
+            save_data(weekly_detector_uptime, "weekly_detector_uptime.pkl")
+            log_memory_usage("After weekly detector uptime")
+            
             cor_weekly_detector_uptime = get_cor_weekly_detector_uptime(
                 weekly_detector_uptime, config_data['corridors']
             )
+            save_data(cor_weekly_detector_uptime, "cor_weekly_detector_uptime.pkl")
+            del cor_weekly_detector_uptime
+            gc.collect()
+            
             sub_weekly_detector_uptime = get_cor_weekly_detector_uptime(
                 weekly_detector_uptime, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_detector_uptime, "sub_weekly_detector_uptime.pkl")
+            del sub_weekly_detector_uptime
+            del weekly_detector_uptime
+            gc.collect()
             
-            # Calculate monthly metrics
+            # Monthly metrics
             monthly_detector_uptime = get_monthly_detector_uptime(avg_daily_detector_uptime)
+            save_data(monthly_detector_uptime, "monthly_detector_uptime.pkl")
+            
             cor_monthly_detector_uptime = get_cor_monthly_detector_uptime(
                 avg_daily_detector_uptime, config_data['corridors']
             )
+            save_data(cor_monthly_detector_uptime, "cor_monthly_detector_uptime.pkl")
+            del cor_monthly_detector_uptime
+            gc.collect()
+            
             sub_monthly_detector_uptime = get_cor_monthly_detector_uptime(
                 avg_daily_detector_uptime, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save all results
-            save_data(avg_daily_detector_uptime, "avg_daily_detector_uptime.pkl")
-            save_data(weekly_detector_uptime, "weekly_detector_uptime.pkl")
-            save_data(monthly_detector_uptime, "monthly_detector_uptime.pkl")
-            save_data(cor_avg_daily_detector_uptime, "cor_avg_daily_detector_uptime.pkl")
-            save_data(cor_weekly_detector_uptime, "cor_weekly_detector_uptime.pkl")
-            save_data(cor_monthly_detector_uptime, "cor_monthly_detector_uptime.pkl")
-            save_data(sub_avg_daily_detector_uptime, "sub_avg_daily_detector_uptime.pkl")
-            save_data(sub_weekly_detector_uptime, "sub_weekly_detector_uptime.pkl")
             save_data(sub_monthly_detector_uptime, "sub_monthly_detector_uptime.pkl")
-            
-            logger.info("Detector uptime processing completed successfully")
-            # Cleanup memory
-            del avg_daily_detector_uptime
-            del cor_avg_daily_detector_uptime
-            del sub_avg_daily_detector_uptime
-            del weekly_detector_uptime
-            del cor_weekly_detector_uptime
-            del sub_weekly_detector_uptime
-            del monthly_detector_uptime
-            del cor_monthly_detector_uptime
             del sub_monthly_detector_uptime
+            del monthly_detector_uptime
             gc.collect()
+            
+            save_data(avg_daily_detector_uptime, "avg_daily_detector_uptime.pkl")
+            del avg_daily_detector_uptime
+            gc.collect()
+            
+            log_memory_usage("End detector uptime")
+            logger.info("Detector uptime processing completed successfully")
+            
     except Exception as e:
         logger.error(f"Error in detector uptime processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_ped_pushbutton_uptime(dates, config_data):
-    """Process pedestrian pushbutton uptime [2 of 29]"""
+    """Process pedestrian pushbutton uptime [2 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Ped Pushbutton Uptime [2 of 29 (mark1)]")
+    log_memory_usage("Start ped pushbutton uptime")
     
     try:
-        # Calculate PAU start date (minimum of calcs_start_date or 6 months before report end)
         pau_start_date = min(
             dates['calcs_start_date'],
             dates['report_end_date'] - relativedelta(months=6)
         )
         
-        # Read pedestrian count data
         counts_ped_hourly = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="counts_ped_1hr",
@@ -441,7 +484,8 @@ def process_ped_pushbutton_uptime(dates, config_data):
         )
         
         if not counts_ped_hourly.empty:
-            # Filter out non-programmed pedestrian pushbuttons
+            log_memory_usage("After reading ped hourly data")
+            
             counts_ped_hourly = counts_ped_hourly.dropna(subset=['CallPhase'])
             counts_ped_hourly = clean_signal_ids(counts_ped_hourly)
             counts_ped_hourly['Detector'] = counts_ped_hourly['Detector'].astype('category')
@@ -457,6 +501,10 @@ def process_ped_pushbutton_uptime(dates, config_data):
             
             papd = counts_ped_daily.copy()
             paph = counts_ped_hourly.rename(columns={'Timeperiod': 'Hour', 'vol': 'paph'})
+            del counts_ped_hourly, counts_ped_daily
+            gc.collect()
+            
+            log_memory_usage("After processing ped data")
             
             # Calculate pedestrian uptime using gamma distribution
             date_range = pd.date_range(pau_start_date, dates['report_end_date'], freq='D')
@@ -470,7 +518,6 @@ def process_ped_pushbutton_uptime(dates, config_data):
                 pau_with_replacements = pau.copy()
                 pau_with_replacements.loc[pau_with_replacements['uptime'] == 0, 'papd'] = np.nan
                 
-                # Replace with monthly averages
                 monthly_avg = pau_with_replacements.groupby([
                     'SignalID', 'Detector', 'CallPhase', 
                     pau_with_replacements['Date'].dt.year,
@@ -479,76 +526,90 @@ def process_ped_pushbutton_uptime(dates, config_data):
                 
                 pau_with_replacements['papd'] = pau_with_replacements['papd'].fillna(monthly_avg.fillna(0))
                 papd = pau_with_replacements[['SignalID', 'Detector', 'CallPhase', 'Date', 'DOW', 'Week', 'papd', 'uptime']]
+                del pau_with_replacements, monthly_avg
+                gc.collect()
                 
-                # Identify bad detectors
+                # Bad detectors
                 bad_detectors = get_bad_ped_detectors(pau)
                 bad_detectors = bad_detectors[bad_detectors['Date'] >= dates['calcs_start_date']]
                 
                 if not bad_detectors.empty:
                     save_data(bad_detectors, "bad_ped_detectors.pkl")
+                del bad_detectors
+                gc.collect()
                 
-                # Calculate uptime metrics (hack to make aggregation functions work)
                 save_data(pau, "pa_uptime.pkl")
-                pau['CallPhase'] = pau['Detector']  # Hack for compatibility
+                pau['CallPhase'] = pau['Detector']
                 
-                # Calculate daily, weekly, and monthly uptime
+                # Calculate uptime metrics
                 daily_pa_uptime = get_daily_avg(pau, "uptime", peak_only=False)
-                weekly_pa_uptime = get_weekly_avg_by_day(pau, "uptime", peak_only=False)
-                monthly_pa_uptime = get_monthly_avg_by_day(pau, "uptime", peak_only=False)
+                save_data(daily_pa_uptime, "daily_pa_uptime.pkl")
                 
-                # Calculate corridor metrics
+                weekly_pa_uptime = get_weekly_avg_by_day(pau, "uptime", peak_only=False)
+                save_data(weekly_pa_uptime, "weekly_pa_uptime.pkl")
+                
+                monthly_pa_uptime = get_monthly_avg_by_day(pau, "uptime", peak_only=False)
+                save_data(monthly_pa_uptime, "monthly_pa_uptime.pkl")
+                
+                # Corridor metrics
                 cor_daily_pa_uptime = get_cor_weekly_avg_by_day(
                     daily_pa_uptime, config_data['corridors'], "uptime"
                 )
-                sub_daily_pa_uptime = get_cor_weekly_avg_by_day(
-                    daily_pa_uptime, config_data['subcorridors'], "uptime"
-                ).dropna(subset=['Corridor'])
+                save_data(cor_daily_pa_uptime, "cor_daily_pa_uptime.pkl")
+                del daily_pa_uptime, cor_daily_pa_uptime
+                gc.collect()
                 
                 cor_weekly_pa_uptime = get_cor_weekly_avg_by_day(
                     weekly_pa_uptime, config_data['corridors'], "uptime"
                 )
-                sub_weekly_pa_uptime = get_cor_weekly_avg_by_day(
-                    weekly_pa_uptime, config_data['subcorridors'], "uptime"
-                ).dropna(subset=['Corridor'])
+                save_data(cor_weekly_pa_uptime, "cor_weekly_pa_uptime.pkl")
+                del weekly_pa_uptime, cor_weekly_pa_uptime
+                gc.collect()
                 
                 cor_monthly_pa_uptime = get_cor_monthly_avg_by_day(
                     monthly_pa_uptime, config_data['corridors'], "uptime"
                 )
+                save_data(cor_monthly_pa_uptime, "cor_monthly_pa_uptime.pkl")
+                del monthly_pa_uptime, cor_monthly_pa_uptime
+                gc.collect()
+                
+                # Subcorridor metrics
+                daily_pa_uptime = load_data("daily_pa_uptime.pkl")
+                sub_daily_pa_uptime = get_cor_weekly_avg_by_day(
+                    daily_pa_uptime, config_data['subcorridors'], "uptime"
+                ).dropna(subset=['Corridor'])
+                save_data(sub_daily_pa_uptime, "sub_daily_pa_uptime.pkl")
+                del daily_pa_uptime, sub_daily_pa_uptime
+                gc.collect()
+                
+                weekly_pa_uptime = load_data("weekly_pa_uptime.pkl")
+                sub_weekly_pa_uptime = get_cor_weekly_avg_by_day(
+                    weekly_pa_uptime, config_data['subcorridors'], "uptime"
+                ).dropna(subset=['Corridor'])
+                save_data(sub_weekly_pa_uptime, "sub_weekly_pa_uptime.pkl")
+                del weekly_pa_uptime, sub_weekly_pa_uptime
+                gc.collect()
+                
+                monthly_pa_uptime = load_data("monthly_pa_uptime.pkl")
                 sub_monthly_pa_uptime = get_cor_monthly_avg_by_day(
                     monthly_pa_uptime, config_data['subcorridors'], "uptime"
                 ).dropna(subset=['Corridor'])
-                
-                # Save all results
-                save_data(daily_pa_uptime, "daily_pa_uptime.pkl")
-                save_data(cor_daily_pa_uptime, "cor_daily_pa_uptime.pkl")
-                save_data(sub_daily_pa_uptime, "sub_daily_pa_uptime.pkl")
-                save_data(weekly_pa_uptime, "weekly_pa_uptime.pkl")
-                save_data(cor_weekly_pa_uptime, "cor_weekly_pa_uptime.pkl")
-                save_data(sub_weekly_pa_uptime, "sub_weekly_pa_uptime.pkl")
-                save_data(monthly_pa_uptime, "monthly_pa_uptime.pkl")
-                save_data(cor_monthly_pa_uptime, "cor_monthly_pa_uptime.pkl")
                 save_data(sub_monthly_pa_uptime, "sub_monthly_pa_uptime.pkl")
-                # Cleanup memory
-                del daily_pa_uptime
-                del cor_daily_pa_uptime
-                del sub_daily_pa_uptime
-                del weekly_pa_uptime
-                del cor_weekly_pa_uptime
-                del sub_weekly_pa_uptime
-                del monthly_pa_uptime
-                del cor_monthly_pa_uptime
-                del sub_monthly_pa_uptime
-                del pau
+                del monthly_pa_uptime, sub_monthly_pa_uptime, pau
                 gc.collect()
+                
+                log_memory_usage("End ped pushbutton uptime")
                 logger.info("Pedestrian pushbutton uptime processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in pedestrian pushbutton uptime processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
-def process_watchdog_alerts_notinscope(dates, config_data):
-    """Process watchdog alerts [3 of 29]"""
+def process_watchdog_alerts(dates, config_data):
+    """Process watchdog alerts [3 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Watchdog alerts [3 of 29 (mark1)]")
+    log_memory_usage("Start watchdog alerts")
     
     try:
         # Process bad vehicle detectors
@@ -560,25 +621,23 @@ def process_watchdog_alerts_notinscope(dates, config_data):
         )
         
         if not bad_det.empty:
+            log_memory_usage("After reading bad detectors")
+            
             bad_det = clean_signal_ids(bad_det)
             bad_det['Detector'] = bad_det['Detector'].astype('category')
             
-            # Get detector configuration with fallback
+            # Get detector configuration
             det_config_list = []
             unique_dates = sorted(bad_det['Date'].unique())
             
-            for date_val in unique_dates:
+            for date_val in unique_dates[:10]:  # Limit to recent dates
                 try:
-                    # Get detector config factory function
                     get_det_config = get_det_config_factory(conf.bucket, 'atspm_det_config_good')
                     config = get_det_config(date_val)
                     
                     if not config.empty:
                         config['Date'] = date_val
                         det_config_list.append(config)
-                    else:
-                        logger.warning(f"No detector config found for {date_val}")
-                        
                 except Exception as e:
                     logger.warning(f"Error loading detector config for {date_val}: {e}")
             
@@ -589,26 +648,24 @@ def process_watchdog_alerts_notinscope(dates, config_data):
                 det_config['CallPhase'] = det_config['CallPhase'].astype('category')
                 det_config['Detector'] = det_config['Detector'].astype('category')
                 
-                # Join with detector configuration
                 bad_det = bad_det.merge(
                     det_config[['SignalID', 'Detector', 'Date', 'CallPhase', 'LaneType', 'MovementType']],
                     on=['SignalID', 'Detector', 'Date'],
                     how='left'
                 )
+                del det_config, det_config_list
+                gc.collect()
             
-            # Add missing columns with defaults
             for col in ['CallPhase', 'LaneType', 'MovementType']:
                 if col not in bad_det.columns:
                     bad_det[col] = 'Unknown'
             
-            # Join with corridor information
             bad_det = bad_det.merge(
                 config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
                 on='SignalID',
                 how='left'
             ).dropna(subset=['Corridor'])
             
-            # Format the output
             bad_det = bad_det.assign(
                 Alert='Bad Vehicle Detection',
                 Name=lambda x: x['Name'].str.replace('@', '-', regex=False),
@@ -617,7 +674,9 @@ def process_watchdog_alerts_notinscope(dates, config_data):
                'Date', 'Alert', 'Name', 'ApproachDesc']]
             
             save_data(bad_det, "watchdog_bad_detectors.pkl")
-            del bad_det  # Cleanup memory
+            del bad_det
+            gc.collect()
+        
         # Process bad pedestrian detectors
         try:
             bad_ped = s3_read_parquet_parallel(
@@ -640,11 +699,12 @@ def process_watchdog_alerts_notinscope(dates, config_data):
                 )
                 
                 save_data(bad_ped, "watchdog_bad_ped_pushbuttons.pkl")
-                del bad_ped  # Cleanup memory
+                del bad_ped
+                gc.collect()
         except Exception as e:
             logger.warning(f"No bad pedestrian detectors data found: {e}")
         
-        # Process bad cameras - FIXED
+        # Process bad cameras
         try:
             bad_cam_list = []
             start_month = date.today().replace(day=1) - relativedelta(months=6)
@@ -654,9 +714,8 @@ def process_watchdog_alerts_notinscope(dates, config_data):
                 try:
                     key = f"mark/cctv_uptime/month={current_month.strftime('%Y-%m-%d')}/cctv_uptime_{current_month.strftime('%Y-%m-%d')}.parquet"
                     
-                    # FIXED: Pass the function object, not string
                     cctv_data = s3read_using(
-                        pd.read_parquet,  # Function object
+                        pd.read_parquet,
                         bucket=conf.bucket, 
                         object=key
                     )
@@ -665,7 +724,8 @@ def process_watchdog_alerts_notinscope(dates, config_data):
                         bad_cameras = cctv_data[cctv_data.get('Size', 0) == 0]
                         if not bad_cameras.empty:
                             bad_cam_list.append(bad_cameras)
-                    del cctv_data  # Cleanup memory
+                    del cctv_data
+                    gc.collect()
                 except Exception as e:
                     logger.warning(f"Could not read CCTV data for {current_month.strftime('%Y-%m-%d')}: {e}")
                 
@@ -673,179 +733,11 @@ def process_watchdog_alerts_notinscope(dates, config_data):
             
             if bad_cam_list:
                 bad_cam = pd.concat(bad_cam_list, ignore_index=True)
+                del bad_cam_list
+                gc.collect()
                 
                 # Merge with camera config if available
                 if 'cam_config' in config_data and not config_data['cam_config'].empty:
-                    bad_cam = bad_cam.merge(
-                        config_data['cam_config'], 
-                        on='CameraID', 
-                        how='left'
-                    )
-                    if 'As_of_Date' in bad_cam.columns and 'Date' in bad_cam.columns:
-                        bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
-                
-                # Add required columns with defaults
-                required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
-                               'Date', 'Alert', 'Name']
-                
-                for col in required_cols:
-                    if col not in bad_cam.columns:
-                        if col == 'SignalID':
-                            bad_cam[col] = bad_cam.get('CameraID', 'Unknown')
-                        elif col in ['CallPhase', 'Detector']:
-                            bad_cam[col] = 0
-                        elif col == 'Alert':
-                            bad_cam[col] = 'No Camera Image'
-                        elif col == 'Name':
-                            bad_cam[col] = bad_cam.get('Location', bad_cam.get('CameraID', 'Unknown'))
-                        else:
-                            bad_cam[col] = 'Unknown'
-                
-                bad_cam = bad_cam[required_cols]
-                save_data(bad_cam, "watchdog_bad_cameras.pkl")
-                del bad_cam  # Cleanup memory
-                
-        except Exception as e:
-            logger.warning(f"Could not process camera data: {e}")
-        
-        logger.info("Watchdog alerts processing completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Error in watchdog alerts processing: {e}")
-        logger.error(traceback.format_exc())
-
-def process_watchdog_alerts(dates, config_data):
-    """Process watchdog alerts [3 of 29]"""
-    logger.info(f"{datetime.now()} Watchdog alerts [3 of 29 (mark1)]")
-    
-    try:
-        # Process bad vehicle detectors
-        bad_det = s3_read_parquet_parallel(
-            table_name="bad_detectors",
-            start_date=date.today() - timedelta(days=90),
-            end_date=date.today() - timedelta(days=1),
-            bucket=conf.bucket
-        )
-        
-        if not bad_det.empty:
-            bad_det = clean_signal_ids(bad_det)
-            bad_det['Detector'] = bad_det['Detector'].astype('category')
-            
-            # Get detector configuration with fallback
-            det_config_list = []
-            unique_dates = sorted(bad_det['Date'].unique())
-            
-            for date_val in unique_dates:
-                try:
-                    # Get detector config factory function
-                    get_det_config = get_det_config_factory(conf.bucket, 'atspm_det_config_good')
-                    config = get_det_config(date_val)
-                    
-                    if not config.empty:
-                        config['Date'] = date_val
-                        det_config_list.append(config)
-                    else:
-                        logger.warning(f"No detector config found for {date_val}")
-                        
-                except Exception as e:
-                    logger.warning(f"Error loading detector config for {date_val}: {e}")
-            
-            # Process detector data if config available
-            if det_config_list:
-                det_config = pd.concat(det_config_list, ignore_index=True)
-                det_config = clean_signal_ids(det_config)
-                det_config['CallPhase'] = det_config['CallPhase'].astype('category')
-                det_config['Detector'] = det_config['Detector'].astype('category')
-                
-                # Join with detector configuration
-                bad_det = bad_det.merge(
-                    det_config[['SignalID', 'Detector', 'Date', 'CallPhase', 'LaneType', 'MovementType']],
-                    on=['SignalID', 'Detector', 'Date'],
-                    how='left'
-                )
-            
-            # Add missing columns with defaults
-            for col in ['CallPhase', 'LaneType', 'MovementType']:
-                if col not in bad_det.columns:
-                    bad_det[col] = 'Unknown'
-            
-            # Join with corridor information
-            bad_det = bad_det.merge(
-                config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
-                on='SignalID',
-                how='left'
-            ).dropna(subset=['Corridor'])
-            
-            # Format the output
-            bad_det = bad_det.assign(
-                Alert='Bad Vehicle Detection',
-                Name=lambda x: x['Name'].str.replace('@', '-', regex=False),
-                ApproachDesc=lambda x: x['LaneType'].fillna('Unknown').astype(str)
-            )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
-               'Date', 'Alert', 'Name', 'ApproachDesc']]
-            
-            save_data(bad_det, "watchdog_bad_detectors.pkl")
-            del bad_det  # Cleanup memory
-        
-        # Process bad pedestrian detectors
-        try:
-            bad_ped = s3_read_parquet_parallel(
-                table_name="bad_ped_detectors",
-                start_date=date.today() - timedelta(days=90),
-                end_date=date.today() - timedelta(days=1),
-                bucket=conf.bucket
-            )
-            
-            if not bad_ped.empty:
-                bad_ped = clean_signal_ids(bad_ped)
-                bad_ped['Detector'] = bad_ped['Detector'].astype('category')
-                
-                bad_ped = bad_ped.merge(
-                    config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
-                    on='SignalID',
-                    how='left'
-                )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'Detector', 'Date', 'Name']].assign(
-                    Alert='Bad Ped Detection'
-                )
-                
-                save_data(bad_ped, "watchdog_bad_ped_pushbuttons.pkl")
-                del bad_ped  # Cleanup memory
-        except Exception as e:
-            logger.warning(f"No bad pedestrian detectors data found: {e}")
-        
-        # Process bad cameras - FIXED
-        try:
-            bad_cam_list = []
-            start_month = date.today().replace(day=1) - relativedelta(months=6)
-            current_month = start_month
-            
-            while current_month < date.today():
-                try:
-                    key = f"mark/cctv_uptime/month={current_month.strftime('%Y-%m-%d')}/cctv_uptime_{current_month.strftime('%Y-%m-%d')}.parquet"
-                    
-                    # FIXED: Pass the function object, not string
-                    cctv_data = s3read_using(
-                        pd.read_parquet,  # Function object
-                        bucket=conf.bucket, 
-                        object=key
-                    )
-                    
-                    if not cctv_data.empty:
-                        bad_cameras = cctv_data[cctv_data.get('Size', 0) == 0]
-                        if not bad_cameras.empty:
-                            bad_cam_list.append(bad_cameras)
-                    del cctv_data  # Cleanup memory
-                except Exception as e:
-                    logger.warning(f"Could not read CCTV data for {current_month.strftime('%Y-%m-%d')}: {e}")
-                
-                current_month += relativedelta(months=1)
-            
-            if bad_cam_list:
-                bad_cam = pd.concat(bad_cam_list, ignore_index=True)
-                
-                # FIX: Ensure CameraID data types match before merge
-                if 'cam_config' in config_data and not config_data['cam_config'].empty:
-                    # Convert CameraID to string in both DataFrames to ensure compatibility
                     bad_cam['CameraID'] = bad_cam['CameraID'].astype(str)
                     config_data['cam_config']['CameraID'] = config_data['cam_config']['CameraID'].astype(str)
                     
@@ -856,12 +748,10 @@ def process_watchdog_alerts(dates, config_data):
                     )
                     
                     if 'As_of_Date' in bad_cam.columns and 'Date' in bad_cam.columns:
-                        # Ensure both date columns are datetime
                         bad_cam['As_of_Date'] = pd.to_datetime(bad_cam['As_of_Date'])
                         bad_cam['Date'] = pd.to_datetime(bad_cam['Date'])
                         bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
                 
-                # Add required columns with defaults
                 required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
                                'Date', 'Alert', 'Name']
                 
@@ -880,121 +770,124 @@ def process_watchdog_alerts(dates, config_data):
                 
                 bad_cam = bad_cam[required_cols]
                 save_data(bad_cam, "watchdog_bad_cameras.pkl")
-                del bad_cam  # Cleanup memory
+                del bad_cam
+                gc.collect()
                 
         except Exception as e:
             logger.warning(f"Could not process camera data: {e}")
         
+        log_memory_usage("End watchdog alerts")
         logger.info("Watchdog alerts processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in watchdog alerts processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_daily_ped_activations(dates, config_data):
-    """Process daily pedestrian activations [4 of 29]"""
+    """Process daily pedestrian activations [4 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Daily Pedestrian Activations [4 of 29 (mark1)]")
+    log_memory_usage("Start daily ped activations")
     
     try:
-        # Load PAPD data (should be available from previous processing)
         papd = load_data("pa_uptime.pkl")
         
         if not papd.empty:
-            # Calculate weekly PAPD
             weekly_papd = get_weekly_papd(papd)
+            save_data(weekly_papd, "weekly_papd.pkl")
             
-            # Group into corridors
             cor_weekly_papd = get_cor_weekly_papd(weekly_papd, config_data['corridors'])
+            save_data(cor_weekly_papd, "cor_weekly_papd.pkl")
+            del weekly_papd, cor_weekly_papd
+            gc.collect()
             
-            # Group into subcorridors
             sub_weekly_papd = get_cor_weekly_papd(
-                weekly_papd, config_data['subcorridors']
+                load_data("weekly_papd.pkl"), config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_papd, "sub_weekly_papd.pkl")
+            del sub_weekly_papd
+            gc.collect()
             
-            # Monthly volumes for bar charts and % change
             monthly_papd = get_monthly_papd(papd)
+            save_data(monthly_papd, "monthly_papd.pkl")
+            del papd
+            gc.collect()
             
-            # Group into corridors
             cor_monthly_papd = get_cor_monthly_papd(monthly_papd, config_data['corridors'])
+            save_data(cor_monthly_papd, "cor_monthly_papd.pkl")
+            del cor_monthly_papd
+            gc.collect()
             
-            # Group into subcorridors
             sub_monthly_papd = get_cor_monthly_papd(
                 monthly_papd, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(weekly_papd, "weekly_papd.pkl")
-            save_data(monthly_papd, "monthly_papd.pkl")
-            save_data(cor_weekly_papd, "cor_weekly_papd.pkl")
-            save_data(cor_monthly_papd, "cor_monthly_papd.pkl")
-            save_data(sub_weekly_papd, "sub_weekly_papd.pkl")
             save_data(sub_monthly_papd, "sub_monthly_papd.pkl")
-            
-            # Cleanup memory
-            del weekly_papd
-            del monthly_papd
-            del cor_weekly_papd
-            del cor_monthly_papd
-            del sub_weekly_papd
-            del sub_monthly_papd
+            del monthly_papd, sub_monthly_papd
             gc.collect()
-
+            
+            log_memory_usage("End daily ped activations")
             logger.info("Daily pedestrian activations processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in daily pedestrian activations processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_hourly_ped_activations(dates, config_data):
-    """Process hourly pedestrian activations [5 of 29]"""
+    """Process hourly pedestrian activations [5 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Hourly Pedestrian Activations [5 of 29 (mark1)]")
+    log_memory_usage("Start hourly ped activations")
     
     try:
-        # Load PAPH data (should be available from previous processing)
-        paph = load_data("pa_uptime.pkl")  # This contains hourly data
+        paph = load_data("pa_uptime.pkl")
         
         if not paph.empty:
             weekly_paph = get_weekly_paph(paph)
-            monthly_paph = get_monthly_paph(paph)
+            save_data(weekly_paph, "weekly_paph.pkl")
             
-            # Group into corridors
+            monthly_paph = get_monthly_paph(paph)
+            save_data(monthly_paph, "monthly_paph.pkl")
+            del paph
+            gc.collect()
+            
             cor_weekly_paph = get_cor_weekly_paph(weekly_paph, config_data['corridors'])
+            save_data(cor_weekly_paph, "cor_weekly_paph.pkl")
+            del weekly_paph, cor_weekly_paph
+            gc.collect()
+            
+            cor_monthly_paph = get_cor_monthly_paph(monthly_paph, config_data['corridors'])
+            save_data(cor_monthly_paph, "cor_monthly_paph.pkl")
+            del cor_monthly_paph
+            gc.collect()
+            
+            # Load data again for subcorridor processing
+            weekly_paph = load_data("weekly_paph.pkl")
             sub_weekly_paph = get_cor_weekly_paph(
                 weekly_paph, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_paph, "sub_weekly_paph.pkl")
+            del weekly_paph, sub_weekly_paph
+            gc.collect()
             
-            # Hourly volumes by Corridor
-            cor_monthly_paph = get_cor_monthly_paph(monthly_paph, config_data['corridors'])
             sub_monthly_paph = get_cor_monthly_paph(
                 monthly_paph, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(weekly_paph, "weekly_paph.pkl")
-            save_data(monthly_paph, "monthly_paph.pkl")
-            save_data(cor_weekly_paph, "cor_weekly_paph.pkl")
-            save_data(cor_monthly_paph, "cor_monthly_paph.pkl")
-            save_data(sub_weekly_paph, "sub_weekly_paph.pkl")
             save_data(sub_monthly_paph, "sub_monthly_paph.pkl")
-
-            # Cleanup memory
-            del weekly_paph
-            del monthly_paph
-            del cor_weekly_paph
-            del cor_monthly_paph
-            del sub_weekly_paph
-            del sub_monthly_paph
+            del monthly_paph, sub_monthly_paph
             gc.collect()
             
+            log_memory_usage("End hourly ped activations")
             logger.info("Hourly pedestrian activations processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in hourly pedestrian activations processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_pedestrian_delay(dates, config_data):
-    """Process pedestrian delay [6 of 29]"""
+    """Process pedestrian delay [6 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Pedestrian Delay [6 of 29 (mark1)]")
+    log_memory_usage("Start pedestrian delay")
     
     try:
         def callback(x):
@@ -1014,6 +907,8 @@ def process_pedestrian_delay(dates, config_data):
         )
         
         if not ped_delay.empty:
+            log_memory_usage("After reading ped delay data")
+            
             ped_delay = clean_signal_ids(ped_delay)
             ped_delay['CallPhase'] = ped_delay['CallPhase'].astype('category')
             ped_delay['Events'] = ped_delay.get('Events', 1).fillna(1)
@@ -1021,118 +916,140 @@ def process_pedestrian_delay(dates, config_data):
             daily_pd = get_daily_avg(ped_delay, "pd", "Events")
             weekly_pd_by_day = get_weekly_avg_by_day(ped_delay, "pd", "Events", peak_only=False)
             monthly_pd_by_day = get_monthly_avg_by_day(ped_delay, "pd", "Events", peak_only=False)
+            del ped_delay
+            gc.collect()
+            
+            save_data(weekly_pd_by_day, "weekly_pd_by_day.pkl")
+            save_data(monthly_pd_by_day, "monthly_pd_by_day.pkl")
             
             cor_weekly_pd_by_day = get_cor_weekly_avg_by_day(
                 weekly_pd_by_day, config_data['corridors'], "pd", "Events"
             )
+            save_data(cor_weekly_pd_by_day, "cor_weekly_pd_by_day.pkl")
+            del weekly_pd_by_day, cor_weekly_pd_by_day
+            gc.collect()
+            
             cor_monthly_pd_by_day = get_cor_monthly_avg_by_day(
                 monthly_pd_by_day, config_data['corridors'], "pd", "Events"
             )
+            save_data(cor_monthly_pd_by_day, "cor_monthly_pd_by_day.pkl")
+            del cor_monthly_pd_by_day
+            gc.collect()
             
+            # Load data again for subcorridor processing
+            weekly_pd_by_day = load_data("weekly_pd_by_day.pkl")
             sub_weekly_pd_by_day = get_cor_weekly_avg_by_day(
                 weekly_pd_by_day, config_data['subcorridors'], "pd", "Events"
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_pd_by_day, "sub_weekly_pd_by_day.pkl")
+            del weekly_pd_by_day, sub_weekly_pd_by_day
+            gc.collect()
+            
             sub_monthly_pd_by_day = get_cor_monthly_avg_by_day(
                 monthly_pd_by_day, config_data['subcorridors'], "pd", "Events"
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(weekly_pd_by_day, "weekly_pd_by_day.pkl")
-            save_data(monthly_pd_by_day, "monthly_pd_by_day.pkl")
-            save_data(cor_weekly_pd_by_day, "cor_weekly_pd_by_day.pkl")
-            save_data(cor_monthly_pd_by_day, "cor_monthly_pd_by_day.pkl")
-            save_data(sub_weekly_pd_by_day, "sub_weekly_pd_by_day.pkl")
             save_data(sub_monthly_pd_by_day, "sub_monthly_pd_by_day.pkl")
-
-            # Cleanup memory
-            del weekly_pd_by_day
-            del monthly_pd_by_day
-            del cor_weekly_pd_by_day
-            del cor_monthly_pd_by_day
-            del sub_weekly_pd_by_day
-            del sub_monthly_pd_by_day
+            del monthly_pd_by_day, sub_monthly_pd_by_day
             gc.collect()
             
+            log_memory_usage("End pedestrian delay")
             logger.info("Pedestrian delay processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in pedestrian delay processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_communications_uptime(dates, config_data):
-    """Process communications uptime [7 of 29]"""
+    """Process communications uptime [7 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Communication Uptime [7 of 29 (mark1)]")
+    log_memory_usage("Start communications uptime")
     
     try:
         cu = s3_read_parquet_parallel(
             bucket=conf.bucket,
-                        table_name="comm_uptime",
+            table_name="comm_uptime",
             start_date=dates['wk_calcs_start_date'],
             end_date=dates['report_end_date'],
             signals_list=config_data['signals_list']
         )
         
         if not cu.empty:
+            log_memory_usage("After reading comm uptime data")
+            
             cu = clean_signal_ids(cu)
             cu['CallPhase'] = cu['CallPhase'].astype('category')
             cu = ensure_datetime_column(cu, 'Date')
             
             daily_comm_uptime = get_daily_avg(cu, "uptime", peak_only=False)
+            save_data(daily_comm_uptime, "daily_comm_uptime.pkl")
+            
+            weekly_comm_uptime = get_weekly_avg_by_day(cu, "uptime", peak_only=False)
+            save_data(weekly_comm_uptime, "weekly_comm_uptime.pkl")
+            
+            monthly_comm_uptime = get_monthly_avg_by_day(cu, "uptime", peak_only=False)
+            save_data(monthly_comm_uptime, "monthly_comm_uptime.pkl")
+            del cu
+            gc.collect()
+            
+            # Process corridor metrics
             cor_daily_comm_uptime = get_cor_weekly_avg_by_day(
                 daily_comm_uptime, config_data['corridors'], "uptime"
             )
-            sub_daily_comm_uptime = get_cor_weekly_avg_by_day(
-                daily_comm_uptime, config_data['subcorridors'], "uptime"
-            ).dropna(subset=['Corridor'])
+            save_data(cor_daily_comm_uptime, "cor_daily_comm_uptime.pkl")
+            del daily_comm_uptime, cor_daily_comm_uptime
+            gc.collect()
             
-            weekly_comm_uptime = get_weekly_avg_by_day(cu, "uptime", peak_only=False)
             cor_weekly_comm_uptime = get_cor_weekly_avg_by_day(
                 weekly_comm_uptime, config_data['corridors'], "uptime"
             )
-            sub_weekly_comm_uptime = get_cor_weekly_avg_by_day(
-                weekly_comm_uptime, config_data['subcorridors'], "uptime"
-            ).dropna(subset=['Corridor'])
+            save_data(cor_weekly_comm_uptime, "cor_weekly_comm_uptime.pkl")
+            del weekly_comm_uptime, cor_weekly_comm_uptime
+            gc.collect()
             
-            monthly_comm_uptime = get_monthly_avg_by_day(cu, "uptime", peak_only=False)
             cor_monthly_comm_uptime = get_cor_monthly_avg_by_day(
                 monthly_comm_uptime, config_data['corridors'], "uptime"
             )
+            save_data(cor_monthly_comm_uptime, "cor_monthly_comm_uptime.pkl")
+            del cor_monthly_comm_uptime
+            gc.collect()
+            
+            # Process subcorridor metrics
+            daily_comm_uptime = load_data("daily_comm_uptime.pkl")
+            sub_daily_comm_uptime = get_cor_weekly_avg_by_day(
+                daily_comm_uptime, config_data['subcorridors'], "uptime"
+            ).dropna(subset=['Corridor'])
+            save_data(sub_daily_comm_uptime, "sub_daily_comm_uptime.pkl")
+            del daily_comm_uptime, sub_daily_comm_uptime
+            gc.collect()
+            
+            weekly_comm_uptime = load_data("weekly_comm_uptime.pkl")
+            sub_weekly_comm_uptime = get_cor_weekly_avg_by_day(
+                weekly_comm_uptime, config_data['subcorridors'], "uptime"
+            ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_comm_uptime, "sub_weekly_comm_uptime.pkl")
+            del weekly_comm_uptime, sub_weekly_comm_uptime
+            gc.collect()
+            
             sub_monthly_comm_uptime = get_cor_monthly_avg_by_day(
                 monthly_comm_uptime, config_data['subcorridors'], "uptime"
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(daily_comm_uptime, "daily_comm_uptime.pkl")
-            save_data(cor_daily_comm_uptime, "cor_daily_comm_uptime.pkl")
-            save_data(sub_daily_comm_uptime, "sub_daily_comm_uptime.pkl")
-            save_data(weekly_comm_uptime, "weekly_comm_uptime.pkl")
-            save_data(cor_weekly_comm_uptime, "cor_weekly_comm_uptime.pkl")
-            save_data(sub_weekly_comm_uptime, "sub_weekly_comm_uptime.pkl")
-            save_data(monthly_comm_uptime, "monthly_comm_uptime.pkl")
-            save_data(cor_monthly_comm_uptime, "cor_monthly_comm_uptime.pkl")
             save_data(sub_monthly_comm_uptime, "sub_monthly_comm_uptime.pkl")
-
-            # Cleanup memory
-            del daily_comm_uptime
-            del cor_daily_comm_uptime
-            del sub_daily_comm_uptime
-            del weekly_comm_uptime
-            del cor_weekly_comm_uptime
-            del sub_weekly_comm_uptime
-            del monthly_comm_uptime
-            del cor_monthly_comm_uptime
-            del sub_monthly_comm_uptime
+            del monthly_comm_uptime, sub_monthly_comm_uptime
             gc.collect()
             
+            log_memory_usage("End communications uptime")
             logger.info("Communications uptime processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in communications uptime processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_daily_volumes(dates, config_data):
-    """Process daily volumes [8 of 29]"""
+    """Process daily volumes [8 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Daily Volumes [8 of 29 (mark1)]")
+    log_memory_usage("Start daily volumes")
     
     try:
         vpd = s3_read_parquet_parallel(
@@ -1144,56 +1061,59 @@ def process_daily_volumes(dates, config_data):
         )
         
         if not vpd.empty:
+            log_memory_usage("After reading daily volumes data")
+            
             vpd = clean_signal_ids(vpd)
             vpd['CallPhase'] = vpd['CallPhase'].astype('category')
             vpd = ensure_datetime_column(vpd, 'Date')
             
             weekly_vpd = get_weekly_vpd(vpd)
+            save_data(weekly_vpd, "weekly_vpd.pkl")
             
-            # Group into corridors
+            monthly_vpd = get_monthly_vpd(vpd)
+            save_data(monthly_vpd, "monthly_vpd.pkl")
+            del vpd
+            gc.collect()
+            
+            # Corridor processing
             cor_weekly_vpd = get_cor_weekly_vpd(weekly_vpd, config_data['corridors'])
-            # Subcorridors
+            save_data(cor_weekly_vpd, "cor_weekly_vpd.pkl")
+            del weekly_vpd, cor_weekly_vpd
+            gc.collect()
+            
+            cor_monthly_vpd = get_cor_monthly_vpd(monthly_vpd, config_data['corridors'])
+            save_data(cor_monthly_vpd, "cor_monthly_vpd.pkl")
+            del cor_monthly_vpd
+            gc.collect()
+            
+            # Subcorridor processing
+            weekly_vpd = load_data("weekly_vpd.pkl")
             sub_weekly_vpd = get_cor_weekly_vpd(
                 weekly_vpd, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_vpd, "sub_weekly_vpd.pkl")
+            del weekly_vpd, sub_weekly_vpd
+            gc.collect()
             
-            # Monthly volumes for bar charts and % change
-            monthly_vpd = get_monthly_vpd(vpd)
-            
-            # Group into corridors
-            cor_monthly_vpd = get_cor_monthly_vpd(monthly_vpd, config_data['corridors'])
-            
-            # Subcorridors
             sub_monthly_vpd = get_cor_monthly_vpd(
                 monthly_vpd, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(weekly_vpd, "weekly_vpd.pkl")
-            save_data(monthly_vpd, "monthly_vpd.pkl")
-            save_data(cor_weekly_vpd, "cor_weekly_vpd.pkl")
-            save_data(cor_monthly_vpd, "cor_monthly_vpd.pkl")
-            save_data(sub_weekly_vpd, "sub_weekly_vpd.pkl")
             save_data(sub_monthly_vpd, "sub_monthly_vpd.pkl")
-
-            # Cleanup memory
-            del weekly_vpd
-            del monthly_vpd
-            del cor_weekly_vpd
-            del cor_monthly_vpd
-            del sub_weekly_vpd
-            del sub_monthly_vpd
+            del monthly_vpd, sub_monthly_vpd
             gc.collect()
             
+            log_memory_usage("End daily volumes")
             logger.info("Daily volumes processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in daily volumes processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_hourly_volumes(dates, config_data):
-    """Process hourly volumes [9 of 29]"""
+    """Process hourly volumes [9 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Hourly Volumes [9 of 29 (mark1)]")
+    log_memory_usage("Start hourly volumes")
     
     try:
         vph = s3_read_parquet_parallel(
@@ -1205,103 +1125,103 @@ def process_hourly_volumes(dates, config_data):
         )
         
         if not vph.empty:
+            log_memory_usage("After reading hourly volumes data")
+            
             vph = clean_signal_ids(vph)
-            vph['CallPhase'] = 2  # Hack because next function needs a CallPhase
+            vph['CallPhase'] = 2
             vph = ensure_datetime_column(vph, 'Date')
-            vph = ensure_timeperiod_column(vph)  # Ensure Timeperiod column exists
+            vph = ensure_timeperiod_column(vph)
             
             weekly_vph = get_weekly_vph(vph)
-            if not weekly_vph.empty:
-                weekly_vph_peak = get_weekly_vph_peak(weekly_vph)
-                
-                # Group into corridors
-                cor_weekly_vph = get_cor_weekly_vph(weekly_vph, config_data['corridors'])
-                if not cor_weekly_vph.empty:
-                    cor_weekly_vph_peak = get_cor_weekly_vph_peak(cor_weekly_vph)
-                else:
-                    cor_weekly_vph_peak = pd.DataFrame()
-                
-                # Group into Subcorridors
-                sub_weekly_vph = get_cor_weekly_vph(
-                    weekly_vph, config_data['subcorridors']
-                )
-                if not sub_weekly_vph.empty and 'Corridor' in sub_weekly_vph.columns:
-                    sub_weekly_vph = sub_weekly_vph.dropna(subset=['Corridor'])
-                    sub_weekly_vph_peak = get_cor_weekly_vph_peak(sub_weekly_vph)
-                else:
-                    sub_weekly_vph_peak = pd.DataFrame()
-            else:
-                weekly_vph_peak = pd.DataFrame()
-                cor_weekly_vph = pd.DataFrame()
-                cor_weekly_vph_peak = pd.DataFrame()
-                sub_weekly_vph = pd.DataFrame()
-                sub_weekly_vph_peak = pd.DataFrame()
+            save_data(weekly_vph, "weekly_vph.pkl")
             
             monthly_vph = get_monthly_vph(vph)
-            if not monthly_vph.empty:
-                monthly_vph_peak = get_monthly_vph_peak(monthly_vph)
-                
-                # Hourly volumes by Corridor
-                cor_monthly_vph = get_cor_monthly_vph(monthly_vph, config_data['corridors'])
-                if not cor_monthly_vph.empty:
-                    cor_monthly_vph_peak = get_cor_monthly_vph_peak(cor_monthly_vph)
-                else:
-                    cor_monthly_vph_peak = pd.DataFrame()
-                
-                # Hourly volumes by Subcorridor
-                sub_monthly_vph = get_cor_monthly_vph(
-                    monthly_vph, config_data['subcorridors']
-                )
-                if not sub_monthly_vph.empty and 'Corridor' in sub_monthly_vph.columns:
-                    sub_monthly_vph = sub_monthly_vph.dropna(subset=['Corridor'])
-                    sub_monthly_vph_peak = get_cor_monthly_vph_peak(sub_monthly_vph)
-                else:
-                    sub_monthly_vph_peak = pd.DataFrame()
-            else:
-                monthly_vph_peak = pd.DataFrame()
-                cor_monthly_vph = pd.DataFrame()
-                cor_monthly_vph_peak = pd.DataFrame()
-                sub_monthly_vph = pd.DataFrame()
-                sub_monthly_vph_peak = pd.DataFrame()
-            
-            # Save results
-            save_data(weekly_vph, "weekly_vph.pkl")
             save_data(monthly_vph, "monthly_vph.pkl")
-            save_data(cor_weekly_vph, "cor_weekly_vph.pkl")
-            save_data(cor_monthly_vph, "cor_monthly_vph.pkl")
-            save_data(sub_weekly_vph, "sub_weekly_vph.pkl")
-            save_data(sub_monthly_vph, "sub_monthly_vph.pkl")
-            save_data(weekly_vph_peak, "weekly_vph_peak.pkl")
-            save_data(monthly_vph_peak, "monthly_vph_peak.pkl")
-            save_data(cor_weekly_vph_peak, "cor_weekly_vph_peak.pkl")
-            save_data(cor_monthly_vph_peak, "cor_monthly_vph_peak.pkl")
-            save_data(sub_weekly_vph_peak, "sub_weekly_vph_peak.pkl")
-            save_data(sub_monthly_vph_peak, "sub_monthly_vph_peak.pkl")
-
-            # Cleanup memory
-            del weekly_vph
-            del monthly_vph
-            del cor_weekly_vph
-            del cor_monthly_vph
-            del sub_weekly_vph
-            del sub_monthly_vph
-            del weekly_vph_peak
-            del monthly_vph_peak
-            del cor_weekly_vph_peak
-            del cor_monthly_vph_peak
-            del sub_weekly_vph_peak
-            del sub_monthly_vph_peak
+            del vph
             gc.collect()
             
+            # Peak calculations
+            if not weekly_vph.empty:
+                weekly_vph_peak = get_weekly_vph_peak(weekly_vph)
+                save_data(weekly_vph_peak, "weekly_vph_peak.pkl")
+                del weekly_vph_peak
+                gc.collect()
+            
+            if not monthly_vph.empty:
+                monthly_vph_peak = get_monthly_vph_peak(monthly_vph)
+                save_data(monthly_vph_peak, "monthly_vph_peak.pkl")
+                del monthly_vph_peak
+                gc.collect()
+            
+            # Corridor processing
+            cor_weekly_vph = get_cor_weekly_vph(weekly_vph, config_data['corridors'])
+            save_data(cor_weekly_vph, "cor_weekly_vph.pkl")
+            
+            if not cor_weekly_vph.empty:
+                cor_weekly_vph_peak = get_cor_weekly_vph_peak(cor_weekly_vph)
+                save_data(cor_weekly_vph_peak, "cor_weekly_vph_peak.pkl")
+                del cor_weekly_vph_peak
+                gc.collect()
+            
+            del weekly_vph, cor_weekly_vph
+            gc.collect()
+            
+            cor_monthly_vph = get_cor_monthly_vph(monthly_vph, config_data['corridors'])
+            save_data(cor_monthly_vph, "cor_monthly_vph.pkl")
+            
+            if not cor_monthly_vph.empty:
+                cor_monthly_vph_peak = get_cor_monthly_vph_peak(cor_monthly_vph)
+                save_data(cor_monthly_vph_peak, "cor_monthly_vph_peak.pkl")
+                del cor_monthly_vph_peak
+                gc.collect()
+            
+            del cor_monthly_vph
+            gc.collect()
+            
+            # Subcorridor processing
+            weekly_vph = load_data("weekly_vph.pkl")
+            sub_weekly_vph = get_cor_weekly_vph(
+                weekly_vph, config_data['subcorridors']
+            )
+            if not sub_weekly_vph.empty and 'Corridor' in sub_weekly_vph.columns:
+                sub_weekly_vph = sub_weekly_vph.dropna(subset=['Corridor'])
+                save_data(sub_weekly_vph, "sub_weekly_vph.pkl")
+                
+                sub_weekly_vph_peak = get_cor_weekly_vph_peak(sub_weekly_vph)
+                save_data(sub_weekly_vph_peak, "sub_weekly_vph_peak.pkl")
+                del sub_weekly_vph_peak
+                gc.collect()
+            
+            del weekly_vph, sub_weekly_vph
+            gc.collect()
+            
+            sub_monthly_vph = get_cor_monthly_vph(
+                monthly_vph, config_data['subcorridors']
+            )
+            if not sub_monthly_vph.empty and 'Corridor' in sub_monthly_vph.columns:
+                sub_monthly_vph = sub_monthly_vph.dropna(subset=['Corridor'])
+                save_data(sub_monthly_vph, "sub_monthly_vph.pkl")
+                
+                sub_monthly_vph_peak = get_cor_monthly_vph_peak(sub_monthly_vph)
+                save_data(sub_monthly_vph_peak, "sub_monthly_vph_peak.pkl")
+                del sub_monthly_vph_peak
+                gc.collect()
+            
+            del monthly_vph, sub_monthly_vph
+            gc.collect()
+            
+            log_memory_usage("End hourly volumes")
             logger.info("Hourly volumes processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in hourly volumes processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_daily_throughput(dates, config_data):
-    """Process daily throughput [10 of 29]"""
+    """Process daily throughput [10 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Daily Throughput [10 of 29 (mark1)]")
+    log_memory_usage("Start daily throughput")
     
     try:
         throughput = s3_read_parquet_parallel(
@@ -1313,45 +1233,51 @@ def process_daily_throughput(dates, config_data):
         )
         
         if not throughput.empty:
+            log_memory_usage("After reading throughput data")
+            
             throughput = clean_signal_ids(throughput)
             throughput['CallPhase'] = throughput['CallPhase'].astype(int).astype('category')
             throughput = ensure_datetime_column(throughput, 'Date')
             throughput = ensure_throughput_column(throughput)
             
             weekly_throughput = get_weekly_thruput(throughput)
-            monthly_throughput = get_monthly_thruput(throughput)
+            save_data(weekly_throughput, "weekly_throughput.pkl")
             
-            # Weekly throughput - Group into corridors
+            monthly_throughput = get_monthly_thruput(throughput)
+            save_data(monthly_throughput, "monthly_throughput.pkl")
+            del throughput
+            gc.collect()
+            
+            # Corridor processing
             cor_weekly_throughput = get_cor_weekly_thruput(weekly_throughput, config_data['corridors'])
+            save_data(cor_weekly_throughput, "cor_weekly_throughput.pkl")
+            del weekly_throughput, cor_weekly_throughput
+            gc.collect()
+            
+            cor_monthly_throughput = get_cor_monthly_thruput(monthly_throughput, config_data['corridors'])
+            save_data(cor_monthly_throughput, "cor_monthly_throughput.pkl")
+            del cor_monthly_throughput
+            gc.collect()
+            
+            # Subcorridor processing
+            weekly_throughput = load_data("weekly_throughput.pkl")
             sub_weekly_throughput = safe_dropna_corridor(
                 get_cor_weekly_thruput(weekly_throughput, config_data['subcorridors']),
                 "sub_weekly_throughput"
             )
+            save_data(sub_weekly_throughput, "sub_weekly_throughput.pkl")
+            del weekly_throughput, sub_weekly_throughput
+            gc.collect()
             
-            # Monthly throughput - Group into corridors
-            cor_monthly_throughput = get_cor_monthly_thruput(monthly_throughput, config_data['corridors'])
             sub_monthly_throughput = safe_dropna_corridor(
                 get_cor_monthly_thruput(monthly_throughput, config_data['subcorridors']),
                 "sub_monthly_throughput"
             )
-            
-            # Save results
-            save_data(weekly_throughput, "weekly_throughput.pkl")
-            save_data(monthly_throughput, "monthly_throughput.pkl")
-            save_data(cor_weekly_throughput, "cor_weekly_throughput.pkl")
-            save_data(cor_monthly_throughput, "cor_monthly_throughput.pkl")
-            save_data(sub_weekly_throughput, "sub_weekly_throughput.pkl")
             save_data(sub_monthly_throughput, "sub_monthly_throughput.pkl")
-
-            # Cleanup memory
-            del weekly_throughput
-            del monthly_throughput
-            del cor_weekly_throughput
-            del cor_monthly_throughput
-            del sub_weekly_throughput
-            del sub_monthly_throughput
+            del monthly_throughput, sub_monthly_throughput
             gc.collect()
             
+            log_memory_usage("End daily throughput")
             logger.info("Daily throughput processing completed successfully")
         else:
             logger.warning("No throughput data found")
@@ -1359,10 +1285,12 @@ def process_daily_throughput(dates, config_data):
     except Exception as e:
         logger.error(f"Error in daily throughput processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_arrivals_on_green(dates, config_data):
-    """Process daily arrivals on green [11 of 29]"""
+    """Process daily arrivals on green [11 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Daily AOG [11 of 29 (mark1)]")
+    log_memory_usage("Start arrivals on green")
     
     try:
         aog = s3_read_parquet_parallel(
@@ -1374,6 +1302,8 @@ def process_arrivals_on_green(dates, config_data):
         )
         
         if not aog.empty:
+            log_memory_usage("After reading AOG data")
+            
             aog = clean_signal_ids(aog)
             aog['CallPhase'] = aog['CallPhase'].astype('category')
             aog = calculate_time_periods(aog, 'Date')
@@ -1382,160 +1312,175 @@ def process_arrivals_on_green(dates, config_data):
             weekly_aog_by_day = get_weekly_aog_by_day(aog)
             monthly_aog_by_day = get_monthly_aog_by_day(aog)
             
-            cor_weekly_aog_by_day = get_cor_weekly_aog_by_day(weekly_aog_by_day, config_data['corridors'])
-            cor_monthly_aog_by_day = get_cor_monthly_aog_by_day(monthly_aog_by_day, config_data['corridors'])
+            save_data(weekly_aog_by_day, "weekly_aog_by_day.pkl")
+            save_data(monthly_aog_by_day, "monthly_aog_by_day.pkl")
             
+            # Corridor processing
+            cor_weekly_aog_by_day = get_cor_weekly_aog_by_day(weekly_aog_by_day, config_data['corridors'])
+            save_data(cor_weekly_aog_by_day, "cor_weekly_aog_by_day.pkl")
+            del weekly_aog_by_day, cor_weekly_aog_by_day
+            gc.collect()
+            
+            cor_monthly_aog_by_day = get_cor_monthly_aog_by_day(monthly_aog_by_day, config_data['corridors'])
+            save_data(cor_monthly_aog_by_day, "cor_monthly_aog_by_day.pkl")
+            del cor_monthly_aog_by_day
+            gc.collect()
+            
+            # Subcorridor processing
+            weekly_aog_by_day = load_data("weekly_aog_by_day.pkl")
             sub_weekly_aog_by_day = get_cor_weekly_aog_by_day(
                 weekly_aog_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_aog_by_day, "sub_weekly_aog_by_day.pkl")
+            del weekly_aog_by_day, sub_weekly_aog_by_day
+            gc.collect()
+            
             sub_monthly_aog_by_day = get_cor_monthly_aog_by_day(
                 monthly_aog_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(weekly_aog_by_day, "weekly_aog_by_day.pkl")
-            save_data(monthly_aog_by_day, "monthly_aog_by_day.pkl")
-            save_data(cor_weekly_aog_by_day, "cor_weekly_aog_by_day.pkl")
-            save_data(cor_monthly_aog_by_day, "cor_monthly_aog_by_day.pkl")
-            save_data(sub_weekly_aog_by_day, "sub_weekly_aog_by_day.pkl")
             save_data(sub_monthly_aog_by_day, "sub_monthly_aog_by_day.pkl")
-
-            # Cleanup memory
-            del weekly_aog_by_day
-            del monthly_aog_by_day
-            del cor_weekly_aog_by_day
-            del cor_monthly_aog_by_day
-            del sub_weekly_aog_by_day
-            del sub_monthly_aog_by_day
+            del monthly_aog_by_day, sub_monthly_aog_by_day
             gc.collect()
             
             # Store aog for use in progression ratio calculations
             save_data(aog, "aog_data.pkl")
+            del aog
+            gc.collect()
             
+            log_memory_usage("End arrivals on green")
             logger.info("Daily arrivals on green processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in daily arrivals on green processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_hourly_arrivals_on_green(dates, config_data):
-    """Process hourly arrivals on green [12 of 29]"""
+    """Process hourly arrivals on green [12 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Hourly AOG [12 of 29 (mark1)]")
+    log_memory_usage("Start hourly arrivals on green")
     
     try:
-        # Load AOG data from previous processing
         aog = load_data("aog_data.pkl")
         
         if not aog.empty:
             aog_by_hr = get_aog_by_hr(aog)
             monthly_aog_by_hr = get_monthly_aog_by_hr(aog_by_hr)
+            save_data(monthly_aog_by_hr, "monthly_aog_by_hr.pkl")
+            del aog, aog_by_hr
+            gc.collect()
             
-                        # Hourly volumes by Corridor
+            # Corridor processing
             cor_monthly_aog_by_hr = get_cor_monthly_aog_by_hr(monthly_aog_by_hr, config_data['corridors'])
+            save_data(cor_monthly_aog_by_hr, "cor_monthly_aog_by_hr.pkl")
+            del cor_monthly_aog_by_hr
+            gc.collect()
+            
             sub_monthly_aog_by_hr = get_cor_monthly_aog_by_hr(
                 monthly_aog_by_hr, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(monthly_aog_by_hr, "monthly_aog_by_hr.pkl")
-            save_data(cor_monthly_aog_by_hr, "cor_monthly_aog_by_hr.pkl")
             save_data(sub_monthly_aog_by_hr, "sub_monthly_aog_by_hr.pkl")
-
-            # Cleanup memory
-            del monthly_aog_by_hr
-            del cor_monthly_aog_by_hr
-            del sub_monthly_aog_by_hr
+            del monthly_aog_by_hr, sub_monthly_aog_by_hr
             gc.collect()
             
+            log_memory_usage("End hourly arrivals on green")
             logger.info("Hourly arrivals on green processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in hourly arrivals on green processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_daily_progression_ratio(dates, config_data):
-    """Process daily progression ratio [13 of 29]"""
+    """Process daily progression ratio [13 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Daily Progression Ratio [13 of 29 (mark1)]")
+    log_memory_usage("Start daily progression ratio")
     
     try:
-        # Load AOG data from previous processing
         aog = load_data("aog_data.pkl")
         
         if not aog.empty:
             weekly_pr_by_day = get_weekly_pr_by_day(aog)
+            save_data(weekly_pr_by_day, "weekly_pr_by_day.pkl")
+            
             monthly_pr_by_day = get_monthly_pr_by_day(aog)
+            save_data(monthly_pr_by_day, "monthly_pr_by_day.pkl")
+            del aog
+            gc.collect()
             
             cor_weekly_pr_by_day = get_cor_weekly_pr_by_day(weekly_pr_by_day, config_data['corridors'])
-            cor_monthly_pr_by_day = get_cor_monthly_pr_by_day(monthly_pr_by_day, config_data['corridors'])
+            save_data(cor_weekly_pr_by_day, "cor_weekly_pr_by_day.pkl")
+            del weekly_pr_by_day, cor_weekly_pr_by_day
+            gc.collect()
             
+            cor_monthly_pr_by_day = get_cor_monthly_pr_by_day(monthly_pr_by_day, config_data['corridors'])
+            save_data(cor_monthly_pr_by_day, "cor_monthly_pr_by_day.pkl")
+            del cor_monthly_pr_by_day
+            gc.collect()
+            
+            # Subcorridor processing
+            weekly_pr_by_day = load_data("weekly_pr_by_day.pkl")
             sub_weekly_pr_by_day = get_cor_weekly_pr_by_day(
                 weekly_pr_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_pr_by_day, "sub_weekly_pr_by_day.pkl")
+            del weekly_pr_by_day, sub_weekly_pr_by_day
+            gc.collect()
+            
             sub_monthly_pr_by_day = get_cor_monthly_pr_by_day(
                 monthly_pr_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(weekly_pr_by_day, "weekly_pr_by_day.pkl")
-            save_data(monthly_pr_by_day, "monthly_pr_by_day.pkl")
-            save_data(cor_weekly_pr_by_day, "cor_weekly_pr_by_day.pkl")
-            save_data(cor_monthly_pr_by_day, "cor_monthly_pr_by_day.pkl")
-            save_data(sub_weekly_pr_by_day, "sub_weekly_pr_by_day.pkl")
             save_data(sub_monthly_pr_by_day, "sub_monthly_pr_by_day.pkl")
-
-            # Cleanup memory
-            del weekly_pr_by_day
-            del monthly_pr_by_day
-            del cor_weekly_pr_by_day
-            del cor_monthly_pr_by_day
-            del sub_weekly_pr_by_day
-            del sub_monthly_pr_by_day
+            del monthly_pr_by_day, sub_monthly_pr_by_day
             gc.collect()
             
+            log_memory_usage("End daily progression ratio")
             logger.info("Daily progression ratio processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in daily progression ratio processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_hourly_progression_ratio(dates, config_data):
-    """Process hourly progression ratio [14 of 29]"""
+    """Process hourly progression ratio [14 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Hourly Progression Ratio [14 of 29 (mark1)]")
+    log_memory_usage("Start hourly progression ratio")
     
     try:
-        # Load AOG data from previous processing
         aog = load_data("aog_data.pkl")
         
         if not aog.empty:
             pr_by_hr = get_pr_by_hr(aog)
             monthly_pr_by_hr = get_monthly_pr_by_hr(pr_by_hr)
+            save_data(monthly_pr_by_hr, "monthly_pr_by_hr.pkl")
+            del aog, pr_by_hr
+            gc.collect()
             
-            # Hourly volumes by Corridor
             cor_monthly_pr_by_hr = get_cor_monthly_pr_by_hr(monthly_pr_by_hr, config_data['corridors'])
+            save_data(cor_monthly_pr_by_hr, "cor_monthly_pr_by_hr.pkl")
+            del cor_monthly_pr_by_hr
+            gc.collect()
+            
             sub_monthly_pr_by_hr = get_cor_monthly_pr_by_hr(
                 monthly_pr_by_hr, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(monthly_pr_by_hr, "monthly_pr_by_hr.pkl")
-            save_data(cor_monthly_pr_by_hr, "cor_monthly_pr_by_hr.pkl")
             save_data(sub_monthly_pr_by_hr, "sub_monthly_pr_by_hr.pkl")
-
-            # Cleanup memory
-            del monthly_pr_by_hr
-            del cor_monthly_pr_by_hr
-            del sub_monthly_pr_by_hr
+            del monthly_pr_by_hr, sub_monthly_pr_by_hr
             gc.collect()
             
+            log_memory_usage("End hourly progression ratio")
             logger.info("Hourly progression ratio processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in hourly progression ratio processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_daily_split_failures(dates, config_data):
-    """Process daily split failures [15 of 29]"""
+    """Process daily split failures [15 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Daily Split Failures [15 of 29 (mark1)]")
+    log_memory_usage("Start daily split failures")
     
     try:
         def filter_callback(x):
@@ -1551,6 +1496,8 @@ def process_daily_split_failures(dates, config_data):
         )
         
         if not sf.empty:
+            log_memory_usage("After reading split failures data")
+            
             sf = clean_signal_ids(sf)
             sf['CallPhase'] = sf['CallPhase'].astype('category')
             sf = ensure_datetime_column(sf, 'Date')
@@ -1559,116 +1506,140 @@ def process_daily_split_failures(dates, config_data):
             if 'Date_Hour' in sf.columns:
                 sf['Hour'] = pd.to_datetime(sf['Date_Hour']).dt.hour
             else:
-                sf['Hour'] = 12  # Default if no hour info
+                sf['Hour'] = 12
             
             # Divide into peak/off-peak split failures
-            sfo = sf[~sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]  # Off-peak
-            sfp = sf[sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]   # Peak
+            sfo = sf[~sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
+            sfp = sf[sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
             
             # Calculate weekly metrics
             weekly_sf_by_day = get_weekly_avg_by_day(sfp, "sf_freq", "cycles", peak_only=False)
+            save_data(weekly_sf_by_day, "wsf.pkl")
+            
             weekly_sfo_by_day = get_weekly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
+            save_data(weekly_sfo_by_day, "wsfo.pkl")
+            del sfp, sfo
+            gc.collect()
             
+            # Calculate monthly metrics
+            sf = load_data("sf_data.pkl") if 'sf' not in locals() else sf
+            sfp = sf[sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
+            sfo = sf[~sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
+            
+            monthly_sf_by_day = get_monthly_avg_by_day(sfp, "sf_freq", "cycles", peak_only=False)
+            save_data(monthly_sf_by_day, "monthly_sfd.pkl")
+            
+            monthly_sfo_by_day = get_monthly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
+            save_data(monthly_sfo_by_day, "monthly_sfo.pkl")
+            del sfp, sfo
+            gc.collect()
+            
+            # Corridor processing
             cor_weekly_sf_by_day = get_cor_weekly_sf_by_day(weekly_sf_by_day, config_data['corridors'])
-            cor_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['corridors'])
+            save_data(cor_weekly_sf_by_day, "cor_wsf.pkl")
+            del weekly_sf_by_day, cor_weekly_sf_by_day
+            gc.collect()
             
+            cor_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['corridors'])
+            save_data(cor_weekly_sfo_by_day, "cor_wsfo.pkl")
+            del weekly_sfo_by_day, cor_weekly_sfo_by_day
+            gc.collect()
+            
+            cor_monthly_sf_by_day = get_cor_monthly_sf_by_day(monthly_sf_by_day, config_data['corridors'])
+            save_data(cor_monthly_sf_by_day, "cor_monthly_sfd.pkl")
+            del monthly_sf_by_day, cor_monthly_sf_by_day
+            gc.collect()
+            
+            cor_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['corridors'])
+            save_data(cor_monthly_sfo_by_day, "cor_monthly_sfo.pkl")
+            del monthly_sfo_by_day, cor_monthly_sfo_by_day
+            gc.collect()
+            
+            # Subcorridor processing
+            weekly_sf_by_day = load_data("wsf.pkl")
             sub_weekly_sf_by_day = get_cor_weekly_sf_by_day(
                 weekly_sf_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_sf_by_day, "sub_wsf.pkl")
+            del weekly_sf_by_day, sub_weekly_sf_by_day
+            gc.collect()
+            
+            weekly_sfo_by_day = load_data("wsfo.pkl")
             sub_weekly_sfo_by_day = get_cor_weekly_sf_by_day(
                 weekly_sfo_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_weekly_sfo_by_day, "sub_wsfo.pkl")
+            del weekly_sfo_by_day, sub_weekly_sfo_by_day
+            gc.collect()
             
-            # Calculate monthly metrics
-            monthly_sf_by_day = get_monthly_avg_by_day(sfp, "sf_freq", "cycles", peak_only=False)
-            monthly_sfo_by_day = get_monthly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
-            
-            cor_monthly_sf_by_day = get_cor_monthly_sf_by_day(monthly_sf_by_day, config_data['corridors'])
-            cor_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['corridors'])
-            
+            monthly_sf_by_day = load_data("monthly_sfd.pkl")
             sub_monthly_sf_by_day = get_cor_monthly_sf_by_day(
                 monthly_sf_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
+            save_data(sub_monthly_sf_by_day, "sub_monthly_sfd.pkl")
+            del monthly_sf_by_day, sub_monthly_sf_by_day
+            gc.collect()
+            
+            monthly_sfo_by_day = load_data("monthly_sfo.pkl")
             sub_monthly_sfo_by_day = get_cor_monthly_sf_by_day(
                 monthly_sfo_by_day, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(weekly_sf_by_day, "wsf.pkl")
-            save_data(monthly_sf_by_day, "monthly_sfd.pkl")
-            save_data(cor_weekly_sf_by_day, "cor_wsf.pkl")
-            save_data(cor_monthly_sf_by_day, "cor_monthly_sfd.pkl")
-            save_data(sub_weekly_sf_by_day, "sub_wsf.pkl")
-            save_data(sub_monthly_sf_by_day, "sub_monthly_sfd.pkl")
-            save_data(weekly_sfo_by_day, "wsfo.pkl")
-            save_data(monthly_sfo_by_day, "monthly_sfo.pkl")
-            save_data(cor_weekly_sfo_by_day, "cor_wsfo.pkl")
-            save_data(cor_monthly_sfo_by_day, "cor_monthly_sfo.pkl")
-            save_data(sub_weekly_sfo_by_day, "sub_wsfo.pkl")
             save_data(sub_monthly_sfo_by_day, "sub_monthly_sfo.pkl")
-
-            # Cleanup memory
-            del weekly_sf_by_day
-            del monthly_sf_by_day
-            del cor_weekly_sf_by_day
-            del cor_monthly_sf_by_day
-            del sub_weekly_sf_by_day
-            del sub_monthly_sf_by_day
-            del weekly_sfo_by_day
-            del monthly_sfo_by_day
-            del cor_weekly_sfo_by_day
-            del cor_monthly_sfo_by_day
-            del sub_weekly_sfo_by_day
-            del sub_monthly_sfo_by_day
+            del monthly_sfo_by_day, sub_monthly_sfo_by_day
             gc.collect()
             
             # Store sf for hourly processing
             save_data(sf, "sf_data.pkl")
+            del sf
+            gc.collect()
             
+            log_memory_usage("End daily split failures")
             logger.info("Daily split failures processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in daily split failures processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_hourly_split_failures(dates, config_data):
-    """Process hourly split failures [16 of 29]"""
+    """Process hourly split failures [16 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Hourly Split Failures [16 of 29 (mark1)]")
+    log_memory_usage("Start hourly split failures")
     
     try:
-        # Load SF data from previous processing
         sf = load_data("sf_data.pkl")
         
         if not sf.empty:
             sfh = get_sf_by_hr(sf)
             msfh = get_monthly_sf_by_hr(sfh)
+            save_data(msfh, "msfh.pkl")
+            del sf, sfh
+            gc.collect()
             
-            # Hourly volumes by Corridor
             cor_msfh = get_cor_monthly_sf_by_hr(msfh, config_data['corridors'])
+            save_data(cor_msfh, "cor_msfh.pkl")
+            del cor_msfh
+            gc.collect()
+            
             sub_msfh = get_cor_monthly_sf_by_hr(
                 msfh, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(msfh, "msfh.pkl")
-            save_data(cor_msfh, "cor_msfh.pkl")
             save_data(sub_msfh, "sub_msfh.pkl")
-
-            # Cleanup memory
-            del msfh
-            del cor_msfh
-            del sub_msfh
+            del msfh, sub_msfh
             gc.collect()
             
+            log_memory_usage("End hourly split failures")
             logger.info("Hourly split failures processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in hourly split failures processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_daily_queue_spillback(dates, config_data):
-    """Process daily queue spillback [17 of 29]"""
+    """Process daily queue spillback [17 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Daily Queue Spillback [17 of 29 (mark1)]")
+    log_memory_usage("Start daily queue spillback")
     
     try:
         qs = s3_read_parquet_parallel(
@@ -1680,88 +1651,100 @@ def process_daily_queue_spillback(dates, config_data):
         )
         
         if not qs.empty:
+            log_memory_usage("After reading queue spillback data")
+            
             qs = clean_signal_ids(qs)
             qs['CallPhase'] = qs['CallPhase'].astype('category')
             qs = ensure_datetime_column(qs, 'Date')
             
             wqs = get_weekly_qs_by_day(qs)
-            cor_wqs = get_cor_weekly_qs_by_day(wqs, config_data['corridors'])
-            sub_wqs = get_cor_weekly_qs_by_day(
-                wqs, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
+            save_data(wqs, "wqs.pkl")
             
             monthly_qsd = get_monthly_qs_by_day(qs)
-            cor_monthly_qsd = get_cor_monthly_qs_by_day(monthly_qsd, config_data['corridors'])
-            sub_monthly_qsd = get_cor_monthly_qs_by_day(
-                monthly_qsd, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(wqs, "wqs.pkl")
             save_data(monthly_qsd, "monthly_qsd.pkl")
-            save_data(cor_wqs, "cor_wqs.pkl")
-            save_data(cor_monthly_qsd, "cor_monthly_qsd.pkl")
-            save_data(sub_wqs, "sub_wqs.pkl")
-            save_data(sub_monthly_qsd, "sub_monthly_qsd.pkl")
-
-            # Cleanup memory
-            del wqs
-            del monthly_qsd
-            del cor_wqs
-            del cor_monthly_qsd
-            del sub_wqs
-            del sub_monthly_qsd
-            gc.collect()
             
             # Store qs for hourly processing
             save_data(qs, "qs_data.pkl")
+            del qs
+            gc.collect()
             
+            cor_wqs = get_cor_weekly_qs_by_day(wqs, config_data['corridors'])
+            save_data(cor_wqs, "cor_wqs.pkl")
+            del wqs, cor_wqs
+            gc.collect()
+            
+            cor_monthly_qsd = get_cor_monthly_qs_by_day(monthly_qsd, config_data['corridors'])
+            save_data(cor_monthly_qsd, "cor_monthly_qsd.pkl")
+            del cor_monthly_qsd
+            gc.collect()
+            
+            # Subcorridor processing
+            wqs = load_data("wqs.pkl")
+            sub_wqs = get_cor_weekly_qs_by_day(
+                wqs, config_data['subcorridors']
+            ).dropna(subset=['Corridor'])
+            save_data(sub_wqs, "sub_wqs.pkl")
+            del wqs, sub_wqs
+            gc.collect()
+            
+            monthly_qsd = load_data("monthly_qsd.pkl")
+            sub_monthly_qsd = get_cor_monthly_qs_by_day(
+                monthly_qsd, config_data['subcorridors']
+            ).dropna(subset=['Corridor'])
+            save_data(sub_monthly_qsd, "sub_monthly_qsd.pkl")
+            del monthly_qsd, sub_monthly_qsd
+            gc.collect()
+            
+            log_memory_usage("End daily queue spillback")
             logger.info("Daily queue spillback processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in daily queue spillback processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_hourly_queue_spillback(dates, config_data):
-    """Process hourly queue spillback [18 of 29]"""
+    """Process hourly queue spillback [18 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Hourly Queue Spillback [18 of 29 (mark1)]")
+    log_memory_usage("Start hourly queue spillback")
     
     try:
-        # Load QS data from previous processing
         qs = load_data("qs_data.pkl")
         
         if not qs.empty:
             qsh = get_qs_by_hr(qs)
             mqsh = get_monthly_qs_by_hr(qsh)
+            save_data(mqsh, "mqsh.pkl")
+            del qs, qsh
+            gc.collect()
             
-            # Hourly volumes by Corridor
             cor_mqsh = get_cor_monthly_qs_by_hr(mqsh, config_data['corridors'])
+            save_data(cor_mqsh, "cor_mqsh.pkl")
+            del cor_mqsh
+            gc.collect()
+            
             sub_mqsh = get_cor_monthly_qs_by_hr(
                 mqsh, config_data['subcorridors']
             ).dropna(subset=['Corridor'])
-            
-            # Save results
-            save_data(mqsh, "mqsh.pkl")
-            save_data(cor_mqsh, "cor_mqsh.pkl")
             save_data(sub_mqsh, "sub_mqsh.pkl")
-
-            # Cleanup memory
-            del mqsh
-            del cor_mqsh
-            del sub_mqsh
+            del mqsh, sub_mqsh
             gc.collect()
             
+            log_memory_usage("End hourly queue spillback")
             logger.info("Hourly queue spillback processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in hourly queue spillback processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_travel_time_indexes(dates, config_data):
-    """Process travel time and buffer time indexes [19 of 29]"""
+    """Process travel time and buffer time indexes [19 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Travel Time Indexes [19 of 29 (mark1)]")
+    log_memory_usage("Start travel time indexes")
+    
     try:
-        # ------- Corridor Travel Time Metrics ------- #
+        # Corridor Travel Time Metrics
         tt = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="cor_travel_time_metrics_1hr",
@@ -1770,6 +1753,8 @@ def process_travel_time_indexes(dates, config_data):
         )
         
         if not tt.empty:
+            log_memory_usage("After reading corridor travel time data")
+            
             tt['Corridor'] = tt['Corridor'].astype('category')
             tt = tt.merge(
                 config_data['all_corridors'][['Zone_Group', 'Zone', 'Corridor']].drop_duplicates(),
@@ -1782,6 +1767,8 @@ def process_travel_time_indexes(dates, config_data):
             pti = tt[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'pti']].copy()
             bi = tt[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'bi']].copy()
             spd = tt[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'speed_mph']].copy()
+            del tt
+            gc.collect()
             
             # Load corridor monthly VPH for weighting
             cor_monthly_vph = load_data("cor_monthly_vph.pkl")
@@ -1795,37 +1782,46 @@ def process_travel_time_indexes(dates, config_data):
                 
                 # Calculate corridor metrics
                 cor_monthly_tti_by_hr = get_cor_monthly_ti_by_hr(tti, cor_monthly_vph, config_data['all_corridors'])
-                cor_monthly_pti_by_hr = get_cor_monthly_ti_by_hr(pti, cor_monthly_vph, config_data['all_corridors'])
-                cor_monthly_bi_by_hr = get_cor_monthly_ti_by_hr(bi, cor_monthly_vph, config_data['all_corridors'])
-                cor_monthly_spd_by_hr = get_cor_monthly_ti_by_hr(spd, cor_monthly_vph, config_data['all_corridors'])
-                
-                cor_monthly_tti = get_cor_monthly_ti_by_day(tti, cor_monthly_vph, config_data['all_corridors'])
-                cor_monthly_pti = get_cor_monthly_ti_by_day(pti, cor_monthly_vph, config_data['all_corridors'])
-                cor_monthly_bi = get_cor_monthly_ti_by_day(bi, cor_monthly_vph, config_data['all_corridors'])
-                cor_monthly_spd = get_cor_monthly_ti_by_day(spd, cor_monthly_vph, config_data['all_corridors'])
-                
-                # Save corridor results
-                save_data(cor_monthly_tti, "cor_monthly_tti.pkl")
                 save_data(cor_monthly_tti_by_hr, "cor_monthly_tti_by_hr.pkl")
-                save_data(cor_monthly_pti, "cor_monthly_pti.pkl")
-                save_data(cor_monthly_pti_by_hr, "cor_monthly_pti_by_hr.pkl")
-                save_data(cor_monthly_bi, "cor_monthly_bi.pkl")
-                save_data(cor_monthly_bi_by_hr, "cor_monthly_bi_by_hr.pkl")
-                save_data(cor_monthly_spd, "cor_monthly_spd.pkl")
-                save_data(cor_monthly_spd_by_hr, "cor_monthly_spd_by_hr.pkl")
-
-                # Cleanup memory
-                del cor_monthly_tti
                 del cor_monthly_tti_by_hr
-                del cor_monthly_pti
+                gc.collect()
+                
+                cor_monthly_pti_by_hr = get_cor_monthly_ti_by_hr(pti, cor_monthly_vph, config_data['all_corridors'])
+                save_data(cor_monthly_pti_by_hr, "cor_monthly_pti_by_hr.pkl")
                 del cor_monthly_pti_by_hr
-                del cor_monthly_bi
+                gc.collect()
+                
+                cor_monthly_bi_by_hr = get_cor_monthly_ti_by_hr(bi, cor_monthly_vph, config_data['all_corridors'])
+                save_data(cor_monthly_bi_by_hr, "cor_monthly_bi_by_hr.pkl")
                 del cor_monthly_bi_by_hr
-                del cor_monthly_spd
+                gc.collect()
+                
+                cor_monthly_spd_by_hr = get_cor_monthly_ti_by_hr(spd, cor_monthly_vph, config_data['all_corridors'])
+                save_data(cor_monthly_spd_by_hr, "cor_monthly_spd_by_hr.pkl")
                 del cor_monthly_spd_by_hr
                 gc.collect()
+                
+                cor_monthly_tti = get_cor_monthly_ti_by_day(tti, cor_monthly_vph, config_data['all_corridors'])
+                save_data(cor_monthly_tti, "cor_monthly_tti.pkl")
+                del tti, cor_monthly_tti
+                gc.collect()
+                
+                cor_monthly_pti = get_cor_monthly_ti_by_day(pti, cor_monthly_vph, config_data['all_corridors'])
+                save_data(cor_monthly_pti, "cor_monthly_pti.pkl")
+                del pti, cor_monthly_pti
+                gc.collect()
+                
+                cor_monthly_bi = get_cor_monthly_ti_by_day(bi, cor_monthly_vph, config_data['all_corridors'])
+                save_data(cor_monthly_bi, "cor_monthly_bi.pkl")
+                del bi, cor_monthly_bi
+                gc.collect()
+                
+                cor_monthly_spd = get_cor_monthly_ti_by_day(spd, cor_monthly_vph, config_data['all_corridors'])
+                save_data(cor_monthly_spd, "cor_monthly_spd.pkl")
+                del spd, cor_monthly_spd, cor_monthly_vph
+                gc.collect()
         
-        # ------- Subcorridor Travel Time Metrics ------- #
+        # Subcorridor Travel Time Metrics
         tt_sub = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="sub_travel_time_metrics_1hr",
@@ -1834,6 +1830,8 @@ def process_travel_time_indexes(dates, config_data):
         )
         
         if not tt_sub.empty:
+            log_memory_usage("After reading subcorridor travel time data")
+            
             tt_sub['Corridor'] = tt_sub['Corridor'].astype('category')
             tt_sub['Subcorridor'] = tt_sub['Subcorridor'].astype('category')
             
@@ -1850,6 +1848,8 @@ def process_travel_time_indexes(dates, config_data):
             pti_sub = tt_sub[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'pti']].copy()
             bi_sub = tt_sub[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'bi']].copy()
             spd_sub = tt_sub[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'speed_mph']].copy()
+            del tt_sub
+            gc.collect()
             
             # Load subcorridor monthly VPH for weighting
             sub_monthly_vph = load_data("sub_monthly_vph.pkl")
@@ -1863,45 +1863,57 @@ def process_travel_time_indexes(dates, config_data):
                 
                 # Calculate subcorridor metrics
                 sub_monthly_tti_by_hr = get_cor_monthly_ti_by_hr(tti_sub, sub_monthly_vph, config_data['subcorridors'])
-                sub_monthly_pti_by_hr = get_cor_monthly_ti_by_hr(pti_sub, sub_monthly_vph, config_data['subcorridors'])
-                sub_monthly_bi_by_hr = get_cor_monthly_ti_by_hr(bi_sub, sub_monthly_vph, config_data['subcorridors'])
-                sub_monthly_spd_by_hr = get_cor_monthly_ti_by_hr(spd_sub, sub_monthly_vph, config_data['subcorridors'])
-                
-                sub_monthly_tti = get_cor_monthly_ti_by_day(tti_sub, sub_monthly_vph, config_data['subcorridors'])
-                sub_monthly_pti = get_cor_monthly_ti_by_day(pti_sub, sub_monthly_vph, config_data['subcorridors'])
-                sub_monthly_bi = get_cor_monthly_ti_by_day(bi_sub, sub_monthly_vph, config_data['subcorridors'])
-                sub_monthly_spd = get_cor_monthly_ti_by_day(spd_sub, sub_monthly_vph, config_data['subcorridors'])
-                
-                # Save subcorridor results
-                save_data(sub_monthly_tti, "sub_monthly_tti.pkl")
                 save_data(sub_monthly_tti_by_hr, "sub_monthly_tti_by_hr.pkl")
-                save_data(sub_monthly_pti, "sub_monthly_pti.pkl")
-                save_data(sub_monthly_pti_by_hr, "sub_monthly_pti_by_hr.pkl")
-                save_data(sub_monthly_bi, "sub_monthly_bi.pkl")
-                save_data(sub_monthly_bi_by_hr, "sub_monthly_bi_by_hr.pkl")
-                save_data(sub_monthly_spd, "sub_monthly_spd.pkl")
-                save_data(sub_monthly_spd_by_hr, "sub_monthly_spd_by_hr.pkl")
-
-                # Cleanup memory
-                del sub_monthly_tti
                 del sub_monthly_tti_by_hr
-                del sub_monthly_pti
+                gc.collect()
+                
+                sub_monthly_pti_by_hr = get_cor_monthly_ti_by_hr(pti_sub, sub_monthly_vph, config_data['subcorridors'])
+                save_data(sub_monthly_pti_by_hr, "sub_monthly_pti_by_hr.pkl")
                 del sub_monthly_pti_by_hr
-                del sub_monthly_bi
+                gc.collect()
+                
+                sub_monthly_bi_by_hr = get_cor_monthly_ti_by_hr(bi_sub, sub_monthly_vph, config_data['subcorridors'])
+                save_data(sub_monthly_bi_by_hr, "sub_monthly_bi_by_hr.pkl")
                 del sub_monthly_bi_by_hr
-                del sub_monthly_spd
+                gc.collect()
+                
+                sub_monthly_spd_by_hr = get_cor_monthly_ti_by_hr(spd_sub, sub_monthly_vph, config_data['subcorridors'])
+                save_data(sub_monthly_spd_by_hr, "sub_monthly_spd_by_hr.pkl")
                 del sub_monthly_spd_by_hr
                 gc.collect()
+                
+                sub_monthly_tti = get_cor_monthly_ti_by_day(tti_sub, sub_monthly_vph, config_data['subcorridors'])
+                save_data(sub_monthly_tti, "sub_monthly_tti.pkl")
+                del tti_sub, sub_monthly_tti
+                gc.collect()
+                
+                sub_monthly_pti = get_cor_monthly_ti_by_day(pti_sub, sub_monthly_vph, config_data['subcorridors'])
+                save_data(sub_monthly_pti, "sub_monthly_pti.pkl")
+                del pti_sub, sub_monthly_pti
+                gc.collect()
+                
+                sub_monthly_bi = get_cor_monthly_ti_by_day(bi_sub, sub_monthly_vph, config_data['subcorridors'])
+                save_data(sub_monthly_bi, "sub_monthly_bi.pkl")
+                del bi_sub, sub_monthly_bi
+                gc.collect()
+                
+                sub_monthly_spd = get_cor_monthly_ti_by_day(spd_sub, sub_monthly_vph, config_data['subcorridors'])
+                save_data(sub_monthly_spd, "sub_monthly_spd.pkl")
+                del spd_sub, sub_monthly_spd, sub_monthly_vph
+                gc.collect()
         
+        log_memory_usage("End travel time indexes")
         logger.info("Travel time indexes processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in travel time indexes processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_cctv_uptime(dates, config_data):
-    """Process CCTV uptime [20 of 29]"""
+    """Process CCTV uptime [20 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} CCTV Uptimes [20 of 29 (mark1)]")
+    log_memory_usage("Start CCTV uptime")
     
     try:
         # Get CCTV uptime from 511 and encoders
@@ -1912,19 +1924,18 @@ def process_cctv_uptime(dates, config_data):
             conf.athena, "cctv_uptime_encoders", config_data['cam_config'], dates['wk_calcs_start_date']
         )
 
-        if 'Corridor' not in daily_cctv_uptime_511.columns or 'Corridor' not in daily_cctv_uptime_encoders.columns:
-            daily_cctv_uptime_511['Corridor'] = daily_cctv_uptime_511['Corridor_x']
-            daily_cctv_uptime_encoders['Corridor'] = daily_cctv_uptime_encoders['Corridor_x']
-
-        if 'Subcorridor' not in daily_cctv_uptime_511.columns or 'Subcorridor' not in daily_cctv_uptime_encoders.columns:
-            daily_cctv_uptime_511['Subcorridor'] = daily_cctv_uptime_511['Corridor_y']
-            daily_cctv_uptime_encoders['Subcorridor'] = daily_cctv_uptime_encoders['Corridor_y']
-
-        if 'Description' not in daily_cctv_uptime_511.columns or 'Description' not in daily_cctv_uptime_encoders.columns:
-            daily_cctv_uptime_511['Description'] = "NA"
-            daily_cctv_uptime_encoders['Description'] = "NA"
-
         if not daily_cctv_uptime_511.empty or not daily_cctv_uptime_encoders.empty:
+            log_memory_usage("After reading CCTV uptime data")
+            
+            # Ensure required columns exist
+            for df in [daily_cctv_uptime_511, daily_cctv_uptime_encoders]:
+                if 'Corridor' not in df.columns:
+                    df['Corridor'] = df.get('Corridor_x', 'Unknown')
+                if 'Subcorridor' not in df.columns:
+                    df['Subcorridor'] = df.get('Corridor_y', 'Unknown')
+                if 'Description' not in df.columns:
+                    df['Description'] = "NA"
+            
             # Merge 511 and encoder data
             daily_cctv_uptime = pd.merge(
                 daily_cctv_uptime_511,
@@ -1933,36 +1944,32 @@ def process_cctv_uptime(dates, config_data):
                 how='outer',
                 suffixes=('_511', '_enc')
             )
+            del daily_cctv_uptime_511, daily_cctv_uptime_encoders
+            gc.collect()
+            
             columns = ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'CameraID', 'Description']
-
-            camera_info = (
-                daily_cctv_uptime[columns]
-                .drop_duplicates()
-            )
-
-            # Create MultiIndex with 7 levels: the 6 camera info fields + Date
+            camera_info = daily_cctv_uptime[columns].drop_duplicates()
+            
+            # Create MultiIndex with camera info + Date
             camera_dates = pd.MultiIndex.from_product(
-                [
-                    camera_info[col].unique() for col in columns
-                ] + [pd.date_range(dates['wk_calcs_start_date'], dates['report_end_date'])],
+                [camera_info[col].unique() for col in columns] + 
+                [pd.date_range(dates['wk_calcs_start_date'], dates['report_end_date'])],
                 names=columns + ['Date']
             )
-
-            # Now set index to the same 7 columns
+            
             daily_cctv_uptime = (
                 daily_cctv_uptime
                 .set_index(columns + ['Date'])
                 .reindex(camera_dates)
                 .reset_index()
             )
-
-            # Fill NaN values
+            
+            # Fill NaN values and calculate uptime metrics
             fill_cols = ['up_enc', 'num_enc', 'uptime_enc', 'up_511', 'num_511', 'uptime_511']
             for col in fill_cols:
                 if col in daily_cctv_uptime.columns:
                     daily_cctv_uptime[col] = daily_cctv_uptime[col].fillna(0)
             
-            # Calculate uptime metrics
             daily_cctv_uptime = daily_cctv_uptime.assign(
                 uptime=lambda x: x.get('up_511', 0),
                 num=1,
@@ -1975,7 +1982,7 @@ def process_cctv_uptime(dates, config_data):
                 if col in daily_cctv_uptime.columns:
                     daily_cctv_uptime[col] = daily_cctv_uptime[col].astype('category')
             
-            # Find bad days (systemic issues)
+            # Find and filter out bad days
             bad_days = daily_cctv_uptime.groupby('Date').agg({
                 'uptime': 'sum',
                 'num': 'sum'
@@ -1983,11 +1990,14 @@ def process_cctv_uptime(dates, config_data):
                 suptime=lambda x: x['uptime'] / x['num']
             ).query('suptime < 0.2').index
             
-            # Filter out bad days
             daily_cctv_uptime = daily_cctv_uptime[~daily_cctv_uptime['Date'].isin(bad_days)]
+            
+            save_data(daily_cctv_uptime, "daily_cctv_uptime.pkl")
             
             # Calculate weekly and monthly metrics
             weekly_cctv_uptime = get_weekly_avg_by_day_cctv(daily_cctv_uptime)
+            save_data(weekly_cctv_uptime, "weekly_cctv_uptime.pkl")
+            
             monthly_cctv_uptime = daily_cctv_uptime.groupby([
                 'Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'CameraID', 'Description',
                 daily_cctv_uptime['Date'].dt.to_period('M').dt.start_time.rename('Month')
@@ -1997,19 +2007,32 @@ def process_cctv_uptime(dates, config_data):
             }).reset_index()
             
             monthly_cctv_uptime.columns = ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'CameraID', 'Description', 'Month', 'up', 'uptime', 'num']
+            save_data(monthly_cctv_uptime, "monthly_cctv_uptime.pkl")
             
             # Calculate corridor metrics
             cor_daily_cctv_uptime = get_cor_weekly_avg_by_day(
                 daily_cctv_uptime, config_data['all_corridors'], "uptime", "num"
             )
+            save_data(cor_daily_cctv_uptime, "cor_daily_cctv_uptime.pkl")
+            del daily_cctv_uptime, cor_daily_cctv_uptime
+            gc.collect()
+            
             cor_weekly_cctv_uptime = get_cor_weekly_avg_by_day(
                 weekly_cctv_uptime, config_data['all_corridors'], "uptime", "num"
             )
+            save_data(cor_weekly_cctv_uptime, "cor_weekly_cctv_uptime.pkl")
+            del weekly_cctv_uptime, cor_weekly_cctv_uptime
+            gc.collect()
+            
             cor_monthly_cctv_uptime = get_cor_monthly_avg_by_day(
                 monthly_cctv_uptime, config_data['all_corridors'], "uptime", "num"
             )
+            save_data(cor_monthly_cctv_uptime, "cor_monthly_cctv_uptime.pkl")
+            del cor_monthly_cctv_uptime
+            gc.collect()
             
             # Calculate subcorridor metrics
+            daily_cctv_uptime = load_data("daily_cctv_uptime.pkl")
             sub_daily_cctv_uptime = daily_cctv_uptime.drop(columns=['Zone_Group']).dropna(subset=['Subcorridor'])
             sub_daily_cctv_uptime = sub_daily_cctv_uptime.rename(columns={
                 'Zone': 'Zone_Group', 'Corridor': 'Zone', 'Subcorridor': 'Corridor'
@@ -2017,7 +2040,11 @@ def process_cctv_uptime(dates, config_data):
             sub_daily_cctv_uptime = get_cor_weekly_avg_by_day(
                 sub_daily_cctv_uptime, config_data['subcorridors'], "uptime", "num"
             )
+            save_data(sub_daily_cctv_uptime, "sub_daily_cctv_uptime.pkl")
+            del daily_cctv_uptime, sub_daily_cctv_uptime
+            gc.collect()
             
+            weekly_cctv_uptime = load_data("weekly_cctv_uptime.pkl")
             sub_weekly_cctv_uptime = weekly_cctv_uptime.drop(columns=['Zone_Group']).dropna(subset=['Subcorridor'])
             sub_weekly_cctv_uptime = sub_weekly_cctv_uptime.rename(columns={
                 'Zone': 'Zone_Group', 'Corridor': 'Zone', 'Subcorridor': 'Corridor'
@@ -2025,6 +2052,9 @@ def process_cctv_uptime(dates, config_data):
             sub_weekly_cctv_uptime = get_cor_weekly_avg_by_day(
                 sub_weekly_cctv_uptime, config_data['subcorridors'], "uptime", "num"
             )
+            save_data(sub_weekly_cctv_uptime, "sub_weekly_cctv_uptime.pkl")
+            del weekly_cctv_uptime, sub_weekly_cctv_uptime
+            gc.collect()
             
             sub_monthly_cctv_uptime = monthly_cctv_uptime.drop(columns=['Zone_Group']).dropna(subset=['Subcorridor'])
             sub_monthly_cctv_uptime = sub_monthly_cctv_uptime.rename(columns={
@@ -2033,39 +2063,22 @@ def process_cctv_uptime(dates, config_data):
             sub_monthly_cctv_uptime = get_cor_monthly_avg_by_day(
                 sub_monthly_cctv_uptime, config_data['subcorridors'], "uptime", "num"
             )
-            
-            # Save results
-            save_data(daily_cctv_uptime, "daily_cctv_uptime.pkl")
-            save_data(weekly_cctv_uptime, "weekly_cctv_uptime.pkl")
-            save_data(monthly_cctv_uptime, "monthly_cctv_uptime.pkl")
-            save_data(cor_daily_cctv_uptime, "cor_daily_cctv_uptime.pkl")
-            save_data(cor_weekly_cctv_uptime, "cor_weekly_cctv_uptime.pkl")
-            save_data(cor_monthly_cctv_uptime, "cor_monthly_cctv_uptime.pkl")
-            save_data(sub_daily_cctv_uptime, "sub_daily_cctv_uptime.pkl")
-            save_data(sub_weekly_cctv_uptime, "sub_weekly_cctv_uptime.pkl")
             save_data(sub_monthly_cctv_uptime, "sub_monthly_cctv_uptime.pkl")
-
-            # Cleanup memory
-            del daily_cctv_uptime
-            del weekly_cctv_uptime
-            del monthly_cctv_uptime
-            del cor_daily_cctv_uptime
-            del cor_weekly_cctv_uptime
-            del cor_monthly_cctv_uptime
-            del sub_daily_cctv_uptime
-            del sub_weekly_cctv_uptime
-            del sub_monthly_cctv_uptime
+            del monthly_cctv_uptime, sub_monthly_cctv_uptime
             gc.collect()
             
+            log_memory_usage("End CCTV uptime")
             logger.info("CCTV uptime processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in CCTV uptime processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_teams_activities(dates, config_data):
-    """Process TEAMS activities [21 of 29]"""
+    """Process TEAMS activities [21 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} TEAMS [21 of 29 (mark1)]")
+    log_memory_usage("Start TEAMS activities")
     
     try:
         # Get TEAMS tasks data
@@ -2077,6 +2090,8 @@ def process_teams_activities(dates, config_data):
         )
         
         if not teams.empty:
+            log_memory_usage("After reading TEAMS data")
+            
             teams = tidy_teams_tasks(
                 teams,
                 bucket=conf.bucket,
@@ -2086,10 +2101,29 @@ def process_teams_activities(dates, config_data):
             
             # Calculate various task metrics
             tasks_by_type = get_outstanding_tasks_by_param(teams, "Task_Type", dates['report_start_date'])
+            save_data(tasks_by_type, "tasks_by_type.pkl")
+            del tasks_by_type
+            gc.collect()
+            
             tasks_by_subtype = get_outstanding_tasks_by_param(teams, "Task_Subtype", dates['report_start_date'])
+            save_data(tasks_by_subtype, "tasks_by_subtype.pkl")
+            del tasks_by_subtype
+            gc.collect()
+            
             tasks_by_priority = get_outstanding_tasks_by_param(teams, "Priority", dates['report_start_date'])
+            save_data(tasks_by_priority, "tasks_by_priority.pkl")
+            del tasks_by_priority
+            gc.collect()
+            
             tasks_by_source = get_outstanding_tasks_by_param(teams, "Task_Source", dates['report_start_date'])
+            save_data(tasks_by_source, "tasks_by_source.pkl")
+            del tasks_by_source
+            gc.collect()
+            
             tasks_all = get_outstanding_tasks_by_param(teams, "All", dates['report_start_date'])
+            save_data(tasks_all, "tasks_all.pkl")
+            del tasks_all
+            gc.collect()
             
             # Calculate outstanding tasks by date range
             date_list = pd.date_range(dates['calcs_start_date'], dates['report_end_date'], freq='MS')
@@ -2098,6 +2132,7 @@ def process_teams_activities(dates, config_data):
             for date_val in date_list:
                 task_data = get_outstanding_tasks_by_day_range(teams, dates['report_start_date'], date_val)
                 cor_outstanding_tasks_by_day_range.append(task_data)
+                gc.collect()  # Clean up after each iteration
             
             cor_outstanding_tasks_by_day_range = pd.concat(cor_outstanding_tasks_by_day_range, ignore_index=True)
             cor_outstanding_tasks_by_day_range['Zone_Group'] = cor_outstanding_tasks_by_day_range['Zone_Group'].astype('category')
@@ -2108,6 +2143,8 @@ def process_teams_activities(dates, config_data):
             cor_outstanding_tasks_by_day_range['delta.over45'] = cor_outstanding_tasks_by_day_range.groupby(['Zone_Group', 'Corridor'])['over45'].pct_change()
             cor_outstanding_tasks_by_day_range['delta.mttr'] = cor_outstanding_tasks_by_day_range.groupby(['Zone_Group', 'Corridor'])['mttr'].pct_change()
             
+            save_data(cor_outstanding_tasks_by_day_range, "cor_tasks_by_date.pkl")
+            
             # Create signal-level data
             sig_outstanding_tasks_by_day_range = cor_outstanding_tasks_by_day_range.copy()
             sig_outstanding_tasks_by_day_range = sig_outstanding_tasks_by_day_range.groupby('Corridor').first().reset_index()
@@ -2116,35 +2153,23 @@ def process_teams_activities(dates, config_data):
                 sig_outstanding_tasks_by_day_range['Corridor'].isin(config_data['all_corridors']['Corridor'])
             ]
             
-            # Save results
-            save_data(tasks_by_type, "tasks_by_type.pkl")
-            save_data(tasks_by_subtype, "tasks_by_subtype.pkl")
-            save_data(tasks_by_priority, "tasks_by_priority.pkl")
-            save_data(tasks_by_source, "tasks_by_source.pkl")
-            save_data(tasks_all, "tasks_all.pkl")
-            save_data(cor_outstanding_tasks_by_day_range, "cor_tasks_by_date.pkl")
             save_data(sig_outstanding_tasks_by_day_range, "sig_tasks_by_date.pkl")
-
-            # Cleanup memory
-            del teams
-            del tasks_by_type
-            del tasks_by_subtype
-            del tasks_by_priority
-            del tasks_by_source
-            del tasks_all
-            del cor_outstanding_tasks_by_day_range
-            del sig_outstanding_tasks_by_day_range
+            
+            del teams, cor_outstanding_tasks_by_day_range, sig_outstanding_tasks_by_day_range
             gc.collect()
             
+            log_memory_usage("End TEAMS activities")
             logger.info("TEAMS activities processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in TEAMS activities processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_user_delay_costs(dates, config_data):
-    """Process user delay costs [22 of 29]"""
+    """Process user delay costs [22 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} User Delay Costs [22 of 29 (mark1)]")
+    log_memory_usage("Start user delay costs")
     
     try:
         months = pd.date_range(dates['report_start_date'], dates['report_end_date'], freq='MS')
@@ -2154,39 +2179,43 @@ def process_user_delay_costs(dates, config_data):
             try:
                 obj = f"mark/user_delay_costs/date={month.strftime('%Y-%m-%d')}/user_delay_costs_{month.strftime('%Y-%m-%d')}.parquet"
                 
-                # Check if object exists
-                try:
-                    udc_data = s3read_using('read_parquet', bucket=conf.bucket, object=obj)
+                udc_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
+                
+                if not udc_data.empty:
+                    udc_data = udc_data.dropna(subset=['date'])
+                    udc_data = convert_to_utc(udc_data)
                     
-                    if not udc_data.empty:
-                        udc_data = udc_data.dropna(subset=['date'])
-                        udc_data = convert_to_utc(udc_data)
-                        
-                        udc_processed = udc_data.assign(
-                            Zone=udc_data['zone'],
-                            Corridor=udc_data['corridor'],
-                            analysis_month=month,
-                            month_hour=lambda x: pd.to_datetime(x['date']).dt.date,
-                            delay_cost=udc_data['combined.delay_cost']
-                        )
-                        
-                        # Adjust month_hour to first of month
-                        udc_processed['month_hour'] = pd.to_datetime(udc_processed['month_hour']) - pd.to_timedelta(pd.to_datetime(udc_processed['month_hour']).dt.day - 1, unit='D')
-                        udc_processed['Month'] = udc_processed['month_hour'].dt.to_period('M').dt.start_time
-                        
-                        udc_list.append(udc_processed[['Zone', 'Corridor', 'analysis_month', 'month_hour', 'Month', 'delay_cost']])
-                        
-                except Exception as e:
-                    logger.warning(f"Could not read UDC data for {month}: {e}")
+                    udc_processed = udc_data.assign(
+                        Zone=udc_data['zone'],
+                        Corridor=udc_data['corridor'],
+                        analysis_month=month,
+                        month_hour=lambda x: pd.to_datetime(x['date']).dt.date,
+                        delay_cost=udc_data['combined.delay_cost']
+                    )
+                    
+                    # Adjust month_hour to first of month
+                    udc_processed['month_hour'] = pd.to_datetime(udc_processed['month_hour']) - pd.to_timedelta(pd.to_datetime(udc_processed['month_hour']).dt.day - 1, unit='D')
+                    udc_processed['Month'] = udc_processed['month_hour'].dt.to_period('M').dt.start_time
+                    
+                    udc_list.append(udc_processed[['Zone', 'Corridor', 'analysis_month', 'month_hour', 'Month', 'delay_cost']])
+                    del udc_data, udc_processed
+                    gc.collect()
                     
             except Exception as e:
-                logger.warning(f"Error processing UDC for {month}: {e}")
+                logger.warning(f"Could not read UDC data for {month}: {e}")
         
         if udc_list:
+            log_memory_usage("After reading all UDC data")
+            
             udc = pd.concat(udc_list, ignore_index=True)
+            del udc_list
+            gc.collect()
             
             # Calculate hourly UDC
             hourly_udc = udc.groupby(['Zone', 'Corridor', 'Month', 'month_hour'])['delay_cost'].sum().reset_index()
+            save_data(hourly_udc, "hourly_udc.pkl")
+            del hourly_udc
+            gc.collect()
             
             # Calculate trend tables
             unique_months = sorted(udc['analysis_month'].unique())
@@ -2195,10 +2224,6 @@ def process_user_delay_costs(dates, config_data):
             for i, current_month in enumerate(unique_months[1:], 1):
                 last_month = current_month - relativedelta(months=1)
                 last_year = current_month - relativedelta(years=1)
-                
-                current_month_str = current_month.strftime("%B %Y")
-                last_month_str = last_month.strftime("%B %Y")
-                last_year_str = last_year.strftime("%B %Y")
                 
                 # Filter and aggregate data
                 trend_data = udc[
@@ -2222,26 +2247,25 @@ def process_user_delay_costs(dates, config_data):
                     )
                 
                 udc_trend_table_list[current_month] = trend_pivot
+                del trend_data, trend_pivot
+                gc.collect()
             
-            # Save results
-            save_data(hourly_udc, "hourly_udc.pkl")
             save_data(udc_trend_table_list, "udc_trend_table_list.pkl")
-
-            # Cleanup memory
-            del udc
-            del hourly_udc
-            del udc_trend_table_list
+            del udc, udc_trend_table_list
             gc.collect()
             
+            log_memory_usage("End user delay costs")
             logger.info("User delay costs processing completed successfully")
         
     except Exception as e:
         logger.error(f"Error in user delay costs processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_flash_events(dates, config_data):
-    """Process flash events [23 of 29]"""
+    """Process flash events [23 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Flash Events [23 of 29 (mark1)]")
+    log_memory_usage("Start flash events")
     
     try:
         fe = s3_read_parquet_parallel(
@@ -2253,6 +2277,8 @@ def process_flash_events(dates, config_data):
         )
         
         if not fe.empty:
+            log_memory_usage("After reading flash events data")
+            
             fe = clean_signal_ids(fe)
             fe = ensure_datetime_column(fe, 'Date')
             
@@ -2266,32 +2292,27 @@ def process_flash_events(dates, config_data):
             
             # Monthly flash events for bar charts and % change
             monthly_flash = get_monthly_flashevent(fe)
+            save_data(monthly_flash, "monthly_flash.pkl")
+            del fe
+            gc.collect()
             
             if not monthly_flash.empty:
                 # Group into corridors
                 cor_monthly_flash = get_cor_monthly_flash(monthly_flash, config_data['corridors'])
+                save_data(cor_monthly_flash, "cor_monthly_flash.pkl")
+                del cor_monthly_flash
+                gc.collect()
                 
                 # Subcorridors
                 sub_monthly_flash = safe_dropna_corridor(
                     get_cor_monthly_flash(monthly_flash, config_data['subcorridors']),
                     "sub_monthly_flash"
                 )
-            else:
-                cor_monthly_flash = pd.DataFrame()
-                sub_monthly_flash = pd.DataFrame()
+                save_data(sub_monthly_flash, "sub_monthly_flash.pkl")
+                del monthly_flash, sub_monthly_flash
+                gc.collect()
             
-            # Save results
-            save_data(monthly_flash, "monthly_flash.pkl")
-            save_data(cor_monthly_flash, "cor_monthly_flash.pkl")
-            save_data(sub_monthly_flash, "sub_monthly_flash.pkl")
-
-            # Cleanup memory
-            del fe
-            del monthly_flash
-            del cor_monthly_flash
-            del sub_monthly_flash
-            gc.collect()
-            
+            log_memory_usage("End flash events")
             logger.info("Flash events processing completed successfully")
         else:
             logger.warning("No flash events data found")
@@ -2299,10 +2320,12 @@ def process_flash_events(dates, config_data):
     except Exception as e:
         logger.error(f"Error in flash events processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_bike_ped_safety_index(dates, config_data):
-    """Process bike/ped safety index [24 of 29]"""
+    """Process bike/ped safety index [24 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Bike/Ped Safety Index [24 of 29 (mark1)]")
+    log_memory_usage("Start bike/ped safety index")
     
     try:
         date_range = pd.date_range(dates['calcs_start_date'], dates['report_end_date'], freq='MS')
@@ -2312,7 +2335,6 @@ def process_bike_ped_safety_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/bike_ped_safety_index/bpsi_sub_{d.strftime('%Y-%m-%d')}.parquet"
-                # FIX: Pass the function object, not string
                 bpsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not bpsi_data.empty:
@@ -2321,6 +2343,8 @@ def process_bike_ped_safety_index(dates, config_data):
                     bpsi_data['Month'] = d
                     bpsi_data = bpsi_data.rename(columns={'overall_pct': 'bpsi'})
                     sub_monthly_bpsi_list.append(bpsi_data)
+                    del bpsi_data
+                    gc.collect()
                     
             except Exception as e:
                 logger.warning(f"Could not read subcorridor BPSI for {d}: {e}")
@@ -2330,7 +2354,6 @@ def process_bike_ped_safety_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/bike_ped_safety_index/bpsi_cor_{d.strftime('%Y-%m-%d')}.parquet"
-                # FIX: Pass the function object, not string
                 bpsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not bpsi_data.empty:
@@ -2339,16 +2362,22 @@ def process_bike_ped_safety_index(dates, config_data):
                     bpsi_data['Month'] = d
                     bpsi_data = bpsi_data.rename(columns={'overall_pct': 'bpsi'})
                     cor_monthly_bpsi_list.append(bpsi_data)
+                    del bpsi_data
+                    gc.collect()
                     
             except Exception as e:
                 logger.warning(f"Could not read corridor BPSI for {d}: {e}")
         
         if sub_monthly_bpsi_list or cor_monthly_bpsi_list:
+            log_memory_usage("After reading BPSI data")
+            
             # Combine subcorridor data
             if sub_monthly_bpsi_list:
                 sub_monthly_bpsi = pd.concat(sub_monthly_bpsi_list, ignore_index=True)
                 sub_monthly_bpsi['Corridor'] = sub_monthly_bpsi['Corridor'].astype('category')
                 sub_monthly_bpsi['Subcorridor'] = sub_monthly_bpsi['Subcorridor'].astype('category')
+                del sub_monthly_bpsi_list
+                gc.collect()
             else:
                 sub_monthly_bpsi = pd.DataFrame()
             
@@ -2356,6 +2385,8 @@ def process_bike_ped_safety_index(dates, config_data):
             if cor_monthly_bpsi_list:
                 cor_monthly_bpsi = pd.concat(cor_monthly_bpsi_list, ignore_index=True)
                 cor_monthly_bpsi['Corridor'] = cor_monthly_bpsi['Corridor'].astype('category')
+                del cor_monthly_bpsi_list
+                gc.collect()
             else:
                 cor_monthly_bpsi = pd.DataFrame()
             
@@ -2368,8 +2399,10 @@ def process_bike_ped_safety_index(dates, config_data):
                     sub_monthly_bpsi = pd.concat([sub_monthly_bpsi, cor_as_sub], ignore_index=True)
                 else:
                     sub_monthly_bpsi = cor_as_sub
+                del cor_as_sub
+                gc.collect()
             
-            # Rename columns for consistency
+            # Process subcorridor data
             if not sub_monthly_bpsi.empty:
                 sub_monthly_bpsi = sub_monthly_bpsi.rename(columns={
                     'Corridor': 'Zone_Group',
@@ -2380,6 +2413,10 @@ def process_bike_ped_safety_index(dates, config_data):
                 sub_monthly_bpsi = sub_monthly_bpsi.sort_values(['Zone_Group', 'Corridor', 'Month'])
                 sub_monthly_bpsi['ones'] = np.nan
                 sub_monthly_bpsi['delta'] = sub_monthly_bpsi.groupby(['Zone_Group', 'Corridor'])['bpsi'].pct_change()
+                
+                save_data(sub_monthly_bpsi, "sub_monthly_bpsi.pkl")
+                del sub_monthly_bpsi
+                gc.collect()
             
             # Process corridor data with zone information
             if not cor_monthly_bpsi.empty:
@@ -2394,18 +2431,12 @@ def process_bike_ped_safety_index(dates, config_data):
                 cor_monthly_bpsi = cor_monthly_bpsi.sort_values(['Zone_Group', 'Corridor', 'Month'])
                 cor_monthly_bpsi['ones'] = np.nan
                 cor_monthly_bpsi['delta'] = cor_monthly_bpsi.groupby(['Zone_Group', 'Corridor'])['bpsi'].pct_change()
-            
-            # Save results
-            if not cor_monthly_bpsi.empty:
+                
                 save_data(cor_monthly_bpsi, "cor_monthly_bpsi.pkl")
-            if not sub_monthly_bpsi.empty:
-                save_data(sub_monthly_bpsi, "sub_monthly_bpsi.pkl")
-
-            # Cleanup memory
-            del cor_monthly_bpsi
-            del sub_monthly_bpsi
-            gc.collect()
+                del cor_monthly_bpsi
+                gc.collect()
             
+            log_memory_usage("End bike/ped safety index")
             logger.info("Bike/Ped safety index processing completed successfully")
         else:
             logger.warning("No BPSI data found for the date range")
@@ -2413,10 +2444,12 @@ def process_bike_ped_safety_index(dates, config_data):
     except Exception as e:
         logger.error(f"Error in bike/ped safety index processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_relative_speed_index(dates, config_data):
-    """Process relative speed index [25 of 29]"""
+    """Process relative speed index [25 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Relative Speed Index [25 of 29 (mark1)]")
+    log_memory_usage("Start relative speed index")
     
     try:
         date_range = pd.date_range(dates['calcs_start_date'], dates['report_end_date'], freq='MS')
@@ -2426,7 +2459,6 @@ def process_relative_speed_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/relative_speed_index/rsi_sub_{d.strftime('%Y-%m-%d')}.parquet"
-                # FIX: Pass the function object, not string
                 rsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not rsi_data.empty:
@@ -2434,6 +2466,8 @@ def process_relative_speed_index(dates, config_data):
                     rsi_data = rsi_data.loc[:, ~rsi_data.columns.str.startswith('__')]
                     rsi_data['Month'] = d
                     sub_monthly_rsi_list.append(rsi_data)
+                    del rsi_data
+                    gc.collect()
                     
             except Exception as e:
                 logger.warning(f"Could not read subcorridor RSI for {d}: {e}")
@@ -2443,7 +2477,6 @@ def process_relative_speed_index(dates, config_data):
         for d in date_range:
             try:
                 obj = f"mark/relative_speed_index/rsi_cor_{d.strftime('%Y-%m-%d')}.parquet"
-                # FIX: Pass the function object, not string
                 rsi_data = s3read_using(pd.read_parquet, bucket=conf.bucket, object=obj)
                 
                 if not rsi_data.empty:
@@ -2451,16 +2484,22 @@ def process_relative_speed_index(dates, config_data):
                     rsi_data = rsi_data.loc[:, ~rsi_data.columns.str.startswith('__')]
                     rsi_data['Month'] = d
                     cor_monthly_rsi_list.append(rsi_data)
+                    del rsi_data
+                    gc.collect()
                     
             except Exception as e:
                 logger.warning(f"Could not read corridor RSI for {d}: {e}")
         
         if sub_monthly_rsi_list or cor_monthly_rsi_list:
+            log_memory_usage("After reading RSI data")
+            
             # Combine subcorridor data
             if sub_monthly_rsi_list:
                 sub_monthly_rsi = pd.concat(sub_monthly_rsi_list, ignore_index=True)
                 sub_monthly_rsi['Corridor'] = sub_monthly_rsi['Corridor'].astype('category')
                 sub_monthly_rsi['Subcorridor'] = sub_monthly_rsi['Subcorridor'].astype('category')
+                del sub_monthly_rsi_list
+                gc.collect()
             else:
                 sub_monthly_rsi = pd.DataFrame()
             
@@ -2468,6 +2507,8 @@ def process_relative_speed_index(dates, config_data):
             if cor_monthly_rsi_list:
                 cor_monthly_rsi = pd.concat(cor_monthly_rsi_list, ignore_index=True)
                 cor_monthly_rsi['Corridor'] = cor_monthly_rsi['Corridor'].astype('category')
+                del cor_monthly_rsi_list
+                gc.collect()
             else:
                 cor_monthly_rsi = pd.DataFrame()
             
@@ -2480,8 +2521,10 @@ def process_relative_speed_index(dates, config_data):
                     sub_monthly_rsi = pd.concat([sub_monthly_rsi, cor_as_sub], ignore_index=True)
                 else:
                     sub_monthly_rsi = cor_as_sub
+                del cor_as_sub
+                gc.collect()
             
-            # Rename columns for consistency
+            # Process subcorridor data
             if not sub_monthly_rsi.empty:
                 sub_monthly_rsi = sub_monthly_rsi.rename(columns={
                     'Corridor': 'Zone_Group',
@@ -2492,6 +2535,10 @@ def process_relative_speed_index(dates, config_data):
                 sub_monthly_rsi = sub_monthly_rsi.sort_values(['Zone_Group', 'Corridor', 'Month'])
                 sub_monthly_rsi['ones'] = np.nan
                 sub_monthly_rsi['delta'] = sub_monthly_rsi.groupby(['Zone_Group', 'Corridor'])['rsi'].pct_change()
+                
+                save_data(sub_monthly_rsi, "sub_monthly_rsi.pkl")
+                del sub_monthly_rsi
+                gc.collect()
             
             # Process corridor data with zone information
             if not cor_monthly_rsi.empty:
@@ -2506,18 +2553,12 @@ def process_relative_speed_index(dates, config_data):
                 cor_monthly_rsi = cor_monthly_rsi.sort_values(['Zone_Group', 'Corridor', 'Month'])
                 cor_monthly_rsi['ones'] = np.nan
                 cor_monthly_rsi['delta'] = cor_monthly_rsi.groupby(['Zone_Group', 'Corridor'])['rsi'].pct_change()
-            
-            # Save results
-            if not cor_monthly_rsi.empty:
+                
                 save_data(cor_monthly_rsi, "cor_monthly_rsi.pkl")
-            if not sub_monthly_rsi.empty:
-                save_data(sub_monthly_rsi, "sub_monthly_rsi.pkl")
+                del cor_monthly_rsi
+                gc.collect()
             
-            # Cleanup memory
-            del cor_monthly_rsi
-            del sub_monthly_rsi
-            gc.collect()
-            
+            log_memory_usage("End relative speed index")
             logger.info("Relative speed index processing completed successfully")
         else:
             logger.warning("No RSI data found for the date range")
@@ -2525,53 +2566,48 @@ def process_relative_speed_index(dates, config_data):
     except Exception as e:
         logger.error(f"Error in relative speed index processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
 
 def process_crash_indices(dates, config_data):
-    """Process crash indices [26 of 29]"""
+    """Process crash indices [26 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Crash Indices [26 of 29 (mark1)]")
+    log_memory_usage("Start crash indices")
     
     try:
-        # Read crash data - FIX: Pass function object, not string
+        # Read crash data
         crashes = s3read_using(
-            pd.read_excel,  # Function object, not string
+            pd.read_excel,
             bucket=conf.bucket,
             object="Collisions Dataset 2017-2019.xlsm",
-            engine='openpyxl'  # Add engine for Excel files
+            engine='openpyxl'
         )
         
         if not crashes.empty:
-            # Check if required columns exist
+            log_memory_usage("After reading crash data")
+            
+            # Check if required columns exist and map alternatives
             required_cols = ['Signal_ID_Clean', 'Month', 'crashes_k', 'crashes_a', 'crashes_b',
                            'crashes_c', 'crashes_o', 'crashes_total', 'cost']
             
-            # Check which columns actually exist
-            available_cols = [col for col in required_cols if col in crashes.columns]
-            missing_cols = [col for col in required_cols if col not in crashes.columns]
+            col_mapping = {
+                'Signal_ID_Clean': ['SignalID', 'Signal_ID', 'signal_id'],
+                'crashes_total': ['total_crashes', 'Total_Crashes', 'crashes'],
+                'crashes_k': ['k_crashes', 'K_Crashes'],
+                'crashes_a': ['a_crashes', 'A_Crashes'],
+                'crashes_b': ['b_crashes', 'B_Crashes'],
+                'crashes_c': ['c_crashes', 'C_Crashes'],
+                'crashes_o': ['o_crashes', 'O_Crashes'],
+                'cost': ['Cost', 'total_cost', 'Total_Cost']
+            }
             
-            if missing_cols:
-                logger.warning(f"Missing columns in crash data: {missing_cols}")
-                logger.info(f"Available columns: {list(crashes.columns)}")
-                
-                # Try alternative column names
-                col_mapping = {
-                    'Signal_ID_Clean': ['SignalID', 'Signal_ID', 'signal_id'],
-                    'crashes_total': ['total_crashes', 'Total_Crashes', 'crashes'],
-                    'crashes_k': ['k_crashes', 'K_Crashes'],
-                    'crashes_a': ['a_crashes', 'A_Crashes'],
-                    'crashes_b': ['b_crashes', 'B_Crashes'],
-                    'crashes_c': ['c_crashes', 'C_Crashes'],
-                    'crashes_o': ['o_crashes', 'O_Crashes'],
-                    'cost': ['Cost', 'total_cost', 'Total_Cost']
-                }
-                
-                # Map alternative column names
-                for standard_col, alternatives in col_mapping.items():
-                    if standard_col not in crashes.columns:
-                        for alt_col in alternatives:
-                            if alt_col in crashes.columns:
-                                crashes = crashes.rename(columns={alt_col: standard_col})
-                                logger.info(f"Mapped {alt_col} to {standard_col}")
-                                break
+            # Map alternative column names
+            for standard_col, alternatives in col_mapping.items():
+                if standard_col not in crashes.columns:
+                    for alt_col in alternatives:
+                        if alt_col in crashes.columns:
+                            crashes = crashes.rename(columns={alt_col: standard_col})
+                            logger.info(f"Mapped {alt_col} to {standard_col}")
+                            break
             
             # Select only available columns
             final_cols = [col for col in required_cols if col in crashes.columns]
@@ -2598,12 +2634,16 @@ def process_crash_indices(dates, config_data):
                 monthly_vpd = load_data("monthly_vpd.pkl")
                 
                 if not monthly_vpd.empty:
+                    log_memory_usage("After loading monthly VPD")
+                    
                     # Complete VPD data and calculate 12-month rolling average
                     date_range_vpd = pd.date_range(monthly_vpd['Month'].min(), monthly_vpd['Month'].max(), freq='MS')
                     signal_list = monthly_vpd['SignalID'].unique()
                     
                     complete_vpd = pd.MultiIndex.from_product([signal_list, date_range_vpd], names=['SignalID', 'Month']).to_frame(index=False)
                     monthly_vpd = complete_vpd.merge(monthly_vpd, on=['SignalID', 'Month'], how='left')
+                    del complete_vpd
+                    gc.collect()
                     
                     monthly_vpd = monthly_vpd.sort_values(['SignalID', 'Month'])
                     monthly_vpd['vpd12'] = monthly_vpd.groupby('SignalID')['vpd'].transform(
@@ -2613,9 +2653,11 @@ def process_crash_indices(dates, config_data):
                     # Calculate 36-month rolling crashes
                     complete_crashes = pd.MultiIndex.from_product([signal_list, date_range_vpd], names=['SignalID', 'Month']).to_frame(index=False)
                     monthly_36mo_crashes = complete_crashes.merge(crashes, on=['SignalID', 'Month'], how='left')
+                    del complete_crashes, crashes
+                    gc.collect()
                     
                     # Fill NaN with 0
-                    crash_cols = [col for col in crashes.columns if col.startswith('crashes_') or col == 'cost']
+                    crash_cols = [col for col in monthly_36mo_crashes.columns if col.startswith('crashes_') or col == 'cost']
                     monthly_36mo_crashes[crash_cols] = monthly_36mo_crashes[crash_cols].fillna(0)
                     
                     monthly_36mo_crashes = monthly_36mo_crashes.sort_values(['SignalID', 'Month'])
@@ -2638,13 +2680,19 @@ def process_crash_indices(dates, config_data):
                         temp = monthly_36mo_crashes.copy()
                         temp['Month'] = month
                         monthly_36mo_crashes_expanded.append(temp)
+                        del temp
+                        gc.collect()
                     
                     monthly_36mo_crashes = pd.concat(monthly_36mo_crashes_expanded, ignore_index=True)
+                    del monthly_36mo_crashes_expanded
+                    gc.collect()
                     
                     # Merge crashes and VPD
                     monthly_crashes = monthly_36mo_crashes.merge(monthly_vpd, on=['SignalID', 'Month'], how='outer')
+                    del monthly_36mo_crashes, monthly_vpd
+                    gc.collect()
                     
-                    # Calculate crash indices (only if required columns exist)
+                    # Calculate crash indices
                     if 'crashes_total' in monthly_crashes.columns and 'vpd' in monthly_crashes.columns:
                         monthly_crashes['cri'] = (monthly_crashes['crashes_total'] * 1000) / (monthly_crashes['vpd'] * 3)
                     else:
@@ -2660,42 +2708,50 @@ def process_crash_indices(dates, config_data):
                     
                     # Calculate monthly indices
                     monthly_crash_rate_index = get_monthly_avg_by_day(monthly_crashes, "cri")
+                    save_data(monthly_crash_rate_index, "monthly_crash_rate_index.pkl")
+                    del monthly_crash_rate_index
+                    gc.collect()
+                    
                     monthly_kabco_index = get_monthly_avg_by_day(monthly_crashes, "kabco")
+                    save_data(monthly_kabco_index, "monthly_kabco_index.pkl")
+                    del monthly_kabco_index
+                    gc.collect()
                     
                     # Calculate corridor indices
+                    monthly_crash_rate_index = load_data("monthly_crash_rate_index.pkl")
                     cor_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
                         monthly_crash_rate_index, config_data['corridors'], "cri"
                     )
+                    save_data(cor_monthly_crash_rate_index, "cor_monthly_crash_rate_index.pkl")
+                    del monthly_crash_rate_index, cor_monthly_crash_rate_index
+                    gc.collect()
+                    
+                    monthly_kabco_index = load_data("monthly_kabco_index.pkl")
                     cor_monthly_kabco_index = get_cor_monthly_avg_by_day(
                         monthly_kabco_index, config_data['corridors'], "kabco"
                     )
+                    save_data(cor_monthly_kabco_index, "cor_monthly_kabco_index.pkl")
+                    del monthly_kabco_index, cor_monthly_kabco_index
+                    gc.collect()
                     
                     # Calculate subcorridor indices
+                    monthly_crash_rate_index = load_data("monthly_crash_rate_index.pkl")
                     sub_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
                         monthly_crash_rate_index, config_data['subcorridors'], "cri"
                     )
+                    save_data(sub_monthly_crash_rate_index, "sub_monthly_crash_rate_index.pkl")
+                    del monthly_crash_rate_index, sub_monthly_crash_rate_index
+                    gc.collect()
+                    
+                    monthly_kabco_index = load_data("monthly_kabco_index.pkl")
                     sub_monthly_kabco_index = get_cor_monthly_avg_by_day(
                         monthly_kabco_index, config_data['subcorridors'], "kabco"
                     )
-                    
-                    # Save results
-                    save_data(monthly_crash_rate_index, "monthly_crash_rate_index.pkl")
-                    save_data(monthly_kabco_index, "monthly_kabco_index.pkl")
-                    save_data(cor_monthly_crash_rate_index, "cor_monthly_crash_rate_index.pkl")
-                    save_data(cor_monthly_kabco_index, "cor_monthly_kabco_index.pkl")
-                    save_data(sub_monthly_crash_rate_index, "sub_monthly_crash_rate_index.pkl")
                     save_data(sub_monthly_kabco_index, "sub_monthly_kabco_index.pkl")
-
-                    # Cleanup memory
-                    del monthly_crashes
-                    del monthly_crash_rate_index
-                    del monthly_kabco_index
-                    del cor_monthly_crash_rate_index
-                    del cor_monthly_kabco_index
-                    del sub_monthly_crash_rate_index
-                    del sub_monthly_kabco_index
+                    del monthly_crashes, monthly_kabco_index, sub_monthly_kabco_index
                     gc.collect()
                     
+                    log_memory_usage("End crash indices")
                     logger.info("Crash indices processing completed successfully")
                 else:
                     logger.warning("No monthly VPD data available for crash index calculations")
@@ -2713,10 +2769,95 @@ def process_crash_indices(dates, config_data):
     except Exception as e:
         logger.error(f"Error in crash indices processing: {e}")
         logger.error(traceback.format_exc())
+        gc.collect()
+
+def safe_dropna_corridor(df, name):
+    """Safely drop NaN values from Corridor column"""
+    try:
+        if not df.empty and 'Corridor' in df.columns:
+            return df.dropna(subset=['Corridor'])
+        else:
+            logger.warning(f"{name}: DataFrame is empty or missing 'Corridor' column")
+            return pd.DataFrame()
+    except Exception as e:
+        logger.warning(f"Error in safe_dropna_corridor for {name}: {e}")
+        return pd.DataFrame()
+
+def ensure_datetime_column(df, col_name):
+    """Ensure datetime column exists and is properly formatted"""
+    try:
+        if col_name in df.columns:
+            df[col_name] = pd.to_datetime(df[col_name])
+        return df
+    except Exception as e:
+        logger.warning(f"Error converting {col_name} to datetime: {e}")
+        return df
+
+def ensure_timeperiod_column(df):
+    """Ensure Timeperiod column exists"""
+    try:
+        if 'Timeperiod' not in df.columns and 'Hour' in df.columns:
+            df['Timeperiod'] = df['Hour']
+        elif 'Timeperiod' not in df.columns:
+            df['Timeperiod'] = 12  # Default hour
+        return df
+    except Exception as e:
+        logger.warning(f"Error ensuring Timeperiod column: {e}")
+        return df
+
+def ensure_throughput_column(df):
+    """Ensure throughput column exists"""
+    try:
+        throughput_candidates = ['throughput', 'Throughput', 'thruput', 'Thruput']
+        for candidate in throughput_candidates:
+            if candidate in df.columns:
+                if candidate != 'throughput':
+                    df = df.rename(columns={candidate: 'throughput'})
+                break
+        else:
+            # If no throughput column found, create a default one
+            logger.warning("No throughput column found, creating default")
+            df['throughput'] = 0
+        return df
+    except Exception as e:
+        logger.warning(f"Error ensuring throughput column: {e}")
+        return df
+
+def ensure_metric_column(df, target_col, candidates):
+    """Ensure a metric column exists by checking candidates"""
+    try:
+        for candidate in candidates:
+            if candidate in df.columns:
+                if candidate != target_col:
+                    df = df.rename(columns={candidate: target_col})
+                return df
+        
+        # If no candidate found, create default
+        logger.warning(f"No {target_col} column found from candidates {candidates}, creating default")
+        df[target_col] = 0
+        return df
+    except Exception as e:
+        logger.warning(f"Error ensuring {target_col} column: {e}")
+        return df
+
+def convert_to_utc(df):
+    """Convert timezone-aware datetime columns to UTC"""
+    try:
+        for col in df.columns:
+            if df[col].dtype == 'datetime64[ns, UTC]' or pd.api.types.is_datetime64tz_dtype(df[col]):
+                df[col] = pd.to_datetime(df[col]).dt.tz_convert('UTC').dt.tz_localize(None)
+        return df
+    except Exception as e:
+        logger.warning(f"Error converting to UTC: {e}")
+        return df
 
 def main():
-    """Main function to run the monthly report package"""
+    """Main function to run the monthly report package - Memory optimized"""
     logger.info("Starting Monthly Report Package Processing")
+    
+    # Start memory tracing
+    tracemalloc.start()
+    log_memory_usage("Start of main")
     
     try:
         # Initialize configuration and dates
@@ -2724,8 +2865,9 @@ def main():
         dates = calculate_dates(config_data['report_end_date'])
         
         logger.info(f"Processing data from {dates['calcs_start_date']} to {dates['report_end_date']}")
+        log_memory_usage("After initialization")
         
-        # Process each section sequentially
+        # Process each section sequentially with memory optimization
         processing_functions = [
             (process_detector_uptime, "Vehicle Detector Uptime"),
             (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
@@ -2761,16 +2903,29 @@ def main():
         for i, (func, description) in enumerate(processing_functions, 1):
             try:
                 logger.info(f"Starting {description} [{i} of {total_functions}]")
+                log_memory_usage(f"Before {description}")
+                
                 func(dates, config_data)
+                
+                # Force garbage collection after each function
+                gc.collect()
+                log_memory_usage(f"After {description}")
                 logger.info(f"Completed {description} [{i} of {total_functions}]")
                 
             except Exception as e:
                 logger.error(f"Failed to process {description}: {e}")
                 logger.error(traceback.format_exc())
-                # Continue with next function rather than stopping
+                # Force cleanup and continue
+                gc.collect()
                 continue
         
+        log_memory_usage("End of main")
         logger.info("Monthly Report Package Processing completed successfully")
+        
+        # Final memory report
+        if tracemalloc.is_tracing():
+            current, peak = tracemalloc.get_traced_memory()
+            logger.info(f"Final memory - Current: {current / 1024 / 1024:.1f} MB, Peak: {peak / 1024 / 1024:.1f} MB")
         
     except Exception as e:
         logger.error(f"Critical error in main processing: {e}")
@@ -2778,18 +2933,214 @@ def main():
         raise
     
     finally:
-        # Clean up any open connections
+        # Clean up any open connections and stop memory tracing
         cleanup_connections()
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
 
 def cleanup_connections():
-    """Clean up any open database connections"""
+    """Clean up any open database connections and force garbage collection"""
     try:
         # Close any pandas/SQL connections
-        import gc
         gc.collect()
         logger.info("Cleaned up connections and memory")
     except Exception as e:
         logger.warning(f"Error during cleanup: {e}")
+
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    try:
+        import psutil
+        process = psutil.Process()
+        return process.memory_info().rss / 1024 / 1024
+    except ImportError:
+        return 0
+
+def optimize_dataframe_memory(df):
+    """Optimize DataFrame memory usage by downcasting numeric types"""
+    try:
+        # Downcast integers
+        for col in df.select_dtypes(include=['int64']).columns:
+            if df[col].min() >= 0:
+                if df[col].max() < 255:
+                    df[col] = df[col].astype('uint8')
+                elif df[col].max() < 65535:
+                    df[col] = df[col].astype('uint16')
+                elif df[col].max() < 4294967295:
+                    df[col] = df[col].astype('uint32')
+            else:
+                if df[col].min() > -128 and df[col].max() < 127:
+                    df[col] = df[col].astype('int8')
+                elif df[col].min() > -32768 and df[col].max() < 32767:
+                    df[col] = df[col].astype('int16')
+                elif df[col].min() > -2147483648 and df[col].max() < 2147483647:
+                    df[col] = df[col].astype('int32')
+        
+        # Downcast floats
+        for col in df.select_dtypes(include=['float64']).columns:
+            df[col] = pd.to_numeric(df[col], downcast='float')
+        
+        # Convert object columns to category if appropriate
+        for col in df.select_dtypes(include=['object']).columns:
+            if df[col].nunique() / len(df) < 0.5:  # If less than 50% unique values
+                df[col] = df[col].astype('category')
+        
+        return df
+    except Exception as e:
+        logger.warning(f"Error optimizing DataFrame memory: {e}")
+        return df
+
+def process_in_chunks(data_func, chunk_size=10000, *args, **kwargs):
+    """Process data in chunks to manage memory usage"""
+    try:
+        # Get total data size first
+        total_data = data_func(*args, **kwargs)
+        
+        if len(total_data) <= chunk_size:
+            return total_data
+        
+        # Process in chunks
+        chunks = []
+        for i in range(0, len(total_data), chunk_size):
+            chunk = total_data.iloc[i:i+chunk_size].copy()
+            chunk = optimize_dataframe_memory(chunk)
+            chunks.append(chunk)
+            
+            # Clean up
+            del chunk
+            gc.collect()
+        
+        # Combine chunks
+        result = pd.concat(chunks, ignore_index=True)
+        del chunks, total_data
+        gc.collect()
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in chunked processing: {e}")
+        return pd.DataFrame()
+
+def validate_config_data(config_data):
+    """Validate that required configuration data is present"""
+    required_keys = ['corridors', 'subcorridors', 'all_corridors', 'signals_list']
+    
+    for key in required_keys:
+        if key not in config_data:
+            logger.error(f"Missing required configuration key: {key}")
+            return False
+        
+        if key != 'signals_list' and config_data[key].empty:
+            logger.error(f"Configuration data for {key} is empty")
+            return False
+    
+    return True
+
+def create_backup_config():
+    """Create a minimal backup configuration if main config fails"""
+    logger.warning("Creating backup configuration with minimal data")
+    
+    # Create minimal test data
+    corridors = pd.DataFrame({
+        'SignalID': range(1000, 1010),
+        'Zone_Group': ['TestZone'] * 10,
+        'Zone': ['TestSubZone'] * 10,
+        'Corridor': ['Test Corridor'] * 10,
+        'Name': [f'Test_Signal_{i}' for i in range(1000, 1010)]
+    })
+    
+    subcorridors = corridors.copy()
+    subcorridors['Subcorridor'] = subcorridors['Corridor']
+    
+    all_corridors = corridors.copy()
+    
+    cam_config = pd.DataFrame({
+        'CameraID': range(2000, 2005),
+        'Zone_Group': ['TestZone'] * 5,
+        'Zone': ['TestSubZone'] * 5,
+        'Corridor': ['Test Corridor'] * 5,
+        'Location': [f'Test_Camera_{i}' for i in range(2000, 2005)],
+        'As_of_Date': [date.today() - timedelta(days=365)] * 5
+    })
+    
+    signals_list = list(corridors['SignalID'])
+    
+    return {
+        'corridors': corridors,
+        'subcorridors': subcorridors,
+        'all_corridors': all_corridors,
+        'cam_config': cam_config,
+        'signals_list': signals_list
+    }
+
+def safe_process_section(func, description, dates, config_data, max_retries=2):
+    """Safely process a section with retries and error handling"""
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Starting {description} (attempt {attempt + 1})")
+            log_memory_usage(f"Before {description}")
+            
+            func(dates, config_data)
+            
+            # Force garbage collection after successful completion
+            gc.collect()
+            log_memory_usage(f"After {description}")
+            logger.info(f"Completed {description}")
+            return True
+            
+        except MemoryError as e:
+            logger.error(f"Memory error in {description} (attempt {attempt + 1}): {e}")
+            gc.collect()  # Force cleanup
+            
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying {description} after memory cleanup...")
+                continue
+            else:
+                logger.error(f"Failed {description} after {max_retries} attempts due to memory issues")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error in {description} (attempt {attempt + 1}): {e}")
+            logger.error(traceback.format_exc())
+            gc.collect()  # Cleanup on any error
+            
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying {description}...")
+                continue
+            else:
+                logger.error(f"Failed {description} after {max_retries} attempts")
+                return False
+    
+    return False
+
+def check_system_resources():
+    """Check available system resources before processing"""
+    try:
+        import psutil
+        
+        # Check available memory
+        memory = psutil.virtual_memory()
+        available_gb = memory.available / (1024**3)
+        
+        logger.info(f"Available memory: {available_gb:.1f} GB ({memory.percent}% used)")
+        
+        if available_gb < 1.0:  # Less than 1GB available
+            logger.warning("Low memory available - processing may be slow or fail")
+        
+        # Check disk space
+        disk = psutil.disk_usage('.')
+        available_disk_gb = disk.free / (1024**3)
+        
+        logger.info(f"Available disk space: {available_disk_gb:.1f} GB")
+        
+        if available_disk_gb < 5.0:  # Less than 5GB available
+            logger.warning("Low disk space available - may affect data saving")
+        
+        return available_gb > 0.5  # Return False if less than 500MB available
+        
+    except ImportError:
+        logger.warning("psutil not available - cannot check system resources")
+        return True
 
 def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
     """
@@ -2827,10 +3178,21 @@ def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
 
 if __name__ == "__main__":
     setup_logging("INFO", "monthly_report_package_1.log")
-    main()
-
-
-
+    
+    # Check system resources before starting
+    if not check_system_resources():
+        logger.error("Insufficient system resources to run processing")
+        sys.exit(1)
+    
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
 
 
 
