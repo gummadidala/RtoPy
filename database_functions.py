@@ -40,6 +40,52 @@ def load_credentials() -> Dict[str, Any]:
 # Load credentials
 cred = load_credentials()
 
+def execute_athena_query(query: str, conf_athena: Dict[str, Any], 
+                        wait_for_completion: bool = True) -> Optional[str]:
+    """
+    Execute Athena query and optionally wait for completion
+    
+    Args:
+        query: SQL query to execute
+        conf_athena: Athena configuration
+        wait_for_completion: Whether to wait for query completion
+    
+    Returns:
+        Query execution ID or None if failed
+    """
+    try:
+        client = get_athena_connection(conf_athena)
+        
+        response = client.start_query_execution(
+            QueryString=query,
+            ResultConfiguration={'OutputLocation': conf_athena['staging_dir']},
+            WorkGroup='primary'
+        )
+        
+        query_execution_id = response['QueryExecutionId']
+        
+        if wait_for_completion:
+            while True:
+                response = client.get_query_execution(QueryExecutionId=query_execution_id)
+                status = response['QueryExecution']['Status']['State']
+                
+                if status in ['SUCCEEDED']:
+                    logger.info(f"Athena query completed successfully: {query_execution_id}")
+                    break
+                elif status in ['FAILED', 'CANCELLED']:
+                    error_msg = response['QueryExecution']['Status'].get('StateChangeReason', 'Unknown error')
+                    logger.error(f"Athena query failed: {error_msg}")
+                    return None
+                else:
+                    import time
+                    time.sleep(1)
+        
+        return query_execution_id
+        
+    except Exception as e:
+        logger.error(f"Error executing Athena query: {e}")
+        return None
+
 def my_db_append_table(conn, table_name: str, df: pd.DataFrame, chunksize: int = 10000):
     """
     Custom function to perform multiple inserts at once

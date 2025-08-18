@@ -30,6 +30,9 @@ from monthly_report_package_1_helper import *
 from s3_parquet_io import s3_read_parquet_parallel, s3read_using
 from teams import get_teams_tasks_from_s3
 from configs import get_det_config_factory
+from database_functions import execute_athena_query
+from configs import get_ped_config_factory, get_corridors
+from aggregations import get_hourly
 
 # Try to import additional modules
 try:
@@ -463,7 +466,221 @@ def process_detector_uptime(dates, config_data):
         logger.error(traceback.format_exc())
         gc.collect()
 
-def process_ped_pushbutton_uptime(dates, config_data):
+import pandas as pd
+import numpy as np
+import gc
+import logging
+from typing import List, Dict, Union
+from datetime import date, datetime
+
+# Set up logger
+logger = logging.getLogger(__name__)
+
+def monitor_system_resources():
+    """
+    Monitor system resources (memory, CPU) and log warnings if high usage
+    """
+    try:
+        import psutil
+        
+        # Get memory usage
+        memory = psutil.virtual_memory()
+        memory_percent = memory.percent
+        
+        # Get CPU usage
+        cpu_percent = psutil.cpu_percent(interval=1)
+        
+        # Log warnings if usage is high
+        if memory_percent > 80:
+            logger.warning(f"High memory usage: {memory_percent:.1f}%")
+        
+        if cpu_percent > 80:
+            logger.warning(f"High CPU usage: {cpu_percent:.1f}%")
+        
+        logger.info(f"System resources - Memory: {memory_percent:.1f}%, CPU: {cpu_percent:.1f}%")
+        
+    except ImportError:
+        logger.debug("psutil not available for resource monitoring")
+    except Exception as e:
+        logger.debug(f"Error monitoring resources: {e}")
+
+def get_ped_uptime_data(start_date, end_date, signals_list, conf):
+    """Get pedestrian uptime data for all signals"""
+    try:
+        # Build query for all signals
+        signal_ids = "','".join(map(str, signals_list))
+        
+        query = f"""
+        SELECT 
+            SignalID,
+            Timeperiod as Hour,
+            Detector,
+            uptime
+        FROM {conf['athena']['ped_table']}
+        WHERE date >= '{start_date}' 
+            AND date <= '{end_date}'
+            AND SignalID IN ('{signal_ids}')
+            AND uptime IS NOT NULL
+        ORDER BY SignalID, Hour, Detector
+        """
+        
+        # Execute query and get data
+        df = execute_athena_query(query, conf['athena'])
+        
+        if not df.empty:
+            # Convert data types
+            df['SignalID'] = df['SignalID'].astype('category')
+            df['Detector'] = df['Detector'].astype('category') 
+            df['Hour'] = pd.to_datetime(df['Hour'])
+            df['uptime'] = pd.to_numeric(df['uptime'], errors='coerce')
+            
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error getting pedestrian uptime data: {e}")
+        return pd.DataFrame()
+
+def process_ped_pushbutton_uptime(start_date, end_date, signals_list, conf, chunk_size=5000):
+    """
+    Process pedestrian pushbutton uptime data in chunks to manage memory
+    Step 2: Process pedestrian pushbutton uptime [2 of 29] - Memory optimized version
+    
+    Args:
+        start_date: Start date for processing
+        end_date: End date for processing  
+        signals_list: List of signal IDs to process
+        conf: Configuration dictionary
+        chunk_size: Number of rows to process per chunk
+    
+    Returns:
+        Combined uptime data
+    """
+    
+    try:
+        logger.info("=" * 50)
+        logger.info("Step 2: Process pedestrian pushbutton uptime [2 of 29]")
+        logger.info("=" * 50)
+        
+        logger.info(f"Processing pedestrian uptime for {len(signals_list)} signals using chunked processing")
+        
+        # Monitor initial system resources
+        monitor_system_resources()
+        
+        # Use the existing process_in_chunks function to get the data
+        result = process_in_chunks(
+            get_ped_uptime_data, 
+            chunk_size=chunk_size,
+            start_date=start_date,
+            end_date=end_date, 
+            signals_list=signals_list,
+            conf=conf
+        )
+        
+        if result.empty:
+            logger.warning("No pedestrian uptime data found")
+            return pd.DataFrame()
+        
+        logger.info(f"Retrieved {len(result)} pedestrian uptime records")
+        
+        # Monitor resources after data retrieval
+        monitor_system_resources()
+        
+        # Get pedestrian detector configuration
+        try:
+            ped_config = get_ped_config_factory(conf['bucket'])(start_date)
+            
+            if not ped_config.empty:
+                # Join with configuration data
+                logger.info("Joining with pedestrian detector configuration...")
+                result = result.merge(
+                    ped_config[['SignalID', 'Detector', 'CallPhase']], 
+                    on=['SignalID', 'Detector'],
+                    how='left'
+                )
+                logger.info(f"After config join: {len(result)} records")
+        except Exception as e:
+            logger.warning(f"Could not load pedestrian config: {e}")
+        
+        # Get corridor information
+        try:
+            corridors = get_corridors(conf['corridors_filename'])
+            
+            if not corridors.empty:
+                # Join with corridor data using existing get_hourly function
+                logger.info("Joining with corridor information...")
+                result = get_hourly(result, 'uptime', corridors)
+                logger.info(f"After corridor join: {len(result)} records")
+        except Exception as e:
+            logger.warning(f"Could not load corridor information: {e}")
+        
+        # Final memory optimization
+        result = optimize_dataframe_memory(result)
+        
+        # Final resource monitoring
+        monitor_system_resources()
+        
+        logger.info(f"Step 2 completed: {len(result)} pedestrian uptime records processed")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in process_ped_pushbutton_uptime: {e}")
+        return pd.DataFrame()
+
+def optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Optimize DataFrame memory usage by converting to appropriate data types
+    
+    Args:
+        df: DataFrame to optimize
+        
+    Returns:
+        Memory-optimized DataFrame
+    """
+    
+    if df.empty:
+        return df
+        
+    try:
+        df_optimized = df.copy()
+        
+        for col in df_optimized.columns:
+            col_type = df_optimized[col].dtype
+            
+            if col_type != 'object':
+                # Numeric columns
+                if str(col_type).startswith('int'):
+                    # Integer columns
+                    c_min = df_optimized[col].min()
+                    c_max = df_optimized[col].max()
+                    
+                    if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                        df_optimized[col] = df_optimized[col].astype(np.int8)
+                    elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                        df_optimized[col] = df_optimized[col].astype(np.int16)
+                    elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                        df_optimized[col] = df_optimized[col].astype(np.int32)
+                
+                elif str(col_type).startswith('float'):
+                    # Float columns - convert to float32 if values fit
+                    c_min = df_optimized[col].min()
+                    c_max = df_optimized[col].max()
+                    
+                    if (pd.isna(c_min) or c_min > np.finfo(np.float32).min) and \
+                       (pd.isna(c_max) or c_max < np.finfo(np.float32).max):
+                        df_optimized[col] = df_optimized[col].astype(np.float32)
+            
+            else:
+                # Object/string columns - convert to category if beneficial
+                if df_optimized[col].nunique() / len(df_optimized) < 0.5:
+                    df_optimized[col] = df_optimized[col].astype('category')
+        
+        return df_optimized
+        
+    except Exception as e:
+        logger.error(f"Error optimizing DataFrame memory: {e}")
+        return df
+
+def process_ped_pushbutton_uptime_notinscope(dates, config_data):
     """Process pedestrian pushbutton uptime [2 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Ped Pushbutton Uptime [2 of 29 (mark1)]")
     log_memory_usage("Start ped pushbutton uptime")
