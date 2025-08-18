@@ -519,24 +519,35 @@ def process_ped_pushbutton_uptime(dates, config_data):
             
             return papd_chunk, paph_chunk, pau_chunk
         
-        # Process in chunks
+        # Manual chunking approach instead of process_in_chunks function
+        signals_list = config_data['signals_list']
+        chunk_size = 50  # Adjust based on memory constraints
+        
         all_papd = []
         all_paph = []
         all_pau = []
         
-        chunk_results = process_in_chunks(
-            config_data['signals_list'], 
-            process_ped_chunk, 
-            chunk_size=50  # Adjust chunk size based on your memory constraints
-        )
-        
-        for papd_chunk, paph_chunk, pau_chunk in chunk_results:
-            if papd_chunk is not None:
-                all_papd.append(papd_chunk)
-            if paph_chunk is not None:
-                all_paph.append(paph_chunk)
-            if pau_chunk is not None:
-                all_pau.append(pau_chunk)
+        # Split signals into chunks manually
+        for i in range(0, len(signals_list), chunk_size):
+            chunk = signals_list[i:i + chunk_size]
+            logger.info(f"Processing signals chunk {i//chunk_size + 1}/{(len(signals_list) + chunk_size - 1)//chunk_size}")
+            
+            try:
+                papd_chunk, paph_chunk, pau_chunk = process_ped_chunk(chunk)
+                
+                if papd_chunk is not None:
+                    all_papd.append(papd_chunk)
+                if paph_chunk is not None:
+                    all_paph.append(paph_chunk)
+                if pau_chunk is not None:
+                    all_pau.append(pau_chunk)
+                    
+            except Exception as e:
+                logger.error(f"Error processing chunk {i//chunk_size + 1}: {e}")
+                continue
+            
+            # Force garbage collection after each chunk
+            gc.collect()
         
         if all_pau:
             log_memory_usage("After processing ped data chunks")
@@ -546,7 +557,7 @@ def process_ped_pushbutton_uptime(dates, config_data):
             paph = pd.concat(all_paph, ignore_index=True) if all_paph else pd.DataFrame()
             pau = pd.concat(all_pau, ignore_index=True) if all_pau else pd.DataFrame()
             
-            del all_papd, all_paph, all_pau
+            del all_papd, all_paph, all_paph
             gc.collect()
             
             if not pau.empty:
@@ -629,7 +640,9 @@ def process_ped_pushbutton_uptime(dates, config_data):
                 monthly_pa_uptime = load_data("monthly_pa_uptime.pkl")
                 sub_monthly_pa_uptime = get_cor_monthly_avg_by_day(
                     monthly_pa_uptime, config_data['subcorridors'], "uptime"
-                ).dropna(subset=['Corridor'])
+                )
+                if not sub_monthly_pa_uptime.empty:
+                    sub_monthly_pa_uptime = sub_monthly_pa_uptime.dropna(subset=['Corridor'])
                 save_data(sub_monthly_pa_uptime, "sub_monthly_pa_uptime.pkl")
                 del monthly_pa_uptime, sub_monthly_pa_uptime, pau
                 gc.collect()
