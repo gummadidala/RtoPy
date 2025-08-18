@@ -467,7 +467,7 @@ def process_detector_uptime(dates, config_data):
         gc.collect()
 
 def process_ped_pushbutton_uptime(dates, config_data):
-    """Process pedestrian pushbutton uptime [2 of 29] - Memory optimized with chunking"""
+    """Process pedestrian pushbutton uptime [2 of 29] - Memory optimized with multi-level chunking"""
     logger.info(f"{datetime.now()} Ped Pushbutton Uptime [2 of 29 (mark1)]")
     log_memory_usage("Start ped pushbutton uptime")
     
@@ -477,88 +477,177 @@ def process_ped_pushbutton_uptime(dates, config_data):
             dates['report_end_date'] - relativedelta(months=6)
         )
         
-        # Process signals in chunks to avoid memory issues
-        def process_ped_chunk(signals_chunk):
-            counts_ped_hourly = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="counts_ped_1hr",
-                start_date=pau_start_date,
-                end_date=dates['report_end_date'],
-                signals_list=signals_chunk,
-                parallel=False
-            )
+        # Split date range into smaller chunks (monthly chunks)
+        def get_date_chunks(start_date, end_date, chunk_months=1):
+            date_chunks = []
+            current_date = start_date
             
-            if counts_ped_hourly.empty:
-                return None, None, None
+            while current_date < end_date:
+                chunk_end = min(
+                    current_date + relativedelta(months=chunk_months) - timedelta(days=1),
+                    end_date
+                )
+                date_chunks.append((current_date, chunk_end))
+                current_date = chunk_end + timedelta(days=1)
             
-            counts_ped_hourly = counts_ped_hourly.dropna(subset=['CallPhase'])
-            counts_ped_hourly = clean_signal_ids(counts_ped_hourly)
-            counts_ped_hourly['Detector'] = counts_ped_hourly['Detector'].astype('category')
-            counts_ped_hourly['CallPhase'] = counts_ped_hourly['CallPhase'].astype('category')
-            counts_ped_hourly = calculate_time_periods(counts_ped_hourly)
-            counts_ped_hourly['vol'] = pd.to_numeric(counts_ped_hourly['vol'], errors='coerce')
-            
-            # Calculate daily pedestrian activations
-            counts_ped_daily = counts_ped_hourly.groupby([
-                'SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase'
-            ])['vol'].sum().reset_index()
-            counts_ped_daily.rename(columns={'vol': 'papd'}, inplace=True)
-            
-            papd_chunk = counts_ped_daily.copy()
-            paph_chunk = counts_ped_hourly.rename(columns={'Timeperiod': 'Hour', 'vol': 'paph'})
-            
-            # Calculate pedestrian uptime using gamma distribution
-            date_range = pd.date_range(pau_start_date, dates['report_end_date'], freq='D')
-            pau_chunk = get_pau_gamma(
-                date_range, papd_chunk, paph_chunk, config_data['corridors'], 
-                dates['wk_calcs_start_date'], pau_start_date
-            )
-            
-            del counts_ped_hourly, counts_ped_daily
-            gc.collect()
-            
-            return papd_chunk, paph_chunk, pau_chunk
+            return date_chunks
         
-        # Manual chunking approach instead of process_in_chunks function
+        # Process signals and dates in chunks to avoid memory issues
+        def process_ped_chunk(signals_chunk, date_start, date_end):
+            try:
+                counts_ped_hourly = s3_read_parquet_parallel(
+                    bucket=conf.bucket,
+                    table_name="counts_ped_1hr",
+                    start_date=date_start,
+                    end_date=date_end,
+                    signals_list=signals_chunk,
+                    parallel=False
+                )
+                
+                if counts_ped_hourly.empty:
+                    return None, None, None
+                
+                log_memory_usage(f"After reading data for {len(signals_chunk)} signals")
+                
+                counts_ped_hourly = counts_ped_hourly.dropna(subset=['CallPhase'])
+                counts_ped_hourly = clean_signal_ids(counts_ped_hourly)
+                counts_ped_hourly['Detector'] = counts_ped_hourly['Detector'].astype('category')
+                counts_ped_hourly['CallPhase'] = counts_ped_hourly['CallPhase'].astype('category')
+                counts_ped_hourly = calculate_time_periods(counts_ped_hourly)
+                counts_ped_hourly['vol'] = pd.to_numeric(counts_ped_hourly['vol'], errors='coerce')
+                
+                log_memory_usage("After preprocessing hourly data")
+                
+                # Calculate daily pedestrian activations
+                counts_ped_daily = counts_ped_hourly.groupby([
+                    'SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase'
+                ])['vol'].sum().reset_index()
+                counts_ped_daily.rename(columns={'vol': 'papd'}, inplace=True)
+                
+                papd_chunk = counts_ped_daily.copy()
+                paph_chunk = counts_ped_hourly.rename(columns={'Timeperiod': 'Hour', 'vol': 'paph'})
+                
+                # Clear intermediate data immediately
+                del counts_ped_hourly, counts_ped_daily
+                gc.collect()
+                
+                log_memory_usage("After calculating daily data")
+                
+                # Calculate pedestrian uptime using gamma distribution
+                date_range = pd.date_range(date_start, date_end, freq='D')
+                pau_chunk = get_pau_gamma(
+                    date_range, papd_chunk, paph_chunk, config_data['corridors'], 
+                    dates['wk_calcs_start_date'], date_start
+                )
+                
+                log_memory_usage("After gamma calculation")
+                
+                return papd_chunk, paph_chunk, pau_chunk
+                
+            except Exception as e:
+                logger.error(f"Error in process_ped_chunk: {e}")
+                gc.collect()
+                return None, None, None
+        
+        # Get date chunks (process 1 month at a time)
+        date_chunks = get_date_chunks(pau_start_date, dates['report_end_date'], chunk_months=1)
+        
+        # Very small signal chunks to reduce memory usage
         signals_list = config_data['signals_list']
-        chunk_size = 50  # Adjust based on memory constraints
+        signal_chunk_size = 10  # Start with very small chunks
         
         all_papd = []
         all_paph = []
         all_pau = []
         
-        # Split signals into chunks manually
-        for i in range(0, len(signals_list), chunk_size):
-            chunk = signals_list[i:i + chunk_size]
-            logger.info(f"Processing signals chunk {i//chunk_size + 1}/{(len(signals_list) + chunk_size - 1)//chunk_size}")
+        total_chunks = len(date_chunks) * ((len(signals_list) + signal_chunk_size - 1) // signal_chunk_size)
+        current_chunk = 0
+        
+        # Process each date chunk
+        for date_idx, (date_start, date_end) in enumerate(date_chunks):
+            logger.info(f"Processing date chunk {date_idx + 1}/{len(date_chunks)}: {date_start} to {date_end}")
             
-            try:
-                papd_chunk, paph_chunk, pau_chunk = process_ped_chunk(chunk)
+            # Process signals in small chunks for each date range
+            for i in range(0, len(signals_list), signal_chunk_size):
+                current_chunk += 1
+                signal_chunk = signals_list[i:i + signal_chunk_size]
                 
-                if papd_chunk is not None:
-                    all_papd.append(papd_chunk)
-                if paph_chunk is not None:
-                    all_paph.append(paph_chunk)
-                if pau_chunk is not None:
-                    all_pau.append(pau_chunk)
+                logger.info(f"Processing chunk {current_chunk}/{total_chunks}: "
+                          f"{len(signal_chunk)} signals from {date_start} to {date_end}")
+                
+                try:
+                    papd_chunk, paph_chunk, pau_chunk = process_ped_chunk(
+                        signal_chunk, date_start, date_end
+                    )
                     
-            except Exception as e:
-                logger.error(f"Error processing chunk {i//chunk_size + 1}: {e}")
-                continue
-            
-            # Force garbage collection after each chunk
-            gc.collect()
+                    if papd_chunk is not None and not papd_chunk.empty:
+                        all_papd.append(papd_chunk)
+                    if paph_chunk is not None and not paph_chunk.empty:
+                        all_paph.append(paph_chunk)
+                    if pau_chunk is not None and not pau_chunk.empty:
+                        all_pau.append(pau_chunk)
+                        
+                except Exception as e:
+                    logger.error(f"Error processing chunk {current_chunk}: {e}")
+                    continue
+                
+                # Force garbage collection after each chunk
+                gc.collect()
+                log_memory_usage(f"After chunk {current_chunk}")
+                
+                # Optional: Save intermediate results periodically
+                if current_chunk % 20 == 0 and all_pau:
+                    logger.info(f"Saving intermediate results after {current_chunk} chunks")
+                    temp_pau = pd.concat(all_pau, ignore_index=True)
+                    save_data(temp_pau, f"temp_pau_checkpoint_{current_chunk}.pkl")
+                    del temp_pau
+                    gc.collect()
         
         if all_pau:
-            log_memory_usage("After processing ped data chunks")
+            log_memory_usage("Before combining all chunks")
             
-            # Combine all chunks
-            papd = pd.concat(all_papd, ignore_index=True) if all_papd else pd.DataFrame()
-            paph = pd.concat(all_paph, ignore_index=True) if all_paph else pd.DataFrame()
-            pau = pd.concat(all_pau, ignore_index=True) if all_pau else pd.DataFrame()
+            logger.info(f"Combining {len(all_pau)} pau chunks")
+            # Combine chunks in batches to avoid memory spikes
+            combined_pau_parts = []
+            batch_size = 10
             
-            del all_papd, all_paph, all_paph
+            for i in range(0, len(all_pau), batch_size):
+                batch = all_pau[i:i + batch_size]
+                combined_batch = pd.concat(batch, ignore_index=True)
+                combined_pau_parts.append(combined_batch)
+                gc.collect()
+            
+            pau = pd.concat(combined_pau_parts, ignore_index=True)
+            del combined_pau_parts, all_pau
             gc.collect()
+            
+            logger.info(f"Combining {len(all_papd)} papd chunks")
+            # Same for papd
+            combined_papd_parts = []
+            for i in range(0, len(all_papd), batch_size):
+                batch = all_papd[i:i + batch_size]
+                combined_batch = pd.concat(batch, ignore_index=True)
+                combined_papd_parts.append(combined_batch)
+                gc.collect()
+            
+            papd = pd.concat(combined_papd_parts, ignore_index=True)
+            del combined_papd_parts, all_papd
+            gc.collect()
+            
+            logger.info(f"Combining {len(all_paph)} paph chunks")
+            # Same for paph
+            combined_paph_parts = []
+            for i in range(0, len(all_paph), batch_size):
+                batch = all_paph[i:i + batch_size]
+                combined_batch = pd.concat(batch, ignore_index=True)
+                combined_paph_parts.append(combined_batch)
+                gc.collect()
+            
+            paph = pd.concat(combined_paph_parts, ignore_index=True)
+            del combined_paph_parts, all_paph
+            gc.collect()
+            
+            log_memory_usage("After combining all data")
             
             if not pau.empty:
                 # Remove and replace papd for bad days
