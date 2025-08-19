@@ -11,6 +11,189 @@ AM_PEAK_HOURS = [6, 7, 8, 9]
 PM_PEAK_HOURS = [16, 17, 18, 19]
 TUE, WED, THU = 2, 3, 4  # weekday numbers
 
+def get_period_sum(df: pd.DataFrame, value_col: str, period_col: str) -> pd.DataFrame:
+    """
+    Get period sum aggregation
+    
+    Args:
+        df: Input DataFrame
+        value_col: Column to sum
+        period_col: Period column for grouping
+    
+    Returns:
+        Aggregated DataFrame
+    """
+    try:
+        if df.empty:
+            return pd.DataFrame()
+        
+        # Group by SignalID and period, sum the values
+        result = df.groupby(['SignalID', period_col])[value_col].sum().reset_index()
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in get_period_sum: {e}")
+        return pd.DataFrame()
+
+def get_period_avg(df: pd.DataFrame, value_col: str, period_col: str, 
+                  weight_col: Optional[str] = None) -> pd.DataFrame:
+    """
+    Get period average aggregation
+    
+    Args:
+        df: Input DataFrame
+        value_col: Column to average
+        period_col: Period column for grouping
+        weight_col: Weight column for weighted average (optional)
+    
+    Returns:
+        Aggregated DataFrame
+    """
+    try:
+        if df.empty:
+            return pd.DataFrame()
+        
+        if weight_col and weight_col in df.columns:
+            # Weighted average
+            def weighted_avg(group):
+                weights = group[weight_col]
+                values = group[value_col]
+                valid_mask = ~(pd.isna(values) | pd.isna(weights)) & (weights > 0)
+                
+                if valid_mask.sum() == 0:
+                    return np.nan
+                
+                return np.average(values[valid_mask], weights=weights[valid_mask])
+            
+            result = df.groupby(['SignalID', period_col]).apply(
+                lambda x: pd.Series({value_col: weighted_avg(x)})
+            ).reset_index()
+        else:
+            # Simple average
+            result = df.groupby(['SignalID', period_col])[value_col].mean().reset_index()
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in get_period_avg: {e}")
+        return pd.DataFrame()
+
+def get_cor_monthly_avg_by_period(df: pd.DataFrame, corridors: pd.DataFrame, 
+                                 value_col: str, period_col: str) -> pd.DataFrame:
+    """
+    Get corridor monthly average by period
+    
+    Args:
+        df: Input DataFrame
+        corridors: Corridors mapping DataFrame
+        value_col: Value column
+        period_col: Period column
+    
+    Returns:
+        Corridor aggregated DataFrame
+    """
+    try:
+        if df.empty or corridors.empty:
+            return pd.DataFrame()
+        
+        # Merge with corridors
+        df_with_corridors = df.merge(
+            corridors[['SignalID', 'Corridor', 'Zone_Group']].drop_duplicates(),
+            on='SignalID',
+            how='left'
+        )
+        
+        # Group by corridor and period
+        result = df_with_corridors.groupby(['Corridor', 'Zone_Group', period_col])[value_col].mean().reset_index()
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in get_cor_monthly_avg_by_period: {e}")
+        return pd.DataFrame()
+
+def sigify(signal_df: pd.DataFrame, 
+          corridor_df: pd.DataFrame, 
+          corridors: pd.DataFrame, 
+          identifier: str = 'SignalID') -> pd.DataFrame:
+    """
+    Convert corridor data to signal-level data for detailed analysis
+    
+    Args:
+        signal_df: DataFrame with signal-level data
+        corridor_df: DataFrame with corridor-level data
+        corridors: Corridor mapping DataFrame
+        identifier: Identifier type ('SignalID' or 'CameraID')
+    
+    Returns:
+        Combined DataFrame with both signal and corridor data
+    """
+    try:
+        if signal_df.empty and corridor_df.empty:
+            return pd.DataFrame()
+        
+        # Determine period column
+        period_cols = ['Date', 'Month', 'Hour', 'Timeperiod']
+        period_col = None
+        for col in period_cols:
+            if col in signal_df.columns:
+                period_col = col
+                break
+        
+        if identifier == 'SignalID' and not corridors.empty:
+            # Get signal descriptions
+            descriptions = corridors.groupby(['SignalID', 'Corridor'])['Description'].first().reset_index()
+            
+            # Transform signal data
+            signal_transformed = signal_df.merge(
+                corridors[['SignalID', 'Corridor', 'Name']].drop_duplicates(), 
+                on='SignalID', how='left'
+            )
+            signal_transformed = signal_transformed.rename(columns={
+                'Corridor': 'Zone_Group',
+                'SignalID': 'Corridor'
+            })
+            
+            # Add descriptions if available
+            if not descriptions.empty:
+                signal_transformed = signal_transformed.merge(
+                    descriptions.rename(columns={'SignalID': 'Corridor', 'Corridor': 'Zone_Group'}),
+                    on=['Corridor', 'Zone_Group'], how='left'
+                )
+                signal_transformed['Description'] = signal_transformed['Description'].fillna(
+                    signal_transformed['Corridor'].astype(str)
+                )
+        else:
+            # If no corridors mapping, just use signal data as is
+            signal_transformed = signal_df.copy()
+            if 'Zone_Group' not in signal_transformed.columns:
+                signal_transformed['Zone_Group'] = 'Unknown'
+            if 'Corridor' not in signal_transformed.columns:
+                signal_transformed['Corridor'] = signal_transformed.get('SignalID', 'Unknown')
+        
+        # Calculate delta (change from previous period) if possible
+        if period_col and len(signal_transformed) > 1:
+            signal_transformed = signal_transformed.sort_values([period_col])
+            
+            # Find numeric columns for delta calculation
+            numeric_cols = signal_transformed.select_dtypes(include=[np.number]).columns
+            value_cols = [col for col in numeric_cols if col not in ['SignalID', 'CallPhase', 'Detector']]
+            
+            if value_cols:
+                # Calculate delta for the first numeric value column
+                value_col = value_cols[0]
+                signal_transformed['delta'] = signal_transformed.groupby(['Corridor', 'Zone_Group'])[value_col].pct_change()
+            else:
+                signal_transformed['delta'] = np.nan
+        else:
+            signal_transformed['delta'] = np.nan
+        
+        return signal_transformed
+        
+    except Exception as e:
+        logger.error(f"Error in sigify: {e}")
+        return signal_df.copy() if not signal_df.empty else pd.DataFrame()
 
 def weighted_mean_by_corridor(df: pd.DataFrame, 
                             per_col: str, 

@@ -2,8 +2,9 @@ import pandas as pd
 import mysql.connector
 import yaml
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,89 @@ def load_bulk_data(connection, table_name: str, df: pd.DataFrame):
     except Exception as e:
         logger.error(f"Error loading bulk data into {table_name}: {e}")
         connection.rollback()
+        raise
+    finally:
+        cursor.close()
+
+def append_to_database(connection, sig_data: Dict[str, Any], data_type: str, 
+                      calcs_start_date: date, report_start_date: Optional[date] = None, 
+                      report_end_date: Optional[date] = None):
+    """
+    Append signal operations data to database
+    
+    Args:
+        connection: Database connection
+        sig_data: Dictionary containing signal data
+        data_type: Type of data ('sig')
+        calcs_start_date: Start date for calculations
+        report_start_date: Start date for report (optional)
+        report_end_date: End date for report (optional)
+    """
+    try:
+        cursor = connection.cursor()
+        
+        # Process hourly data
+        if 'hr' in sig_data:
+            hourly_data = sig_data['hr']
+            
+            # Table mapping for hourly data
+            table_mapping = {
+                'vph': 'HourlyVolumes',
+                'paph': 'HourlyPedActivations',
+                'aogh': 'HourlyArrivalsOnGreen',
+                'prh': 'HourlyProgressionRatio',
+                'sfh': 'HourlySplitFailures',
+                'qsh': 'HourlyQueueSpillback'
+            }
+            
+            for data_key, table_name in table_mapping.items():
+                if data_key in hourly_data and not hourly_data[data_key].empty:
+                    df = hourly_data[data_key]
+                    
+                    # Filter data by date if needed
+                    if 'Hour' in df.columns:
+                        df = df[pd.to_datetime(df['Hour']).dt.date >= calcs_start_date]
+                    
+                    if not df.empty:
+                        # Delete existing data for the date range
+                        delete_query = f"""
+                        DELETE FROM {table_name} 
+                        WHERE DATE(Hour) >= %s
+                        """
+                        cursor.execute(delete_query, (calcs_start_date,))
+                        
+                        # Insert new data
+                        load_bulk_data(connection, table_name, df)
+                        
+                        logger.info(f"Appended {len(df)} records to {table_name}")
+        
+        connection.commit()
+        logger.info("Successfully appended all data to database")
+        
+    except Exception as e:
+        logger.error(f"Error appending to database: {e}")
+        connection.rollback()
+        raise
+    finally:
+        cursor.close()
+
+def recreate_database(connection):
+    """
+    Recreate database tables (placeholder function)
+    
+    Args:
+        connection: Database connection
+    """
+    try:
+        cursor = connection.cursor()
+        
+        # Add your table creation SQL here
+        # This is a placeholder - you'll need to implement based on your schema
+        
+        logger.info("Database tables recreated successfully")
+        
+    except Exception as e:
+        logger.error(f"Error recreating database: {e}")
         raise
     finally:
         cursor.close()

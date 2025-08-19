@@ -1196,3 +1196,32 @@ def setup_global_configs(conf: dict):
     except Exception as e:
         logger.error(f"Error setting up global configurations: {e}")
         raise
+
+def get_date_from_string(date_string: str, table_include_regex_pattern: str = "", 
+                        exceptions: int = 0) -> date:
+    """
+    Get date from string with table pattern matching
+    
+    Args:
+        date_string: Date string to parse
+        table_include_regex_pattern: Regex pattern for table inclusion
+        exceptions: Number of exceptions to allow
+    
+    Returns:
+        Date object
+    """
+    try:
+        # If date_string is a specific date, parse it
+        if date_string and date_string.lower() != 'auto':
+            return pd.to_datetime(date_string).date()
+        
+        # Auto-detect based on missing data in tables
+        # This is a simplified implementation - you may need to customize
+        # based on your specific database structure and logic
+        
+        # Default to 7 days ago if auto-detection
+        return date.today() - timedelta(days=7)
+        
+    except Exception as e:
+        logger.error(f"Error parsing date from string '{date_string}': {e}")
+        return date.today() - timedelta(days=7)
