@@ -9,6 +9,7 @@ import traceback
 import pickle
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import re
 
 # Add the parent directory to the path to import local modules
 sys.path.append(str(Path(__file__).parent.parent))
@@ -26,6 +27,71 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def parse_relative_date(date_string):
+    """
+    Parse relative date strings like 'yesterday', '2 days ago', etc.
+    
+    Args:
+        date_string: String representation of a date (could be relative or absolute)
+    
+    Returns:
+        datetime object
+    """
+    if isinstance(date_string, (datetime, date)):
+        return date_string
+    
+    if not isinstance(date_string, str):
+        return datetime.now()
+    
+    date_string = date_string.strip().lower()
+    now = datetime.now()
+    
+    # Handle relative date strings
+    if date_string == 'today':
+        return now.date()
+    elif date_string == 'yesterday':
+        return (now - timedelta(days=1)).date()
+    elif date_string == 'tomorrow':
+        return (now + timedelta(days=1)).date()
+    elif 'ago' in date_string:
+        # Parse patterns like "2 days ago", "1 week ago", "3 months ago"
+        match = re.match(r'(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+ago', date_string)
+        if match:
+            number = int(match.group(1))
+            unit = match.group(2)
+            
+            if unit.startswith('day'):
+                return (now - timedelta(days=number)).date()
+            elif unit.startswith('week'):
+                return (now - timedelta(weeks=number)).date()
+            elif unit.startswith('month'):
+                return (now - relativedelta(months=number)).date()
+            elif unit.startswith('year'):
+                return (now - relativedelta(years=number)).date()
+    elif 'from now' in date_string or 'later' in date_string:
+        # Parse patterns like "2 days from now", "1 week later"
+        match = re.match(r'(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+(from now|later)', date_string)
+        if match:
+            number = int(match.group(1))
+            unit = match.group(2)
+            
+            if unit.startswith('day'):
+                return (now + timedelta(days=number)).date()
+            elif unit.startswith('week'):
+                return (now + timedelta(weeks=number)).date()
+            elif unit.startswith('month'):
+                return (now + relativedelta(months=number)).date()
+            elif unit.startswith('year'):
+                return (now + relativedelta(years=number)).date()
+    
+    # If not a relative date, try to parse as regular date
+    try:
+        parsed_date = pd.to_datetime(date_string)
+        return parsed_date.date() if hasattr(parsed_date, 'date') else parsed_date
+    except Exception as e:
+        logger.warning(f"Could not parse date string '{date_string}': {e}. Using current date.")
+        return now.date()
 
 def floor_date(dt, unit='months'):
     """
@@ -101,8 +167,15 @@ def main():
             exceptions=0
         )
         
-        # Get report end date from config
-        report_end_date = pd.to_datetime(conf.get('report_end_date', datetime.now())).date()
+        # Get report end date from config and handle relative dates
+        report_end_date_str = conf.get('report_end_date', datetime.now())
+        report_end_date = parse_relative_date(report_end_date_str)
+        
+        # Ensure report_end_date is a date object
+        if isinstance(report_end_date, datetime):
+            report_end_date = report_end_date.date()
+        
+        # Limit report end date
         report_end_date = min(report_end_date, calcs_start_date + timedelta(days=7))
         
         print(f"{datetime.now()} 1hr Package Start Date: {calcs_start_date}")
@@ -562,9 +635,9 @@ def main():
             print(e)
             logger.error(f"Error packaging hourly data: {traceback.format_exc()}")
         
-        print(f"{datetime.now()} Upload to AWS [28 of 29 (sigops 1hr)]")
+        print(f"{datetime.now()} Upload to AWS [27 of 29 (sigops 1hr)]")
         
-        print(f"{datetime.now()} Write to Database [29 of 29 (sigops 1hr)]")
+        print(f"{datetime.now()} Write to Database [28 of 29 (sigops 1hr)]")
         
         # Update Aurora Nightly
         try:
@@ -587,7 +660,7 @@ def main():
             logger.error(f"Error writing to database: {e}")
             logger.error(traceback.format_exc())
         
-        print(f"{datetime.now()} Monthly Report Package 1hr completed successfully")
+        print(f"{datetime.now()} Monthly Report Package 1hr completed successfully [29 of 29 (sigops 1hr)]")
         
     except Exception as e:
         logger.error(f"Fatal error in main function: {e}")
