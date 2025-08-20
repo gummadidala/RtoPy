@@ -11,13 +11,15 @@ from pathlib import Path
 import logging
 from typing import List, Optional
 import traceback
+from io import BytesIO
 
 # Add the parent directory to the path to import local modules
 sys.path.append(str(Path(__file__).parent.parent))
 
 from s3_parquet_io import s3read_using, s3write_using
 from utilities import keep_trying
-from write_sigops_to_db import get_aurora_connection, load_bulk_data
+from write_sigops_to_db import load_bulk_data
+from database_functions import get_aurora_connection
 import pyarrow.parquet as pq
 import pyarrow.feather as feather
 
@@ -142,7 +144,8 @@ def get_alerts(conf: dict) -> pd.DataFrame:
                     df['SignalID'] = df['SignalID'].astype('category')
                     if 'Detector' in df.columns:
                         df['Detector'] = df['Detector'].astype('category')
-                    df['Date'] = pd.to_datetime(df['Date']).dt.date
+                    # df['Date'] = pd.to_datetime(df['Date']).dt.date
+                    df['Date'] = pd.to_datetime(df['Date'])
                     
                     alerts_list.append(df)
                     
@@ -195,7 +198,9 @@ def get_alerts(conf: dict) -> pd.DataFrame:
             alerts['Name'] = alerts['Name'].astype(str)
         
         # Filter dates (last 180 days)
-        cutoff_date = date.today() - timedelta(days=180)
+        # cutoff_date = date.today() - timedelta(days=180)
+        # alerts = alerts[alerts['Date'] > cutoff_date]
+        cutoff_date = pd.Timestamp(date.today() - timedelta(days=180))
         alerts = alerts[alerts['Date'] > cutoff_date]
         
         # Remove duplicates
@@ -226,7 +231,9 @@ def get_alerts(conf: dict) -> pd.DataFrame:
                     start_streak.iloc[i] = np.nan
             
             # Forward fill start_streak
-            start_streak = start_streak.fillna(method='ffill')
+            # start_streak = start_streak.fillna(method='ffill')
+            start_streak = start_streak.ffill()
+
             
             # Calculate streak runs
             streak = streak_run(start_streak, k=90)
@@ -235,7 +242,8 @@ def get_alerts(conf: dict) -> pd.DataFrame:
             return group
         
         if existing_group_columns:
-            alerts = alerts.groupby(existing_group_columns, observed=True).apply(calculate_streaks)
+            # alerts = alerts.groupby(existing_group_columns, observed=True).apply(calculate_streaks)
+            alerts = alerts.groupby(existing_group_columns, observed=True, group_keys=False).apply(calculate_streaks)
             alerts = alerts.reset_index(drop=True)
         
         logger.info(f"Processed {len(alerts)} alert records")
@@ -270,20 +278,28 @@ def main():
         
         # Upload to S3 Bucket
         try:
-            # Save as parquet
-            s3write_using(
-                alerts,
-                lambda df, path: df.to_parquet(path, index=False),
-                bucket=conf['bucket'],
-                object="sigops/watchdog/alerts.parquet"
+            s3_client = boto3.client("s3")
+
+            # ---- Pickle (qs replacement) ----
+            pickle_buffer = BytesIO()
+            alerts.to_pickle(pickle_buffer)
+            pickle_buffer.seek(0)
+
+            s3_client.put_object(
+                Bucket=conf['bucket'],
+                Key="sigops/watchdog/alerts.qs",
+                Body=pickle_buffer.getvalue()
             )
-            
-            # Save as pickle (closest to R's qs format)
-            s3write_using(
-                alerts,
-                lambda df, path: df.to_pickle(path),
-                bucket=conf['bucket'],
-                object="sigops/watchdog/alerts.pkl"
+
+            # ---- Parquet ----
+            parquet_buffer = BytesIO()
+            alerts.to_parquet(parquet_buffer, index=False)
+            parquet_buffer.seek(0)
+
+            s3_client.put_object(
+                Bucket=conf['bucket'],
+                Key="sigops/watchdog/alerts.parquet",
+                Body=parquet_buffer.getvalue()
             )
             
             logger.info(f"Successfully uploaded alerts to {conf['bucket']}/sigops/watchdog/")
