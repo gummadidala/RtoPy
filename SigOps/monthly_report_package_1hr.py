@@ -10,22 +10,58 @@ import pickle
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import re
+import warnings
+import pandas as pd
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+
 
 # Add the parent directory to the path to import local modules
 sys.path.append(str(Path(__file__).parent.parent))
 
 from s3_parquet_io import s3_read_parquet_parallel
 from utilities import keep_trying
-from aggregations import get_period_sum, get_cor_monthly_avg_by_period, get_period_avg, sigify
-from configs import get_date_from_string
-from write_sigops_to_db import get_aurora_connection, append_to_database
+from SigOps.aggregations import get_period_sum, get_cor_monthly_avg_by_period, get_period_avg, sigify
+from SigOps.configs import get_date_from_string
+from configs import get_corridors
+from write_sigops_to_db import append_to_database
+from database_functions import get_aurora_connection
 import yaml
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
+    """
+    Setup logging configuration
+    
+    Args:
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+        log_file: Optional log file path
+    """
+    
+    # Convert string level to logging constant
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    
+    # Setup root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    root_logger.addHandler(console_handler)
+    
+    # Setup file handler if specified
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+
 logger = logging.getLogger(__name__)
 
 def parse_relative_date(date_string):
@@ -112,32 +148,27 @@ def floor_date(dt, unit='months'):
         return dt
 
 def addtoRDS(df: pd.DataFrame, filename: str, value_col: str, 
-            rds_start_date: date, calcs_start_date: date):
+             rds_start_date: date, calcs_start_date: date):
     """
     Add data to RDS file (equivalent to R's addtoRDS function)
-    
-    Args:
-        df: DataFrame to save
-        filename: Name of the pickle file
-        value_col: Name of the value column
-        rds_start_date: Start date for RDS data
-        calcs_start_date: Start date for calculations
     """
     try:
-        # Filter data from calcs_start_date onwards
-        if 'Hour' in df.columns:
-            df_filtered = df[df['Hour'] >= pd.Timestamp(calcs_start_date)]
-        elif 'Date' in df.columns:
-            df_filtered = df[df['Date'] >= calcs_start_date]
-        else:
-            df_filtered = df
-        
-        # Save to pickle file (Python equivalent of RDS)
+        df_filtered = df.copy()
+
+        # Normalize timezones to naive before filtering
+        if 'Hour' in df_filtered.columns:
+            df_filtered['Hour'] = pd.to_datetime(df_filtered['Hour']).dt.tz_localize(None)
+            df_filtered = df_filtered[df_filtered['Hour'] >= pd.Timestamp(calcs_start_date)]
+        elif 'Date' in df_filtered.columns:
+            df_filtered['Date'] = pd.to_datetime(df_filtered['Date']).dt.date
+            df_filtered = df_filtered[df_filtered['Date'] >= calcs_start_date]
+
+        # Save to pickle
         with open(filename, 'wb') as f:
             pickle.dump(df_filtered, f)
-        
+
         logger.info(f"Saved {len(df_filtered)} records to {filename}")
-        
+
     except Exception as e:
         logger.error(f"Error saving to {filename}: {e}")
 
@@ -190,14 +221,14 @@ def main():
         # Load corridors data (assuming this is available from config or separate file)
         # You'll need to implement this based on your corridor data source
         try:
-            corridors = pd.read_csv(conf.get('corridors_file', 'corridors.csv'))
+            corridors = get_corridors(conf['corridors_filename_s3'])
         except:
             logger.warning("Corridors file not found, creating empty DataFrame")
             corridors = pd.DataFrame()
         
         # Load signals list
         try:
-            signals_list = conf.get('signals_list', [])
+            signals_list = corridors['SignalID'].unique().tolist()
         except:
             signals_list = []
         
@@ -266,7 +297,7 @@ def main():
                 # Create all timeperiods
                 min_hour = pd.to_datetime(paph['Hour']).min().floor('D')
                 max_hour = pd.to_datetime(paph['Hour']).max().floor('D') + pd.Timedelta(days=1) - pd.Timedelta(hours=1)
-                all_timeperiods = pd.date_range(start=min_hour, end=max_hour, freq='H')
+                all_timeperiods = pd.date_range(start=min_hour, end=max_hour, freq='h')
                 
                 # Expand grid and fill missing values
                 signal_detector_combinations = paph[['SignalID', 'Detector', 'CallPhase']].drop_duplicates()
@@ -389,6 +420,8 @@ def main():
                             'Hour': hour})
                 
                 expanded_df = pd.DataFrame(expanded_grid)
+                expanded_df['Hour'] = pd.to_datetime(expanded_df['Hour']).dt.tz_localize(None)
+                aog['Hour'] = pd.to_datetime(aog['Hour']).dt.tz_localize(None)
                 aog = expanded_df.merge(aog, on=['SignalID', 'Date', 'Hour'], how='left')
                 
                 hourly_aog = get_period_avg(aog, "aog", "Hour", "vol")
@@ -433,6 +466,8 @@ def main():
                         })
                 
                 expanded_df = pd.DataFrame(expanded_grid)
+                expanded_df['Hour'] = pd.to_datetime(expanded_df['Hour']).dt.tz_localize(None)
+                aog['Hour'] = pd.to_datetime(aog['Hour']).dt.tz_localize(None)
                 aog_for_pr = expanded_df.merge(aog, on=['SignalID', 'Date', 'Hour'], how='left')
                 
                 hourly_pr = get_period_avg(aog_for_pr, "pr", "Hour", "vol")
@@ -668,5 +703,6 @@ def main():
         raise
 
 if __name__ == "__main__":
+    setup_logging("INFO", "sigops_monthly_report_package_1hr.log")
     main()
 

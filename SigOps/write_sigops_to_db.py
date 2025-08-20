@@ -72,67 +72,48 @@ def load_bulk_data(connection, table_name: str, df: pd.DataFrame):
     finally:
         cursor.close()
 
-def append_to_database(connection, sig_data: Dict[str, Any], data_type: str, 
-                      calcs_start_date: date, report_start_date: Optional[date] = None, 
-                      report_end_date: Optional[date] = None):
-    """
-    Append signal operations data to database
-    
-    Args:
-        connection: Database connection
-        sig_data: Dictionary containing signal data
-        data_type: Type of data ('sig')
-        calcs_start_date: Start date for calculations
-        report_start_date: Start date for report (optional)
-        report_end_date: End date for report (optional)
-    """
+from sqlalchemy import text
+
+def append_to_database(engine, sig_data, data_type, calcs_start_date,
+                      report_start_date=None, report_end_date=None):
     try:
-        cursor = connection.cursor()
-        
-        # Process hourly data
-        if 'hr' in sig_data:
-            hourly_data = sig_data['hr']
-            
-            # Table mapping for hourly data
-            table_mapping = {
-                'vph': 'HourlyVolumes',
-                'paph': 'HourlyPedActivations',
-                'aogh': 'HourlyArrivalsOnGreen',
-                'prh': 'HourlyProgressionRatio',
-                'sfh': 'HourlySplitFailures',
-                'qsh': 'HourlyQueueSpillback'
-            }
-            
-            for data_key, table_name in table_mapping.items():
-                if data_key in hourly_data and not hourly_data[data_key].empty:
-                    df = hourly_data[data_key]
-                    
-                    # Filter data by date if needed
-                    if 'Hour' in df.columns:
-                        df = df[pd.to_datetime(df['Hour']).dt.date >= calcs_start_date]
-                    
-                    if not df.empty:
-                        # Delete existing data for the date range
-                        delete_query = f"""
-                        DELETE FROM {table_name} 
-                        WHERE DATE(Hour) >= %s
-                        """
-                        cursor.execute(delete_query, (calcs_start_date,))
-                        
-                        # Insert new data
-                        load_bulk_data(connection, table_name, df)
-                        
-                        logger.info(f"Appended {len(df)} records to {table_name}")
-        
-        connection.commit()
+        with engine.begin() as conn:  # handles commit/rollback
+            if 'hr' in sig_data:
+                hourly_data = sig_data['hr']
+
+                table_mapping = {
+                    'vph': 'HourlyVolumes',
+                    'paph': 'HourlyPedActivations',
+                    'aogh': 'HourlyArrivalsOnGreen',
+                    'prh': 'HourlyProgressionRatio',
+                    'sfh': 'HourlySplitFailures',
+                    'qsh': 'HourlyQueueSpillback'
+                }
+
+                for data_key, table_name in table_mapping.items():
+                    if data_key in hourly_data and not hourly_data[data_key].empty:
+                        df = hourly_data[data_key]
+
+                        if 'Hour' in df.columns:
+                            df = df[pd.to_datetime(df['Hour']).dt.date >= calcs_start_date]
+
+                        if not df.empty:
+                            delete_query = text(f"""
+                                DELETE FROM {table_name}
+                                WHERE DATE(Hour) >= :start_date
+                            """)
+                            conn.execute(delete_query, {"start_date": calcs_start_date})
+
+                            # load_bulk_data must accept a SQLAlchemy connection
+                            load_bulk_data(conn, table_name, df)
+
+                            logger.info(f"Appended {len(df)} records to {table_name}")
+
         logger.info("Successfully appended all data to database")
-        
+
     except Exception as e:
         logger.error(f"Error appending to database: {e}")
-        connection.rollback()
         raise
-    finally:
-        cursor.close()
 
 def recreate_database(connection):
     """

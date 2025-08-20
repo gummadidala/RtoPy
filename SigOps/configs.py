@@ -10,6 +10,12 @@ import re
 from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
+import warnings
+import pandas as pd
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -1197,10 +1203,76 @@ def setup_global_configs(conf: dict):
         logger.error(f"Error setting up global configurations: {e}")
         raise
 
+def parse_relative_date(date_string):
+    """
+    Parse relative date strings like 'yesterday', '2 days ago', etc.
+    
+    Args:
+        date_string: String representation of a date (could be relative or absolute)
+    
+    Returns:
+        datetime object
+    """
+    if isinstance(date_string, (datetime, date)):
+        return date_string
+    
+    if not isinstance(date_string, str):
+        return datetime.now()
+    
+    date_string = date_string.strip().lower()
+    now = datetime.now()
+    
+    # Handle relative date strings
+    if date_string == 'today':
+        return now.date()
+    elif date_string == 'yesterday':
+        return (now - timedelta(days=1)).date()
+    elif date_string == 'tomorrow':
+        return (now + timedelta(days=1)).date()
+    elif 'ago' in date_string:
+        # Parse patterns like "2 days ago", "1 week ago", "3 months ago"
+        match = re.match(r'(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+ago', date_string)
+        if match:
+            number = int(match.group(1))
+            unit = match.group(2)
+            
+            if unit.startswith('day'):
+                return (now - timedelta(days=number)).date()
+            elif unit.startswith('week'):
+                return (now - timedelta(weeks=number)).date()
+            elif unit.startswith('month'):
+                return (now - relativedelta(months=number)).date()
+            elif unit.startswith('year'):
+                return (now - relativedelta(years=number)).date()
+    elif 'from now' in date_string or 'later' in date_string:
+        # Parse patterns like "2 days from now", "1 week later"
+        match = re.match(r'(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+(from now|later)', date_string)
+        if match:
+            number = int(match.group(1))
+            unit = match.group(2)
+            
+            if unit.startswith('day'):
+                return (now + timedelta(days=number)).date()
+            elif unit.startswith('week'):
+                return (now + timedelta(weeks=number)).date()
+            elif unit.startswith('month'):
+                return (now + relativedelta(months=number)).date()
+            elif unit.startswith('year'):
+                return (now + relativedelta(years=number)).date()
+    
+    # If not a relative date, try to parse as regular date
+    try:
+        parsed_date = pd.to_datetime(date_string)
+        return parsed_date.date() if hasattr(parsed_date, 'date') else parsed_date
+    except Exception as e:
+        logger.warning(f"Could not parse date string '{date_string}': {e}. Using current date.")
+        return now.date()
+
 def get_date_from_string(date_string: str, table_include_regex_pattern: str = "", 
                         exceptions: int = 0) -> date:
     """
-    Get date from string with table pattern matching
+    Get date from string with table pattern matching.
+    Supports relative strings like '2 days ago', 'yesterday', etc.
     
     Args:
         date_string: Date string to parse
@@ -1211,17 +1283,14 @@ def get_date_from_string(date_string: str, table_include_regex_pattern: str = ""
         Date object
     """
     try:
-        # If date_string is a specific date, parse it
         if date_string and date_string.lower() != 'auto':
-            return pd.to_datetime(date_string).date()
+            # Use our custom relative-date parser
+            parsed = parse_relative_date(date_string)
+            return parsed if isinstance(parsed, date) else parsed.date()
         
-        # Auto-detect based on missing data in tables
-        # This is a simplified implementation - you may need to customize
-        # based on your specific database structure and logic
-        
-        # Default to 7 days ago if auto-detection
+        # Auto mode (fallback) → default to 7 days ago
         return date.today() - timedelta(days=7)
-        
+
     except Exception as e:
         logger.error(f"Error parsing date from string '{date_string}': {e}")
         return date.today() - timedelta(days=7)

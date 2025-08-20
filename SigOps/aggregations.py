@@ -3,6 +3,11 @@ import numpy as np
 from datetime import datetime, timedelta
 import logging
 from typing import Optional, Dict, List, Union, Callable, Any
+import warnings
+import pandas as pd
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +246,7 @@ def weighted_mean_by_corridor(df: pd.DataFrame,
                 wt_col: weights[valid_mask].sum()
             })
         
-        result = grouped.apply(weighted_avg).reset_index()
+        result = grouped.apply(weighted_avg, include_groups=False).reset_index()
     
     # Calculate lag and delta
     result = result.sort_values(['Zone_Group', 'Zone', 'Corridor', per_col])
@@ -882,50 +887,33 @@ def get_quarterly(monthly_df: pd.DataFrame,
     
     return quarterly_df[cols].drop(columns=['lag_'])
 
-
 def sigify(signal_df: pd.DataFrame, 
-          corridor_df: pd.DataFrame, 
-          corridors: pd.DataFrame, 
-          identifier: str = 'SignalID') -> pd.DataFrame:
+           corridor_df: pd.DataFrame, 
+           corridors: pd.DataFrame, 
+           identifier: str = 'SignalID') -> pd.DataFrame:
     """
     Convert corridor data to signal-level data for detailed analysis
-    
-    Args:
-        signal_df: DataFrame with signal-level data
-        corridor_df: DataFrame with corridor-level data
-        corridors: Corridor mapping DataFrame
-        identifier: Identifier type ('SignalID' or 'CameraID')
-    
-    Returns:
-        Combined DataFrame with both signal and corridor data
     """
-    
     if signal_df.empty and corridor_df.empty:
         return pd.DataFrame()
-    
+
     # Determine period column
     period_cols = ['Date', 'Month', 'Hour', 'Timeperiod']
-    period_col = None
-    for col in period_cols:
-        if col in signal_df.columns:
-            period_col = col
-            break
-    
+    period_col = next((col for col in period_cols if col in signal_df.columns), None)
+
     if identifier == 'SignalID':
-        # Get signal descriptions
-        descriptions = corridors.groupby(['SignalID', 'Corridor'])['Description'].first().reset_index()
-        
-        # Transform signal data
+        descriptions = corridors.groupby(['SignalID', 'Corridor'], observed=False)['Description'] \
+                                .first().reset_index()
+
         signal_transformed = signal_df.merge(
-            corridors[['SignalID', 'Corridor', 'Name']].drop_duplicates(), 
+            corridors[['SignalID', 'Corridor', 'Name']].drop_duplicates(),
             on='SignalID', how='left'
         )
         signal_transformed = signal_transformed.rename(columns={
             'Corridor': 'Zone_Group',
             'SignalID': 'Corridor'
         })
-        
-        # Add descriptions
+
         signal_transformed = signal_transformed.merge(
             descriptions.rename(columns={'SignalID': 'Corridor', 'Corridor': 'Zone_Group'}),
             on=['Corridor', 'Zone_Group'], how='left'
@@ -933,16 +921,13 @@ def sigify(signal_df: pd.DataFrame,
         signal_transformed['Description'] = signal_transformed['Description'].fillna(
             signal_transformed['Corridor'].astype(str)
         )
-        
+
     elif identifier == 'CameraID':
-        # Transform camera data
         corridors_cam = corridors.rename(columns={'Location': 'Name'})
-        
         signal_transformed = signal_df.drop(
             columns=[col for col in signal_df.columns if 'Subcorridor' in col or 'Zone_Group' in col],
             errors='ignore'
         )
-        
         signal_transformed = signal_transformed.merge(
             corridors_cam[['CameraID', 'Corridor', 'Name']].drop_duplicates(),
             on=['Corridor', 'CameraID'], how='left'
@@ -951,52 +936,48 @@ def sigify(signal_df: pd.DataFrame,
             'Corridor': 'Zone_Group',
             'CameraID': 'Corridor'
         })
-        
         if 'Description' not in signal_transformed.columns:
             signal_transformed['Description'] = signal_transformed['Corridor']
         signal_transformed['Description'] = signal_transformed['Description'].fillna(
             signal_transformed['Corridor']
         )
-        
+
     else:
         raise ValueError("Identifier must be 'SignalID' or 'CameraID'")
-    
+
     # Transform corridor data
     corridor_transformed = corridor_df[
         corridor_df['Corridor'].isin(signal_transformed['Zone_Group'].unique())
     ].copy()
-    
     corridor_transformed['Zone_Group'] = corridor_transformed['Corridor']
     corridor_transformed['Description'] = corridor_transformed['Corridor']
-    
-    # Remove subcorridor columns if they exist
-    subcorridor_cols = [col for col in corridor_transformed.columns if 'Subcorridor' in col]
-    if subcorridor_cols:
-        corridor_transformed = corridor_transformed.drop(columns=subcorridor_cols)
-    
-    # Combine signal and corridor data
-    result = pd.concat([signal_transformed, corridor_transformed], ignore_index=True)
-    
-    # Convert to categorical
-    result['Corridor'] = result['Corridor'].astype('category')
-    result['Description'] = result['Description'].astype('category')
-    
-    if 'Zone_Group' in result.columns:
-        result['Zone_Group'] = result['Zone_Group'].astype('category')
-    
-    # Sort by appropriate column
-    if period_col:
-        if period_col == 'Month':
-            result = result.sort_values(['Zone_Group', 'Corridor', 'Month'])
-        elif period_col == 'Hour':
-            result = result.sort_values(['Zone_Group', 'Corridor', 'Hour'])
-        elif period_col == 'Timeperiod':
-            result = result.sort_values(['Zone_Group', 'Corridor', 'Timeperiod'])
-        elif period_col == 'Date':
-            result = result.sort_values(['Zone_Group', 'Corridor', 'Date'])
-    
-    return result
 
+    # Drop subcorridor cols
+    subcorridor_cols = [c for c in corridor_transformed.columns if 'Subcorridor' in c]
+    corridor_transformed = corridor_transformed.drop(columns=subcorridor_cols, errors='ignore')
+
+    # ⚡ Ensure no duplicate columns
+    signal_transformed = signal_transformed.loc[:, ~signal_transformed.columns.duplicated()]
+    corridor_transformed = corridor_transformed.loc[:, ~corridor_transformed.columns.duplicated()]
+
+    # ⚡ Align to common columns
+    common_cols = signal_transformed.columns.intersection(corridor_transformed.columns)
+    signal_transformed = signal_transformed[common_cols]
+    corridor_transformed = corridor_transformed[common_cols]
+
+    # Combine
+    result = pd.concat([signal_transformed, corridor_transformed], ignore_index=True)
+
+    # Convert to categorical
+    for col in ['Corridor', 'Zone_Group', 'Description']:
+        if col in result.columns:
+            result[col] = result[col].astype('category')
+
+    # Sort
+    if period_col:
+        result = result.sort_values(['Zone_Group', 'Corridor', period_col])
+
+    return result
 
 def get_daily_detector_uptime(filtered_counts: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """
