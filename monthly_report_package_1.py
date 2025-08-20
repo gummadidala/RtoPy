@@ -864,7 +864,6 @@ def process_ped_pushbutton_uptime(dates, config_data):
         gc.collect()
         log_memory_usage("Final cleanup complete")
 
-
 # Additional helper function for even more aggressive memory management
 def process_ped_pushbutton_uptime_ultra_conservative(dates, config_data):
     """Ultra-conservative version - processes one signal per day to minimize memory usage"""
@@ -1083,149 +1082,6 @@ def process_ped_pushbutton_uptime_ultra_conservative(dates, config_data):
         gc.collect()
         log_memory_usage("Ultra-conservative cleanup complete")
 
-def process_ped_pushbutton_uptime_notinscope(dates, config_data):
-    """Process pedestrian pushbutton uptime [2 of 29] - Memory optimized"""
-    logger.info(f"{datetime.now()} Ped Pushbutton Uptime [2 of 29 (mark1)]")
-    log_memory_usage("Start ped pushbutton uptime")
-    
-    try:
-        pau_start_date = min(
-            dates['calcs_start_date'],
-            dates['report_end_date'] - relativedelta(months=6)
-        )
-        
-        counts_ped_hourly = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="counts_ped_1hr",
-            start_date=pau_start_date,
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list'],
-            parallel=False
-        )
-        
-        if not counts_ped_hourly.empty:
-            log_memory_usage("After reading ped hourly data")
-            
-            counts_ped_hourly = counts_ped_hourly.dropna(subset=['CallPhase'])
-            counts_ped_hourly = clean_signal_ids(counts_ped_hourly)
-            counts_ped_hourly['Detector'] = counts_ped_hourly['Detector'].astype('category')
-            counts_ped_hourly['CallPhase'] = counts_ped_hourly['CallPhase'].astype('category')
-            counts_ped_hourly = calculate_time_periods(counts_ped_hourly)
-            counts_ped_hourly['vol'] = pd.to_numeric(counts_ped_hourly['vol'], errors='coerce')
-            
-            # Calculate daily pedestrian activations
-            counts_ped_daily = counts_ped_hourly.groupby([
-                'SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase'
-            ])['vol'].sum().reset_index()
-            counts_ped_daily.rename(columns={'vol': 'papd'}, inplace=True)
-            
-            papd = counts_ped_daily.copy()
-            paph = counts_ped_hourly.rename(columns={'Timeperiod': 'Hour', 'vol': 'paph'})
-            del counts_ped_hourly, counts_ped_daily
-            gc.collect()
-            
-            log_memory_usage("After processing ped data")
-            
-            # Calculate pedestrian uptime using gamma distribution
-            date_range = pd.date_range(pau_start_date, dates['report_end_date'], freq='D')
-            pau = get_pau_gamma(
-                date_range, papd, paph, config_data['corridors'], 
-                dates['wk_calcs_start_date'], pau_start_date
-            )
-            
-            if not pau.empty:
-                # Remove and replace papd for bad days
-                pau_with_replacements = pau.copy()
-                pau_with_replacements.loc[pau_with_replacements['uptime'] == 0, 'papd'] = np.nan
-                
-                monthly_avg = pau_with_replacements.groupby([
-                    'SignalID', 'Detector', 'CallPhase', 
-                    pau_with_replacements['Date'].dt.year,
-                    pau_with_replacements['Date'].dt.month
-                ])['papd'].transform('mean')
-                
-                pau_with_replacements['papd'] = pau_with_replacements['papd'].fillna(monthly_avg.fillna(0))
-                papd = pau_with_replacements[['SignalID', 'Detector', 'CallPhase', 'Date', 'DOW', 'Week', 'papd', 'uptime']]
-                del pau_with_replacements, monthly_avg
-                gc.collect()
-                
-                # Bad detectors
-                bad_detectors = get_bad_ped_detectors(pau)
-                bad_detectors = bad_detectors[bad_detectors['Date'] >= dates['calcs_start_date']]
-                
-                if not bad_detectors.empty:
-                    save_data(bad_detectors, "bad_ped_detectors.pkl")
-                del bad_detectors
-                gc.collect()
-                
-                save_data(pau, "pa_uptime.pkl")
-                pau['CallPhase'] = pau['Detector']
-                
-                # Calculate uptime metrics
-                daily_pa_uptime = get_daily_avg(pau, "uptime", peak_only=False)
-                save_data(daily_pa_uptime, "daily_pa_uptime.pkl")
-                
-                weekly_pa_uptime = get_weekly_avg_by_day(pau, "uptime", peak_only=False)
-                save_data(weekly_pa_uptime, "weekly_pa_uptime.pkl")
-                
-                monthly_pa_uptime = get_monthly_avg_by_day(pau, "uptime", peak_only=False)
-                save_data(monthly_pa_uptime, "monthly_pa_uptime.pkl")
-                
-                # Corridor metrics
-                cor_daily_pa_uptime = get_cor_weekly_avg_by_day(
-                    daily_pa_uptime, config_data['corridors'], "uptime"
-                )
-                save_data(cor_daily_pa_uptime, "cor_daily_pa_uptime.pkl")
-                del daily_pa_uptime, cor_daily_pa_uptime
-                gc.collect()
-                
-                cor_weekly_pa_uptime = get_cor_weekly_avg_by_day(
-                    weekly_pa_uptime, config_data['corridors'], "uptime"
-                )
-                save_data(cor_weekly_pa_uptime, "cor_weekly_pa_uptime.pkl")
-                del weekly_pa_uptime, cor_weekly_pa_uptime
-                gc.collect()
-                
-                cor_monthly_pa_uptime = get_cor_monthly_avg_by_day(
-                    monthly_pa_uptime, config_data['corridors'], "uptime"
-                )
-                save_data(cor_monthly_pa_uptime, "cor_monthly_pa_uptime.pkl")
-                del monthly_pa_uptime, cor_monthly_pa_uptime
-                gc.collect()
-                
-                # Subcorridor metrics
-                daily_pa_uptime = load_data("daily_pa_uptime.pkl")
-                sub_daily_pa_uptime = get_cor_weekly_avg_by_day(
-                    daily_pa_uptime, config_data['subcorridors'], "uptime"
-                ).dropna(subset=['Corridor'])
-                save_data(sub_daily_pa_uptime, "sub_daily_pa_uptime.pkl")
-                del daily_pa_uptime, sub_daily_pa_uptime
-                gc.collect()
-                
-                weekly_pa_uptime = load_data("weekly_pa_uptime.pkl")
-                sub_weekly_pa_uptime = get_cor_weekly_avg_by_day(
-                    weekly_pa_uptime, config_data['subcorridors'], "uptime"
-                ).dropna(subset=['Corridor'])
-                save_data(sub_weekly_pa_uptime, "sub_weekly_pa_uptime.pkl")
-                del weekly_pa_uptime, sub_weekly_pa_uptime
-                gc.collect()
-                
-                monthly_pa_uptime = load_data("monthly_pa_uptime.pkl")
-                sub_monthly_pa_uptime = get_cor_monthly_avg_by_day(
-                    monthly_pa_uptime, config_data['subcorridors'], "uptime"
-                ).dropna(subset=['Corridor'])
-                save_data(sub_monthly_pa_uptime, "sub_monthly_pa_uptime.pkl")
-                del monthly_pa_uptime, sub_monthly_pa_uptime, pau
-                gc.collect()
-                
-                log_memory_usage("End ped pushbutton uptime")
-                logger.info("Pedestrian pushbutton uptime processing completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Error in pedestrian pushbutton uptime processing: {e}")
-        logger.error(traceback.format_exc())
-        gc.collect()
-
 def process_watchdog_alerts(dates, config_data):
     """Process watchdog alerts [3 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Watchdog alerts [3 of 29 (mark1)]")
@@ -1265,8 +1121,23 @@ def process_watchdog_alerts(dates, config_data):
             if det_config_list:
                 det_config = pd.concat(det_config_list, ignore_index=True)
                 det_config = clean_signal_ids(det_config)
-                det_config['CallPhase'] = det_config['CallPhase'].astype('category')
-                det_config['Detector'] = det_config['Detector'].astype('category')
+                
+                # Add 'Unknown' to categories BEFORE converting to categorical
+                if 'CallPhase' in det_config.columns:
+                    det_config['CallPhase'] = det_config['CallPhase'].astype(str)
+                    det_config['CallPhase'] = det_config['CallPhase'].fillna('Unknown')
+                    det_config['CallPhase'] = pd.Categorical(det_config['CallPhase'])
+                
+                if 'Detector' in det_config.columns:
+                    det_config['Detector'] = det_config['Detector'].astype(str)
+                    det_config['Detector'] = det_config['Detector'].fillna('Unknown')
+                    det_config['Detector'] = pd.Categorical(det_config['Detector'])
+                
+                # Ensure required columns exist in det_config
+                if 'LaneType' not in det_config.columns:
+                    det_config['LaneType'] = 'Unknown'
+                if 'MovementType' not in det_config.columns:
+                    det_config['MovementType'] = 'Unknown'
                 
                 bad_det = bad_det.merge(
                     det_config[['SignalID', 'Detector', 'Date', 'CallPhase', 'LaneType', 'MovementType']],
@@ -1275,25 +1146,39 @@ def process_watchdog_alerts(dates, config_data):
                 )
                 del det_config, det_config_list
                 gc.collect()
-            
-            for col in ['CallPhase', 'LaneType', 'MovementType']:
-                if col not in bad_det.columns:
-                    bad_det[col] = 'Unknown'
-            
-            bad_det = bad_det.merge(
-                config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
-                on='SignalID',
-                how='left'
-            ).dropna(subset=['Corridor'])
-            
-            bad_det = bad_det.assign(
-                Alert='Bad Vehicle Detection',
-                Name=lambda x: x['Name'].str.replace('@', '-', regex=False),
-                ApproachDesc=lambda x: x['LaneType'].fillna('Unknown').astype(str)
-            )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
-               'Date', 'Alert', 'Name', 'ApproachDesc']]
-            
-            save_data(bad_det, "watchdog_bad_detectors.pkl")
+                
+                # Handle categorical columns properly
+                for col in ['CallPhase', 'LaneType', 'MovementType']:
+                    if col not in bad_det.columns:
+                        bad_det[col] = 'Unknown'
+                    else:
+                        # Convert categorical to string, fill NaN, then back to categorical
+                        if bad_det[col].dtype.name == 'category':
+                            # Add 'Unknown' to categories first
+                            bad_det[col] = bad_det[col].cat.add_categories(['Unknown'])
+                            bad_det[col] = bad_det[col].fillna('Unknown')
+                        else:
+                            bad_det[col] = bad_det[col].fillna('Unknown')
+                
+                # FIX: Ensure SignalID data types match before merge
+                # Convert both SignalID columns to the same type (string)
+                bad_det['SignalID'] = bad_det['SignalID'].astype(str)
+                config_data['corridors']['SignalID'] = config_data['corridors']['SignalID'].astype(str)
+                
+                bad_det = bad_det.merge(
+                    config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
+                    on='SignalID',
+                    how='left'
+                ).dropna(subset=['Corridor'])
+                
+                bad_det = bad_det.assign(
+                    Alert='Bad Vehicle Detection',
+                    Name=lambda x: x['Name'].fillna('Unknown').str.replace('@', '-', regex=False),
+                    ApproachDesc=lambda x: x['LaneType'].fillna('Unknown').astype(str)
+                )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector',
+                   'Date', 'Alert', 'Name', 'ApproachDesc']]
+                
+                save_data(bad_det, "watchdog_bad_detectors.pkl")
             del bad_det
             gc.collect()
         
@@ -1308,13 +1193,29 @@ def process_watchdog_alerts(dates, config_data):
             
             if not bad_ped.empty:
                 bad_ped = clean_signal_ids(bad_ped)
-                bad_ped['Detector'] = bad_ped['Detector'].astype('category')
+                
+                # Handle categorical Detector column properly
+                if 'Detector' in bad_ped.columns:
+                    bad_ped['Detector'] = bad_ped['Detector'].astype(str)
+                    bad_ped['Detector'] = bad_ped['Detector'].fillna('Unknown')
+                    bad_ped['Detector'] = pd.Categorical(bad_ped['Detector'])
+                
+                # FIX: Ensure SignalID data types match before merge
+                bad_ped['SignalID'] = bad_ped['SignalID'].astype(str)
+                # config_data['corridors']['SignalID'] is already converted above
                 
                 bad_ped = bad_ped.merge(
                     config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
                     on='SignalID',
                     how='left'
-                )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'Detector', 'Date', 'Name']].assign(
+                ).dropna(subset=['Corridor'])
+                
+                if 'Name' not in bad_ped.columns:
+                    bad_ped['Name'] = 'Unknown'
+                else:
+                    bad_ped['Name'] = bad_ped['Name'].fillna('Unknown')
+                
+                bad_ped = bad_ped[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'Detector', 'Date', 'Name']].assign(
                     Alert='Bad Ped Detection'
                 )
                 
@@ -1336,12 +1237,16 @@ def process_watchdog_alerts(dates, config_data):
                     
                     cctv_data = s3read_using(
                         pd.read_parquet,
-                        bucket=conf.bucket, 
+                        bucket=conf.bucket,
                         object=key
                     )
                     
                     if not cctv_data.empty:
-                        bad_cameras = cctv_data[cctv_data.get('Size', 0) == 0]
+                        if 'Size' in cctv_data.columns:
+                            bad_cameras = cctv_data[cctv_data['Size'] == 0]
+                        else:
+                            bad_cameras = cctv_data.copy()
+                            
                         if not bad_cameras.empty:
                             bad_cam_list.append(bad_cameras)
                     del cctv_data
@@ -1358,33 +1263,43 @@ def process_watchdog_alerts(dates, config_data):
                 
                 # Merge with camera config if available
                 if 'cam_config' in config_data and not config_data['cam_config'].empty:
-                    bad_cam['CameraID'] = bad_cam['CameraID'].astype(str)
-                    config_data['cam_config']['CameraID'] = config_data['cam_config']['CameraID'].astype(str)
-                    
-                    bad_cam = bad_cam.merge(
-                        config_data['cam_config'], 
-                        on='CameraID', 
-                        how='left'
-                    )
-                    
-                    if 'As_of_Date' in bad_cam.columns and 'Date' in bad_cam.columns:
-                        bad_cam['As_of_Date'] = pd.to_datetime(bad_cam['As_of_Date'])
-                        bad_cam['Date'] = pd.to_datetime(bad_cam['Date'])
-                        bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
+                    if 'CameraID' in bad_cam.columns:
+                        bad_cam['CameraID'] = bad_cam['CameraID'].astype(str)
+                        if 'CameraID' in config_data['cam_config'].columns:
+                            config_data['cam_config']['CameraID'] = config_data['cam_config']['CameraID'].astype(str)
+                            
+                            bad_cam = bad_cam.merge(
+                                config_data['cam_config'],
+                                on='CameraID',
+                                how='left'
+                            )
+                            
+                            if 'As_of_Date' in bad_cam.columns and 'Date' in bad_cam.columns:
+                                bad_cam['As_of_Date'] = pd.to_datetime(bad_cam['As_of_Date'])
+                                bad_cam['Date'] = pd.to_datetime(bad_cam['Date'])
+                                bad_cam = bad_cam[bad_cam['Date'] > bad_cam['As_of_Date']]
                 
-                required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector', 
+                required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector',
                                'Date', 'Alert', 'Name']
                 
                 for col in required_cols:
                     if col not in bad_cam.columns:
                         if col == 'SignalID':
-                            bad_cam[col] = bad_cam.get('CameraID', 'Unknown')
+                            if 'CameraID' in bad_cam.columns:
+                                bad_cam[col] = bad_cam['CameraID'].fillna('Unknown')
+                            else:
+                                bad_cam[col] = 'Unknown'
                         elif col in ['CallPhase', 'Detector']:
                             bad_cam[col] = 0
                         elif col == 'Alert':
                             bad_cam[col] = 'No Camera Image'
                         elif col == 'Name':
-                            bad_cam[col] = bad_cam.get('Location', bad_cam.get('CameraID', 'Unknown'))
+                            if 'Location' in bad_cam.columns:
+                                bad_cam[col] = bad_cam['Location'].fillna('Unknown')
+                            elif 'CameraID' in bad_cam.columns:
+                                bad_cam[col] = bad_cam['CameraID'].fillna('Unknown')
+                            else:
+                                bad_cam[col] = 'Unknown'
                         else:
                             bad_cam[col] = 'Unknown'
                 
@@ -3490,8 +3405,8 @@ def main():
         # Process each section sequentially with memory optimization
         processing_functions = [
             # (process_detector_uptime, "Vehicle Detector Uptime"),
-            (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
-            # (process_watchdog_alerts, "Watchdog Alerts"),
+            # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
+            (process_watchdog_alerts, "Watchdog Alerts"),
             # (process_daily_ped_activations, "Daily Pedestrian Activations"),
             # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
             # (process_pedestrian_delay, "Pedestrian Delay"),
