@@ -2291,11 +2291,17 @@ def process_travel_time_indexes(dates, config_data):
             log_memory_usage("After reading corridor travel time data")
             
             tt['Corridor'] = tt['Corridor'].astype('category')
-            tt = tt.merge(
-                config_data['all_corridors'][['Zone_Group', 'Zone', 'Corridor']].drop_duplicates(),
-                on='Corridor',
-                how='left'
-            ).dropna(subset=['Zone_Group'])
+            
+            # Clean merge to avoid duplicate columns
+            corridor_mapping = config_data['all_corridors'][['Zone_Group', 'Zone', 'Corridor']].drop_duplicates()
+            tt = tt.merge(corridor_mapping, on='Corridor', how='left', suffixes=('', '_dup'))
+            
+            # Drop any duplicate columns that might have been created
+            duplicate_cols = [col for col in tt.columns if col.endswith('_dup')]
+            if duplicate_cols:
+                tt = tt.drop(columns=duplicate_cols)
+                
+            tt = tt.dropna(subset=['Zone_Group'])
             
             # Split into separate metrics
             tti = tt[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'tti']].copy()
@@ -2308,12 +2314,17 @@ def process_travel_time_indexes(dates, config_data):
             # Load corridor monthly VPH for weighting
             cor_monthly_vph = load_data("cor_monthly_vph.pkl")
             if not cor_monthly_vph.empty:
-                cor_monthly_vph = cor_monthly_vph.rename(columns={'Zone_Group': 'Zone'})
-                cor_monthly_vph = cor_monthly_vph.merge(
-                    config_data['corridors'][['Zone_Group', 'Zone']].drop_duplicates(),
-                    on='Zone',
-                    how='left'
-                )
+                # Ensure consistent column naming
+                if 'Zone_Group' in cor_monthly_vph.columns and 'Zone' in cor_monthly_vph.columns:
+                    cor_monthly_vph = cor_monthly_vph.rename(columns={'Zone_Group': 'Zone_Group_orig'})
+                
+                zone_mapping = config_data['corridors'][['Zone_Group', 'Zone']].drop_duplicates()
+                cor_monthly_vph = cor_monthly_vph.merge(zone_mapping, on='Zone', how='left', suffixes=('', '_dup'))
+                
+                # Drop duplicate columns
+                duplicate_cols = [col for col in cor_monthly_vph.columns if col.endswith('_dup')]
+                if duplicate_cols:
+                    cor_monthly_vph = cor_monthly_vph.drop(columns=duplicate_cols)
                 
                 # Calculate corridor metrics
                 cor_monthly_tti_by_hr = get_cor_monthly_ti_by_hr(tti, cor_monthly_vph, config_data['all_corridors'])
@@ -2370,13 +2381,32 @@ def process_travel_time_indexes(dates, config_data):
             tt_sub['Corridor'] = tt_sub['Corridor'].astype('category')
             tt_sub['Subcorridor'] = tt_sub['Subcorridor'].astype('category')
             
-            # Rename for consistency
-            tt_sub = tt_sub.rename(columns={'Corridor': 'Zone', 'Subcorridor': 'Corridor'})
-            tt_sub = tt_sub.merge(
-                config_data['subcorridors'][['Zone_Group', 'Zone']].drop_duplicates(),
-                on='Zone',
-                how='left'
-            )
+            # Clean column renaming to avoid conflicts
+            # First, check what columns exist
+            original_cols = tt_sub.columns.tolist()
+            logger.info(f"Original subcorridor columns: {original_cols}")
+            
+            # Rename for consistency - be more explicit about the mapping
+            rename_mapping = {}
+            if 'Corridor' in tt_sub.columns:
+                rename_mapping['Corridor'] = 'Zone_temp'
+            if 'Subcorridor' in tt_sub.columns:
+                rename_mapping['Subcorridor'] = 'Corridor'
+                
+            tt_sub = tt_sub.rename(columns=rename_mapping)
+            
+            # Now rename Zone_temp to Zone
+            if 'Zone_temp' in tt_sub.columns:
+                tt_sub = tt_sub.rename(columns={'Zone_temp': 'Zone'})
+            
+            # Clean merge with subcorridors mapping
+            subcorridor_mapping = config_data['subcorridors'][['Zone_Group', 'Zone']].drop_duplicates()
+            tt_sub = tt_sub.merge(subcorridor_mapping, on='Zone', how='left', suffixes=('', '_dup'))
+            
+            # Drop any duplicate columns
+            duplicate_cols = [col for col in tt_sub.columns if col.endswith('_dup')]
+            if duplicate_cols:
+                tt_sub = tt_sub.drop(columns=duplicate_cols)
             
             # Split into separate metrics
             tti_sub = tt_sub[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'tti']].copy()
@@ -2389,12 +2419,17 @@ def process_travel_time_indexes(dates, config_data):
             # Load subcorridor monthly VPH for weighting
             sub_monthly_vph = load_data("sub_monthly_vph.pkl")
             if not sub_monthly_vph.empty:
-                sub_monthly_vph = sub_monthly_vph.rename(columns={'Zone_Group': 'Zone'})
-                sub_monthly_vph = sub_monthly_vph.merge(
-                    config_data['subcorridors'][['Zone_Group', 'Zone']].drop_duplicates(),
-                    on='Zone',
-                    how='left'
-                )
+                # Ensure consistent column naming for subcorridors
+                if 'Zone_Group' in sub_monthly_vph.columns and 'Zone' in sub_monthly_vph.columns:
+                    sub_monthly_vph = sub_monthly_vph.rename(columns={'Zone_Group': 'Zone_Group_orig'})
+                
+                subcorridor_zone_mapping = config_data['subcorridors'][['Zone_Group', 'Zone']].drop_duplicates()
+                sub_monthly_vph = sub_monthly_vph.merge(subcorridor_zone_mapping, on='Zone', how='left', suffixes=('', '_dup'))
+                
+                # Drop duplicate columns
+                duplicate_cols = [col for col in sub_monthly_vph.columns if col.endswith('_dup')]
+                if duplicate_cols:
+                    sub_monthly_vph = sub_monthly_vph.drop(columns=duplicate_cols)
                 
                 # Calculate subcorridor metrics
                 sub_monthly_tti_by_hr = get_cor_monthly_ti_by_hr(tti_sub, sub_monthly_vph, config_data['subcorridors'])
@@ -3406,13 +3441,13 @@ def main():
         processing_functions = [
             # (process_detector_uptime, "Vehicle Detector Uptime"),
             # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
-            (process_watchdog_alerts, "Watchdog Alerts"),
+            # (process_watchdog_alerts, "Watchdog Alerts"),
             # (process_daily_ped_activations, "Daily Pedestrian Activations"),
             # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
             # (process_pedestrian_delay, "Pedestrian Delay"),
             # (process_communications_uptime, "Communications Uptime"),
             # (process_daily_volumes, "Daily Volumes"),
-            # (process_hourly_volumes, "Hourly Volumes"),
+            (process_hourly_volumes, "Hourly Volumes"),
             # (process_daily_throughput, "Daily Throughput"),
             # (process_arrivals_on_green, "Arrivals on Green"),
             # (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
@@ -3422,7 +3457,7 @@ def main():
             # (process_hourly_split_failures, "Hourly Split Failures"),
             # (process_daily_queue_spillback, "Daily Queue Spillback"),
             # (process_hourly_queue_spillback, "Hourly Queue Spillback"),
-            # (process_travel_time_indexes, "Travel Time Indexes"),
+            (process_travel_time_indexes, "Travel Time Indexes"),
             # (process_cctv_uptime, "CCTV Uptime"),
             # (process_teams_activities, "TEAMS Activities"),
             # (process_user_delay_costs, "User Delay Costs"),
