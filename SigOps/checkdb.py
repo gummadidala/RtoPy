@@ -12,6 +12,9 @@ import logging
 from typing import List, Optional
 import shutil
 
+# Add parent directory to Python path to access utilities.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Import your existing utilities
 from utilities import get_usable_cores, retry_on_failure, create_progress_tracker
 from SigOps.database_functions import get_aurora_connection  # Assuming you have this function
@@ -95,7 +98,8 @@ def check_database_tables(conf: dict, max_workers: Optional[int] = None):
         generate_summary_files(sigops_data, conf)
         
     finally:
-        conn.close()
+        pass
+    #     conn.close()
 
 @retry_on_failure(max_retries=3, delay=1.0)
 def process_single_table(table: str, dt_fields: List[str], conf: dict):
@@ -339,7 +343,7 @@ def main():
     # Load configuration (implement based on your config structure)
     try:
         import yaml
-        with open('config.yaml', 'r') as f:
+        with open('Monthly_Report.yaml', 'r') as f:
             conf = yaml.safe_load(f)
     except FileNotFoundError:
         logger.error("Configuration file not found")
