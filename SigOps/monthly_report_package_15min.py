@@ -18,14 +18,21 @@ from multiprocessing import Pool, cpu_count
 import boto3
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import warnings
+from pathlib import Path
+import yaml, re
+import traceback
+
+# Add the parent directory to the path to import local modules
+sys.path.append(str(Path(__file__).parent.parent))
 
 # Import local modules
 # from monthly_report_package_init import *
-from monthly_report_functions import sigify
+from SigOps.aggregations import sigify
 # from database_functions import *
 # from utilities import *
 # from aggregations import *
 from configs import get_corridors
+from s3_parquet_io import s3_read_parquet_parallel
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -33,65 +40,6 @@ logger = logging.getLogger(__name__)
 def get_usable_cores():
     """Get number of usable CPU cores"""
     return max(1, cpu_count() - 1)
-
-def s3_read_parquet_parallel(bucket, table_name, start_date, end_date, signals_list, parallel=True, callback=None):
-    """
-    Read parquet files from S3 in parallel
-    
-    Args:
-        bucket: S3 bucket name
-        table_name: Table name pattern
-        start_date: Start date
-        end_date: End date
-        signals_list: List of signal IDs
-        parallel: Whether to use parallel processing
-        callback: Optional callback function to apply to data
-    
-    Returns:
-        Combined DataFrame
-    """
-    try:
-        # Implementation would depend on your S3 structure
-        # This is a placeholder for the actual implementation
-        s3_client = boto3.client('s3')
-        
-        # Get list of files to read
-        prefix = f"{table_name}/date="
-        response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
-        
-        files_to_read = []
-        current_date = pd.to_datetime(start_date)
-        end_dt = pd.to_datetime(end_date)
-        
-        while current_date <= end_dt:
-            date_str = current_date.strftime('%Y-%m-%d')
-            key = f"{table_name}/date={date_str}/{table_name}_{date_str}.parquet"
-            files_to_read.append(key)
-            current_date += timedelta(days=1)
-        
-        # Read files (implementation depends on your parquet structure)
-        dataframes = []
-        for key in files_to_read:
-            try:
-                df = pd.read_parquet(f"s3://{bucket}/{key}")
-                if callback:
-                    df = callback(df)
-                dataframes.append(df)
-            except Exception as e:
-                logger.warning(f"Could not read {key}: {e}")
-                continue
-        
-        if dataframes:
-            combined_df = pd.concat(dataframes, ignore_index=True)
-            if signals_list:
-                combined_df = combined_df[combined_df['SignalID'].isin(signals_list)]
-            return combined_df
-        else:
-            return pd.DataFrame()
-            
-    except Exception as e:
-        logger.error(f"Error reading parquet files: {e}")
-        return pd.DataFrame()
 
 def get_period_sum(df, value_col, period_col):
     """Get sum by period"""
@@ -156,6 +104,89 @@ def addtoRDS(df, filename, value_col, rds_start_date, calcs_start_date):
     except Exception as e:
         logger.error(f"Error saving to {filename}: {e}")
 
+def parse_relative_date(date_string):
+    """
+    Parse relative date strings like 'yesterday', '2 days ago', etc.
+    
+    Args:
+        date_string: String representation of a date (could be relative or absolute)
+    
+    Returns:
+        datetime object
+    """
+    if isinstance(date_string, (datetime, date)):
+        return date_string
+    
+    if not isinstance(date_string, str):
+        return datetime.now()
+    
+    date_string = date_string.strip().lower()
+    now = datetime.now()
+    
+    # Handle relative date strings
+    if date_string == 'today':
+        return now.date()
+    elif date_string == 'yesterday':
+        return (now - timedelta(days=1)).date()
+    elif date_string == 'tomorrow':
+        return (now + timedelta(days=1)).date()
+    elif 'ago' in date_string:
+        # Parse patterns like "2 days ago", "1 week ago", "3 months ago"
+        match = re.match(r'(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+ago', date_string)
+        if match:
+            number = int(match.group(1))
+            unit = match.group(2)
+            
+            if unit.startswith('day'):
+                return (now - timedelta(days=number)).date()
+            elif unit.startswith('week'):
+                return (now - timedelta(weeks=number)).date()
+            elif unit.startswith('month'):
+                return (now - relativedelta(months=number)).date()
+            elif unit.startswith('year'):
+                return (now - relativedelta(years=number)).date()
+    elif 'from now' in date_string or 'later' in date_string:
+        # Parse patterns like "2 days from now", "1 week later"
+        match = re.match(r'(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+(from now|later)', date_string)
+        if match:
+            number = int(match.group(1))
+            unit = match.group(2)
+            
+            if unit.startswith('day'):
+                return (now + timedelta(days=number)).date()
+            elif unit.startswith('week'):
+                return (now + timedelta(weeks=number)).date()
+            elif unit.startswith('month'):
+                return (now + relativedelta(months=number)).date()
+            elif unit.startswith('year'):
+                return (now + relativedelta(years=number)).date()
+    
+    # If not a relative date, try to parse as regular date
+    try:
+        parsed_date = pd.to_datetime(date_string)
+        return parsed_date.date() if hasattr(parsed_date, 'date') else parsed_date
+    except Exception as e:
+        logger.warning(f"Could not parse date string '{date_string}': {e}. Using current date.")
+        return now.date()
+
+def normalize_time_column(df, column):
+    if column in df.columns:
+        df[column] = pd.to_datetime(df[column]).dt.tz_localize(None)
+    return df
+
+def make_hashable(df, columns):
+    """
+    Ensure specified columns in a DataFrame are hashable (no lists, sets, etc.).
+    Converts lists to tuples, leaves scalars as is.
+    """
+    for col in columns:
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: tuple(x) if isinstance(x, list) else x
+            )
+    return df
+
+
 def main():
     """Main function for 15-min package processing"""
     
@@ -171,10 +202,15 @@ def main():
         conf['start_date'], table_include_regex_pattern="sig_qhr_", exceptions=0
     )
     
-    report_end_date = min(
-        pd.to_datetime(conf['report_end_date']), 
-        pd.to_datetime(calcs_start_date) + timedelta(days=4)
-    )
+    report_end_date_str = conf.get('report_end_date', datetime.now())
+    report_end_date = parse_relative_date(report_end_date_str)
+    
+    # Ensure report_end_date is a date object
+    if isinstance(report_end_date, datetime):
+        report_end_date = report_end_date.date()
+    
+    # Limit report end date
+    report_end_date = min(report_end_date, calcs_start_date + timedelta(days=7))
     
     print(f"{datetime.now()} 15min Package Start Date: {calcs_start_date}")
     print(f"{datetime.now()} Report End Date: {report_end_date}")
@@ -245,11 +281,22 @@ def main():
             all_timeperiods = pd.date_range(min_time, max_time, freq='15min')
             
             # Expand to include all timeperiods
-            signal_detector_combos = paph[['SignalID', 'Detector', 'CallPhase']].drop_duplicates()
+            # Ensure columns are hashable (convert lists to strings)
+            for col in ['SignalID', 'Detector', 'CallPhase']:
+                if col in paph.columns:
+                    paph[col] = paph[col].apply(lambda x: str(x) if isinstance(x, list) else x)
+
+            signal_detector_combos = (
+                paph[['SignalID', 'Detector', 'CallPhase']]
+                .drop_duplicates()
+                .apply(tuple, axis=1)  # convert each row into a tuple
+            )
+
             expanded = pd.MultiIndex.from_product([
-                signal_detector_combos.values.tolist(),
+                signal_detector_combos,
                 all_timeperiods
             ], names=['combo', 'Timeperiod']).to_frame(index=False)
+
             
             expanded[['SignalID', 'Detector', 'CallPhase']] = pd.DataFrame(
                 expanded['combo'].tolist(), index=expanded.index
@@ -258,11 +305,16 @@ def main():
             
             paph = expanded.merge(paph, on=['SignalID', 'Detector', 'CallPhase', 'Timeperiod'], how='left')
             paph['vol'] = paph['vol'].fillna(0)
-            
             pa_15min = get_period_sum(paph, "vol", "Timeperiod")
             cor_15min_pa = get_cor_monthly_avg_by_period(pa_15min, corridors, "vol", "Timeperiod")
-            
             pa_15min = sigify(pa_15min, cor_15min_pa, corridors)
+            # Ensure period column exists
+            if 'Timeperiod' not in pa_15min.columns:
+                pa_15min['Timeperiod'] = pd.NaT
+
+            # Ensure delta column exists
+            if 'delta' not in pa_15min.columns:
+                pa_15min['delta'] = 0
             pa_15min = pa_15min[['Zone_Group', 'Corridor', 'Timeperiod', 'vol', 'delta']]
             
             addtoRDS(pa_15min, "pa_15min.pkl", "vol", rds_start_date, calcs_start_date)
@@ -272,7 +324,7 @@ def main():
             
     except Exception as e:
         print("ENCOUNTERED AN ERROR:")
-        print(e)
+        print(e, traceback.format_exc())
     
     # GET PEDESTRIAN DELAY
     print(f"{datetime.now()} Pedestrian Delay [6 of 29 (sigops 15min)]")
@@ -305,6 +357,14 @@ def main():
             cor_15min_vol = get_cor_monthly_avg_by_period(vol_15min, corridors, "vol", "Timeperiod")
             
             vol_15min = sigify(vol_15min, cor_15min_vol, corridors)
+            # Ensure period column exists
+            if 'Timeperiod' not in vol_15min.columns:
+                vol_15min['Timeperiod'] = pd.NaT
+
+            # Ensure delta column exists
+            if 'delta' not in vol_15min.columns:
+                vol_15min['delta'] = 0
+
             vol_15min = vol_15min[['Zone_Group', 'Corridor', 'Timeperiod', 'vol', 'delta']]
             
             addtoRDS(vol_15min, "vol_15min.pkl", "vol", rds_start_date, calcs_start_date)
@@ -353,24 +413,43 @@ def main():
                 freq='15min'
             )
             
-            # Complete the data (equivalent to R's complete function)
-            signal_date_combos = aog[['SignalID', 'Date']].drop_duplicates()
+            # Ensure hashable values
+            for col in ['SignalID', 'Date']:
+                if col in aog.columns:
+                    aog[col] = aog[col].apply(lambda x: str(x) if isinstance(x, list) else x)
+
+            signal_date_combos = (
+                aog[['SignalID', 'Date']]
+                .drop_duplicates()
+                .apply(tuple, axis=1)  # Convert each row to a tuple
+            )
+
             expanded_aog = pd.MultiIndex.from_product([
-                signal_date_combos.values.tolist(),
+                signal_date_combos,
                 timeperiod_range
             ], names=['combo', 'Timeperiod']).to_frame(index=False)
-            
+
+            # Split tuple back into separate columns
             expanded_aog[['SignalID', 'Date']] = pd.DataFrame(
                 expanded_aog['combo'].tolist(), index=expanded_aog.index
             )
             expanded_aog = expanded_aog.drop('combo', axis=1)
-            
+            expanded_aog = normalize_time_column(expanded_aog, 'Timeperiod')
+            aog = normalize_time_column(aog, 'Timeperiod')
             aog = expanded_aog.merge(aog, on=['SignalID', 'Date', 'Timeperiod'], how='left')
             
             aog_15min = get_period_avg(aog, "aog", "Timeperiod", "vol")
             cor_15min_aog = get_cor_monthly_avg_by_period(aog_15min, corridors, "aog", "Timeperiod")
             
             aog_15min = sigify(aog_15min, cor_15min_aog, corridors)
+            # Ensure period column exists
+            if 'Timeperiod' not in aog_15min.columns:
+                aog_15min['Timeperiod'] = pd.NaT
+
+            # Ensure delta column exists
+            if 'delta' not in aog_15min.columns:
+                aog_15min['delta'] = 0
+
             aog_15min = aog_15min[['Zone_Group', 'Corridor', 'Timeperiod', 'aog', 'delta']]
             
             addtoRDS(aog_15min, "aog_15min.pkl", "aog", rds_start_date, calcs_start_date)
@@ -380,7 +459,7 @@ def main():
             
     except Exception as e:
         print("ENCOUNTERED AN ERROR:")
-        print(e)
+        print(e, traceback.format_exc())
     
     # DAILY PROGRESSION RATIO
     print(f"{datetime.now()} Daily Progression Ratio [13 of 29 (sigops 15min)]")
@@ -399,16 +478,25 @@ def main():
             )
             
             # Complete the data for PR
-            signal_date_combos = aog[['SignalID', 'Date']].drop_duplicates()
+            # Ensure hashable values
+            aog = make_hashable(aog, ['SignalID', 'Date'])
+
+            signal_date_combos = (
+                aog[['SignalID', 'Date']]
+                .drop_duplicates()
+                .apply(tuple, axis=1)  # each row is now a tuple
+            )
+
             expanded_pr = pd.MultiIndex.from_product([
-                signal_date_combos.values.tolist(),
+                signal_date_combos,
                 timeperiod_range
             ], names=['combo', 'Timeperiod']).to_frame(index=False)
-            
+
             expanded_pr[['SignalID', 'Date']] = pd.DataFrame(
                 expanded_pr['combo'].tolist(), index=expanded_pr.index
             )
             expanded_pr = expanded_pr.drop('combo', axis=1)
+
             
             aog_for_pr = expanded_pr.merge(aog, on=['SignalID', 'Date', 'Timeperiod'], how='left')
             
@@ -416,6 +504,13 @@ def main():
             cor_15min_pr = get_cor_monthly_avg_by_period(pr_15min, corridors, "pr", "Timeperiod")
             
             pr_15min = sigify(pr_15min, cor_15min_pr, corridors)
+            # Ensure period column exists
+            if 'Timeperiod' not in pr_15min.columns:
+                pr_15min['Timeperiod'] = pd.NaT
+
+            # Ensure delta column exists
+            if 'delta' not in pr_15min.columns:
+                pr_15min['delta'] = 0
             pr_15min = pr_15min[['Zone_Group', 'Corridor', 'Timeperiod', 'pr', 'delta']]
             
             addtoRDS(pr_15min, "pr_15min.pkl", "pr", rds_start_date, calcs_start_date)
@@ -425,7 +520,7 @@ def main():
             
     except Exception as e:
         print("ENCOUNTERED AN ERROR:")
-        print(e)
+        print(e, traceback.format_exc())
     
     # DAILY SPLIT FAILURES
     print(f"{datetime.now()} Daily Split Failures [15 of 29 (sigops 15min)]")
@@ -658,41 +753,39 @@ def main():
         logger.error(f"Error uploading to AWS: {e}")
     
     # Write to Database
-    print(f"{datetime.now()} Write to Database [29 of 29 (sigops 15min)]")
+    # print(f"{datetime.now()} Write to Database [29 of 29 (sigops 15min)]")
     
-    try:
-        from write_sigops_to_db import append_to_database
-        from database_functions import get_aurora_connection
+    # try:
+    #     from write_sigops_to_db import append_to_database
+    #     from database_functions import get_aurora_connection
         
-        # Update Aurora Nightly
-        aurora_conn = keep_trying(func=get_aurora_connection, n_tries=5)
+    #     # Update Aurora Nightly
+    #     aurora_conn = keep_trying(func=get_aurora_connection, n_tries=5)
         
-        try:
-            append_to_database(
-                aurora_conn, 
-                sig, 
-                "sig", 
-                calcs_start_date, 
-                report_start_date=report_start_date, 
-                report_end_date=None
-            )
-            logger.info("Successfully wrote data to Aurora database")
+    #     try:
+    #         append_to_database(
+    #             aurora_conn, 
+    #             sig, 
+    #             "sig", 
+    #             calcs_start_date, 
+    #             report_start_date=report_start_date, 
+    #             report_end_date=None
+    #         )
+    #         logger.info("Successfully wrote data to Aurora database")
             
-        except Exception as e:
-            logger.error(f"Error writing to database: {e}")
+    #     except Exception as e:
+    #         logger.error(f"Error writing to database: {e}")
             
-        finally:
-            if aurora_conn:
-                aurora_conn.close()
-                logger.info("Closed Aurora database connection")
+    #     finally:
+    #         if aurora_conn:
+    #             logger.info("Closed Aurora database connection")
         
-    except Exception as e:
-        print("ENCOUNTERED AN ERROR:")
-        print(e)
-        logger.error(f"Error in database operations: {e}")
+    # except Exception as e:
+    #     print("ENCOUNTERED AN ERROR:")
+    #     print(e)
+    #     logger.error(f"Error in database operations: {e}")
     
     print(f"{datetime.now()} Completed 15min Package Processing")
-
 
 def keep_trying(func, n_tries=3, **kwargs):
     """
@@ -715,42 +808,44 @@ def keep_trying(func, n_tries=3, **kwargs):
                 raise
             time.sleep(2 ** attempt)  # Exponential backoff
 
-
 def load_config():
-    """Load configuration settings"""
-    # This should load your configuration
-    # Implementation depends on your config structure
-    return {
-        'bucket': 'your-s3-bucket',
-        'start_date': 'auto',
-        'report_end_date': 'yesterday',
-        'corridors_filename_s3': 'corridors.csv',
-        'athena': {
-            'database': 'your_database',
-            'region': 'us-east-1'
-        }
-    }
+    """Load configuration from YAML file"""
+    try:
+        # Source equivalent: Monthly_Report_Package_init.R
+        config_path = "Monthly_Report.yaml"
+        with open(config_path, 'r') as file:
+            conf = yaml.safe_load(file)
+        return conf
+    except Exception as e:
+        logger.error(f"Error loading configuration: {e}")
+        raise
 
-def get_date_from_string(date_string, table_include_regex_pattern=None, exceptions=0):
+def get_date_from_string(date_string: str, table_include_regex_pattern: str = "", 
+                        exceptions: int = 0) -> date:
     """
-    Get date from string with various formats
+    Get date from string with table pattern matching.
+    Supports relative strings like '2 days ago', 'yesterday', etc.
     
     Args:
         date_string: Date string to parse
-        table_include_regex_pattern: Pattern for table matching
-        exceptions: Number of exceptions to handle
+        table_include_regex_pattern: Regex pattern for table inclusion
+        exceptions: Number of exceptions to allow
     
     Returns:
-        Parsed date
+        Date object
     """
-    if date_string == 'auto':
-        # Return a reasonable default date
-        return datetime.now().date() - timedelta(days=7)
-    elif date_string == 'yesterday':
-        return datetime.now().date() - timedelta(days=1)
-    else:
-        return pd.to_datetime(date_string).date()
+    try:
+        if date_string and date_string.lower() != 'auto':
+            # Use our custom relative-date parser
+            parsed = parse_relative_date(date_string)
+            return parsed if isinstance(parsed, date) else parsed.date()
+        
+        # Auto mode (fallback) → default to 7 days ago
+        return date.today() - timedelta(days=7)
 
+    except Exception as e:
+        logger.error(f"Error parsing date from string '{date_string}': {e}")
+        return date.today() - timedelta(days=7)
 
 if __name__ == "__main__":
     # Setup logging
