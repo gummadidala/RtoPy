@@ -974,7 +974,7 @@ def sigify(signal_df: pd.DataFrame,
             result[col] = result[col].astype('category')
 
     # Sort
-    if period_col:
+    if period_col and period_col in result.columns:
         result = result.sort_values(['Zone_Group', 'Corridor', period_col])
 
     return result
