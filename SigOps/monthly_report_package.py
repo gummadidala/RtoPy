@@ -31,29 +31,29 @@ import boto3
 import yaml
 from pathlib import Path
 
+# Add the parent directory to the path to import local modules
+sys.path.append(str(Path(__file__).parent.parent))
+
 # Import from existing RtoPy modules
 from utilities import (
     create_progress_tracker, 
     retry_on_failure, 
     batch_process,
-    resample_timeseries,
-    parallel_process_with_progress,
-    validate_dataframe,
+    # resample_timeseries,
+    # validate_dataframe_scheme,
     format_duration,
     get_memory_usage
 )
 from aggregations import (
-    get_quarterly, 
-    detect_anomalies, 
     sigify,
     get_monthly_avg_by_day,
     get_weekly_avg_by_day,
     get_daily_avg,
     get_vph
 )
-from config import get_date_from_string
-from s3_parquet_io import read_parquet_from_s3, write_parquet_to_s3
-from database_functions import get_det_config, execute_athena_query
+# from config import get_date_from_string
+# from s3_parquet_io import read_parquet_from_s3, write_parquet_to_s3
+from SigOps.configs import get_det_config_, get_corridors, get_cam_config
 from monthly_report_functions import parallel_process_dates
 from parquet_lib import read_parquet_file
 
@@ -67,29 +67,18 @@ logger = logging.getLogger(__name__)
 class MonthlyReportProcessor:
     """Main class for processing monthly traffic signal reports"""
     
-    def __init__(self, config_path: str = None):
+    def __init__(self, config):
         """Initialize the processor with configuration"""
-        self.config = self._load_config(config_path)
+        self.config = config
         self.s3_client = boto3.client('s3')
         self.athena_client = boto3.client('athena')
+        self.start_time = None
         
         # Date configurations
         self.setup_dates()
         
         # Load signal configurations
         self.load_signal_configs()
-        
-    def _load_config(self, config_path: str) -> Dict:
-        """Load configuration from YAML file"""
-        if config_path is None:
-            config_path = "config.yaml"
-            
-        try:
-            with open(config_path, 'r') as f:
-                return yaml.safe_load(f)
-        except FileNotFoundError:
-            logger.error(f"Config file {config_path} not found")
-            raise
             
     def setup_dates(self):
         """Setup date ranges for calculations"""
@@ -115,8 +104,8 @@ class MonthlyReportProcessor:
         """Load corridor configuration"""
         # Implement based on your data source
         try:
-            # This could be from S3, database, or local file
-            return read_parquet_from_s3(self.config['bucket'], 'config/corridors.parquet')
+            corridors = get_corridors(self.config['corridors_filename_s3'], filter_signals=True)
+            return corridors
         except Exception as e:
             logger.warning(f"Could not load corridors config: {e}")
             return pd.DataFrame()
@@ -124,7 +113,20 @@ class MonthlyReportProcessor:
     def _load_subcorridors(self) -> pd.DataFrame:
         """Load subcorridor configuration"""
         try:
-            return read_parquet_from_s3(self.config['bucket'], 'config/subcorridors.parquet')
+            if 'Subcorridor' not in self.corridors.columns:
+                logger.warning("No Subcorridor column found")
+                return pd.DataFrame()
+            
+            subcorridors = self.corridors[self.corridors['Subcorridor'].notna()].copy()
+            subcorridors = subcorridors.drop(columns=['Zone_Group'])
+            subcorridors = subcorridors.rename(columns={
+                'Zone': 'Zone_Group',
+                'Corridor': 'Zone', 
+                'Subcorridor': 'Corridor'
+            })
+            
+            logger.info(f"Setup {len(subcorridors)} subcorridor mappings")
+            return subcorridors
         except Exception as e:
             logger.warning(f"Could not load subcorridors config: {e}")
             return pd.DataFrame()
@@ -132,8 +134,8 @@ class MonthlyReportProcessor:
     def _load_signals_list(self) -> List[str]:
         """Load list of signal IDs to process"""
         try:
-            df = read_parquet_from_s3(self.config['bucket'], 'config/signals_list.parquet')
-            return df['SignalID'].tolist() if 'SignalID' in df.columns else []
+            signals_list = self.corridors['SignalID'].unique().tolist()
+            return signals_list
         except Exception as e:
             logger.warning(f"Could not load signals list: {e}")
             return []
@@ -141,7 +143,11 @@ class MonthlyReportProcessor:
     def _load_camera_config(self) -> pd.DataFrame:
         """Load camera configuration"""
         try:
-            return read_parquet_from_s3(self.config['bucket'], 'config/camera_config.parquet')
+            return get_cam_config(
+                    object_key=self.config['cctv_config_filename'],
+                    bucket=self.config['bucket'],
+                    corridors=self.corridors
+                )
         except Exception as e:
             logger.warning(f"Could not load camera config: {e}")
             return pd.DataFrame()
@@ -177,7 +183,7 @@ class MonthlyReportProcessor:
                     df = read_parquet_file(bucket, key)
                     
                     # Validate DataFrame
-                    if not validate_dataframe(df, required_columns=['SignalID']):
+                    if not validate_dataframe_scheme(df, required_columns=['SignalID']):
                         return pd.DataFrame()
                     
                     # Filter by signals if provided
@@ -218,23 +224,28 @@ class MonthlyReportProcessor:
             logger.error(f"Error in s3_read_parquet_parallel: {e}")
             raise
 
-    def run_travel_times(self):
+    def process_travel_times(self):
         """Execute travel times calculations asynchronously"""
         logger.info("travel times [0 of 29 (sigops)]")
+
+        python_env = "C:\\Users\\kogum\\Desktop\\JobSupport\\achyuth\\server-env\\Scripts\\python.exe"
         
         if self.config.get('run', {}).get('travel_times', True):
             try:
                 # Run python scripts asynchronously
                 subprocess.Popen([
-                    "~/miniconda3/bin/conda", "run", "-n", "sigops", "python", 
-                    "../get_travel_times_v2.py", "sigops", "../travel_times_1hr.yaml"
+                    python_env,
+                    "../get_travel_times_v2.py",
+                    "sigops",
+                    "../travel_times_1hr.yaml"
                 ])
+
                 subprocess.Popen([
-                    "~/miniconda3/bin/conda", "run", "-n", "sigops", "python",
+                    python_env,
                     "../get_travel_times_v2.py", "sigops", "../travel_times_15min.yaml"  
                 ])
                 subprocess.Popen([
-                    "~/miniconda3/bin/conda", "run", "-n", "sigops", "python",
+                    python_env,
                     "../get_travel_times_1min_v2.py", "sigops"
                 ])
                 logger.info("Started travel times processing in background")
@@ -307,7 +318,7 @@ class MonthlyReportProcessor:
             logger.error(f"Error in detector uptime processing: {e}")
             logger.error(traceback.format_exc())
 
-    def process_ped_pushbutton_uptime(self):
+    def process_pedestrian_uptime(self):
         """Process pedestrian pushbutton uptime [2 of 29]"""
         logger.info("Ped Pushbutton Uptime [2 of 29 (sigops)]")
         
@@ -447,6 +458,7 @@ class MonthlyReportProcessor:
                 
                 def get_det_config_for_date(date_str):
                     try:
+                        get_det_config = get_det_config_(self.config.get('bucket'), 'atspm_det_config_good')
                         config = get_det_config(date_str)
                         return config[['SignalID', 'CallPhase', 'Detector', 'ApproachDesc', 'LaneNumber']].assign(Date=date_str)
                     except:
@@ -589,7 +601,7 @@ class MonthlyReportProcessor:
             logger.error(f"Error in watchdog alerts processing: {e}")
             logger.error(traceback.format_exc())
 
-    def process_daily_ped_activations(self):
+    def process_daily_pedestrian_activations(self):
         """Process daily pedestrian activations [4 of 29]"""
         logger.info("Daily Pedestrian Activations [4 of 29 (sigops)]")
         
@@ -2319,6 +2331,7 @@ class MonthlyReportProcessor:
         Main method to run all 29 processing steps
         """
         try:
+            self.start_time = time.time()  # Start timer here
             logger.info("Starting Monthly Report Package processing")
             logger.info(f"Week Calcs Start Date: {self.wk_calcs_start_date}")
             logger.info(f"Calcs Start Date: {self.calcs_start_date}")
@@ -2330,34 +2343,34 @@ class MonthlyReportProcessor:
             processing_steps = [
                 (1, "Travel Times", self.process_travel_times),
                 (2, "Vehicle Detector Uptime", self.process_detector_uptime),
-                (3, "Pedestrian Pushbutton Uptime", self.process_pedestrian_uptime),
-                (4, "Watchdog Alerts", self.process_watchdog_alerts),
-                (5, "Daily Pedestrian Activations", self.process_daily_pedestrian_activations),
-                (6, "Hourly Pedestrian Activations", self.process_hourly_pedestrian_activations),
-                (7, "Pedestrian Delay", self.process_pedestrian_delay),
-                (8, "Communication Uptime", self.process_communication_uptime),
-                (9, "Daily Volumes", self.process_daily_volumes),
-                (10, "Hourly Volumes", self.process_hourly_volumes),
-                (11, "Daily Throughput", self.process_daily_throughput),
-                (12, "Daily Arrivals on Green", self.process_daily_arrivals_on_green),
-                (13, "Hourly Arrivals on Green", self.process_hourly_arrivals_on_green),
-                (14, "Daily Progression Ratio", self.process_daily_progression_ratio),
-                (15, "Hourly Progression Ratio", self.process_hourly_progression_ratio),
-                (16, "Daily Split Failures", self.process_daily_split_failures),
-                (17, "Hourly Split Failures", self.process_hourly_split_failures),
-                (18, "Daily Queue Spillback", self.process_daily_queue_spillback),
-                (19, "Hourly Queue Spillback", self.process_hourly_queue_spillback),
-                (20, "Travel Time Indexes", self.process_travel_time_indexes),
-                (21, "CCTV Uptime", self.process_cctv_uptime),
-                (22, "Travel Time Speeds", self.process_travel_time_speeds),
-                (23, "Ramp Meter Features", self.process_ramp_meter_features),
-                (24, "Counts 1hr Calcs", self.process_counts_1hr_calcs),
-                (25, "Monthly Summary Calcs", self.process_monthly_summary_calcs),
-                (26, "Hi-res Calcs", self.process_high_resolution_calcs),
-                (27, "Lane-by-lane Volume Calcs", self.process_lane_by_lane_volume_calcs),
-                (28, "Mainline Green Utilization", self.process_mainline_green_utilization),
-                (29, "Coordination and Preemption", self.process_coordination_and_preemption),
-                (30, "Task Completion and Cleanup", self.process_task_completion_and_cleanup)
+                # (3, "Pedestrian Pushbutton Uptime", self.process_pedestrian_uptime),
+                # (4, "Watchdog Alerts", self.process_watchdog_alerts),
+                # (5, "Daily Pedestrian Activations", self.process_daily_pedestrian_activations),
+                # (6, "Hourly Pedestrian Activations", self.process_hourly_pedestrian_activations),
+                # (7, "Pedestrian Delay", self.process_ped_delay),
+                # (8, "Communication Uptime", self.process_comm_uptime),
+                # (9, "Daily Volumes", self.process_daily_volumes),
+                # (10, "Hourly Volumes", self.process_hourly_volumes),
+                # (11, "Daily Throughput", self.process_daily_throughput),
+                # (12, "Daily Arrivals on Green", self.process_daily_aog),
+                # (13, "Hourly Arrivals on Green", self.process_hourly_aog),
+                # (14, "Daily Progression Ratio", self.process_daily_progression_ratio),
+                # (15, "Hourly Progression Ratio", self.process_hourly_progression_ratio),
+                # (16, "Daily Split Failures", self.process_daily_split_failures),
+                # (17, "Hourly Split Failures", self.process_hourly_split_failures),
+                # (18, "Daily Queue Spillback", self.process_daily_queue_spillback),
+                # (19, "Hourly Queue Spillback", self.process_hourly_queue_spillback),
+                # (20, "Travel Time Indexes", self.process_travel_time_indexes),
+                # (21, "CCTV Uptime", self.process_cctv_uptime),
+                # (22, "Travel Time Speeds", self.process_travel_time_speeds),
+                # (23, "Ramp Meter Features", self.process_ramp_meter_features),
+                # (24, "Counts 1hr Calcs", self.process_counts_1hr_calcs),
+                # (25, "Monthly Summary Calcs", self.process_monthly_summary_calcs),
+                # (26, "Hi-res Calcs", self.process_high_resolution_calcs),
+                # (27, "Lane-by-lane Volume Calcs", self.process_lane_by_lane_volume_calcs),
+                # (28, "Mainline Green Utilization", self.process_mainline_green_utilization),
+                # (29, "Coordination and Preemption", self.process_coordination_and_preemption),
+                # (30, "Task Completion and Cleanup", self.process_task_completion_and_cleanup)
             ]
             
             # Execute each processing step

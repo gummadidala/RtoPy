@@ -473,6 +473,15 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 
         return wrapper
     return decorator
 
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    try:
+        import psutil
+        process = psutil.Process()
+        return process.memory_info().rss / 1024 / 1024
+    except ImportError:
+        return 0
+
 def validate_dataframe_schema(df: pd.DataFrame, required_columns: List[str], 
                             optional_columns: Optional[List[str]] = None) -> bool:
     """
