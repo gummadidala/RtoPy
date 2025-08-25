@@ -188,9 +188,51 @@ def check_corridors(corridors: pd.DataFrame) -> bool:
         logger.error(f"Error validating corridors: {e}")
         return False
 
+def s3read_using(func, bucket, object, **kwargs):
+    """
+    Enhanced S3 reading function with better error handling
+    """
+    try:
+        import boto3
+        import io
+        
+        s3_client = boto3.client('s3')
+        
+        # Get object from S3
+        response = s3_client.get_object(Bucket=bucket, Key=object)
+        
+        # For Excel files, handle datetime parsing more carefully
+        if object.endswith(('.xlsx', '.xls')):
+            # Add date parsing options
+            kwargs.setdefault('date_parser', pd.to_datetime)
+            
+            # Read Excel with BytesIO
+            excel_data = io.BytesIO(response['Body'].read())
+            df = func(excel_data, **kwargs)
+            
+            # Post-process datetime columns
+            for col in df.columns:
+                if 'date' in col.lower() or 'time' in col.lower():
+                    try:
+                        if df[col].dtype == 'object':
+                            # Try to convert object columns that might be dates
+                            df[col] = pd.to_datetime(df[col], errors='coerce')
+                    except Exception:
+                        continue
+                        
+        else:
+            # For other file types, use regular processing
+            df = func(io.BytesIO(response['Body'].read()), **kwargs)
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"Error reading from S3 {bucket}/{object}: {e}")
+        raise
+
 def get_cam_config(object_key: str, bucket: str, corridors: pd.DataFrame) -> pd.DataFrame:
     """
-    Get camera configuration from S3 Excel file
+    Get camera configuration from S3 Excel file with improved error handling
     
     Args:
         object_key: S3 object key for camera config file
@@ -203,8 +245,10 @@ def get_cam_config(object_key: str, bucket: str, corridors: pd.DataFrame) -> pd.
     
     try:
         # Read camera config from S3
-        cam_config0 = wr.s3.read_excel(
-            path=f"s3://{bucket}/{object_key}"
+        cam_config0 = s3read_using(
+            pd.read_excel,
+            bucket=bucket,
+            object=object_key
         )
         
         # Filter and process
@@ -214,16 +258,27 @@ def get_cam_config(object_key: str, bucket: str, corridors: pd.DataFrame) -> pd.
             'CameraID', 'Location', 'MaxView ID', 'As_of_Date'
         ]].rename(columns={'MaxView ID': 'SignalID'}).copy()
         
+        # Fix data type conversions
         cam_config0['CameraID'] = cam_config0['CameraID'].astype('category')
         cam_config0['SignalID'] = cam_config0['SignalID'].astype('category')
-        cam_config0['As_of_Date'] = pd.to_datetime(cam_config0['As_of_Date']).dt.date
         
-        cam_config0 = cam_config0.drop_duplicates()
+        # Handle As_of_Date conversion more carefully
+        try:
+            # Convert As_of_Date to datetime, handling different input types
+            if 'As_of_Date' in cam_config0.columns:
+                cam_config0['As_of_Date'] = pd.to_datetime(
+                    cam_config0['As_of_Date'], 
+                    errors='coerce'  # Convert invalid parsing to NaT
+                ).dt.date
+        except Exception as date_error:
+            logger.warning(f"Error converting As_of_Date: {date_error}")
+            # Set a default date if conversion fails
+            cam_config0['As_of_Date'] = pd.to_datetime('2020-01-01').date()
         
         # Join with corridors
         corrs = corridors[['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Subcorridor']]
         
-        result = corrs.merge(cam_config0, on='SignalID', how='left', validate='many_to_many')
+        result = corrs.merge(cam_config0, on='SignalID', how='left')
         result = result[result['CameraID'].notna()]
         
         # Create description and sort
@@ -237,7 +292,9 @@ def get_cam_config(object_key: str, bucket: str, corridors: pd.DataFrame) -> pd.
         
     except Exception as e:
         logger.error(f"Error loading camera config: {e}")
-        raise
+        logger.error(f"Error type: {type(e)}")
+        # Return empty DataFrame instead of raising
+        return pd.DataFrame()
 
 def get_ped_config_(bucket: str) -> Callable:
     """

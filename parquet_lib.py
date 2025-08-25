@@ -29,7 +29,7 @@ def upload_parquet(Bucket, Key, Filename, Database):
     df = pd.read_feather(feather_filename).drop(columns = ['Date'], errors = 'ignore')
     df.to_parquet('s3://{b}/{k}'.format(b=Bucket, k=Key))
 
-    date_ = re.search('\d{4}-\d{2}-\d{2}', Key).group(0)
+    date_ = re.search(r'\d{4}-\d{2}-\d{2}', Key).group(0)
     table_name = re.search('mark/(.*?)/date', Key).groups()[0]
 
     template_string = 'ALTER TABLE {t} add partition (date="{d}") location "s3://{b}/{p}/"'
@@ -87,7 +87,7 @@ def get_keys(bucket, table_name, start_date, end_date):
 
 def download_and_read_parquet(bucket_key):
     df = (pd.read_parquet('s3://{}'.format(bucket_key)).
-            assign(Date = re.search('\d{4}-\d{2}-\d{2}', bucket_key).group(0)))
+            assign(Date = re.search(r'\d{4}-\d{2}-\d{2}', bucket_key).group(0)))
 
     return df
 
@@ -123,7 +123,7 @@ def read_parquet_local(table_name, start_date, end_date, signals_list = None):
 
     def read_parquet(fn):
         filename = os.path.basename(fn)
-        date_ = re.search('\d{4}-\d{2}-\d{2}', fn).group(0)
+        date_ = re.search(r'\d{4}-\d{2}-\d{2}', fn).group(0)
         df = pd.read_parquet(filename).assign(Date = date_)
 
         return df
@@ -150,7 +150,7 @@ def read_parquet_file(bucket, key):
 
     if 'Contents' in s3.list_objects(Bucket = bucket, Prefix = key):
 
-        date_ = re.search('\d{4}-\d{2}-\d{2}', key).group(0)
+        date_ = re.search(r'\d{4}-\d{2}-\d{2}', key).group(0)
 
         df = (pd.read_parquet('s3://{b}/{k}'.format(b=bucket, k=key))
                 .assign(Date = lambda x: pd.to_datetime(date_, format='%Y-%m-%d'))
