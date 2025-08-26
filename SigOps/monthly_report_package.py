@@ -55,6 +55,8 @@ from configs import get_corridors
 from monthly_report_functions import parallel_process_dates
 from database_functions import execute_athena_query
 
+from SigOps.configs import get_cam_config
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -188,7 +190,7 @@ def get_usable_cores() -> int:
         return 1
 
 @retry_on_failure(max_retries=3, delay=1.0, backoff=2.0)
-def read_parquet_from_s3(bucket: str, key: str) -> pd.DataFrame:
+def read_parquet_from_s3_not(bucket: str, key: str) -> pd.DataFrame:
     """Read parquet file from S3 with retry logic"""
     try:
         s3_client = boto3.client('s3')
@@ -479,7 +481,7 @@ class MonthlyReportProcessor:
             logger.warning(f"Could not load signals list: {e}")
             return []
         
-    def _load_camera_config(self) -> pd.DataFrame:
+    def _load_camera_config_notinscope(self) -> pd.DataFrame:
         """Load camera configuration"""
         try:
             cctv_config_file = self.config.get('cctv_config_filename', '')
@@ -513,6 +515,23 @@ class MonthlyReportProcessor:
                 'Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Description'
             ])
 
+    def _load_camera_config(self) -> pd.DataFrame:
+        """Load camera configuration with better error handling"""
+        try:
+            return get_cam_config(
+                object_key=self.config['cctv_config_filename'],
+                bucket=self.config['bucket'],
+                corridors=self.corridors
+            )
+        except Exception as e:
+            logger.warning(f"Could not load camera config: {e}")
+            logger.info("Continuing without camera configuration - some features may be limited")
+            # Return empty DataFrame with expected columns
+            return pd.DataFrame(columns=[
+                'CameraID', 'Location', 'SignalID', 'As_of_Date', 
+                'Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Description'
+            ])
+
     def process_travel_times(self):
         """Execute travel times calculations asynchronously [0 of 29]"""
         logger.info("Travel Times [0 of 29 (sigops)]")
@@ -522,7 +541,8 @@ class MonthlyReportProcessor:
             return
 
         try:
-            python_env = self.config.get('python_env', 'python')
+            python_env = "C:\\Users\\kogum\\Desktop\\JobSupport\\achyuth\\server-env\\Scripts\\python.exe"
+            # python_env = "C:\\Users\\kgummadidala\\Desktop\\Rtopy\\server-env\\Scripts\\python.exe"
             
             # Run python scripts asynchronously
             scripts_to_run = [
@@ -1528,101 +1548,6 @@ class MonthlyReportProcessor:
         except Exception as e:
             logger.error(f"Error loading {filename}: {e}")
             return None
-
-    def run_all_processing_steps(self):
-        """Main method to run all 29 processing steps with memory optimization"""
-        try:
-            self.start_time = time.time()
-            logger.info("Starting Monthly Report Package processing")
-            logger.info(f"Week Calcs Start Date: {self.wk_calcs_start_date}")
-            logger.info(f"Calcs Start Date: {self.calcs_start_date}")
-            logger.info(f"Report End Date: {self.report_end_date}")
-            
-            # Log initial memory usage
-            memory_info = get_memory_usage()
-            logger.info(f"Initial memory usage: {memory_info['rss_mb']:.2f}MB ({memory_info['percent']:.1f}%)")
-            
-            # Create progress tracker
-            progress_tracker = create_progress_tracker(29, "Monthly Report Processing")
-            
-            processing_steps = [
-                (0, "Travel Times", self.process_travel_times),
-                (1, "Vehicle Detector Uptime", self.process_detector_uptime),
-                (2, "Pedestrian Pushbutton Uptime", self.process_pedestrian_uptime),
-                (3, "Watchdog Alerts", self.process_watchdog_alerts),
-                (4, "Daily Pedestrian Activations", self.process_daily_pedestrian_activations),
-                (5, "Hourly Pedestrian Activations", self.process_hourly_pedestrian_activations),
-                (6, "Pedestrian Delay", self.process_ped_delay),
-                (7, "Communication Uptime", self.process_comm_uptime),
-                (8, "Daily Volumes", self.process_daily_volumes),
-                (9, "Hourly Volumes", self.process_hourly_volumes),
-                (10, "Daily Throughput", self.process_daily_throughput),
-                (11, "Daily Arrivals on Green", self.process_daily_aog),
-                (12, "Hourly Arrivals on Green", self.process_hourly_aog),
-                (13, "Daily Progression Ratio", self.process_daily_progression_ratio),
-                (14, "Hourly Progression Ratio", self.process_hourly_progression_ratio),
-                (15, "Daily Split Failures", self.process_daily_split_failures),
-                (16, "Hourly Split Failures", self.process_hourly_split_failures),
-                (17, "Daily Queue Spillback", self.process_daily_queue_spillback),
-                (18, "Hourly Queue Spillback", self.process_hourly_queue_spillback),
-                (19, "Travel Time Indexes", self.process_travel_time_indexes),
-                (20, "CCTV Uptime", self.process_cctv_uptime),
-                (21, "Travel Time Speeds", self.process_travel_time_speeds),
-                (22, "Ramp Meter Features", self.process_ramp_meter_features),
-                (23, "Counts 1hr Calcs", self.process_counts_1hr_calcs),
-                (24, "Monthly Summary Calcs", self.process_monthly_summary_calcs),
-                (25, "Hi-res Calcs", self.process_high_resolution_calcs),
-                (26, "Lane-by-lane Volume Calcs", self.process_lane_by_lane_volume_calcs),
-                (27, "Mainline Green Utilization", self.process_mainline_green_utilization),
-                (28, "Coordination and Preemption", self.process_coordination_and_preemption),
-                (29, "Task Completion and Cleanup", self.process_task_completion_and_cleanup)
-            ]
-            
-            # Execute each processing step with memory monitoring
-            for step_num, step_name, step_function in processing_steps:
-                try:
-                    progress_tracker(step_num)
-                    logger.info(f"Starting step {step_num}: {step_name}")
-                    
-                    # Monitor memory before step
-                    memory_before = get_memory_usage()
-                    step_start_time = time.time()
-                    
-                    # Execute step with memory cleanup
-                    with memory_cleanup():
-                        step_function()
-                    
-                    step_duration = time.time() - step_start_time
-                    memory_after = get_memory_usage()
-                    
-                    logger.info(f"Completed step {step_num}: {step_name} in {format_duration(step_duration)}")
-                    logger.info(f"Memory: {memory_before['rss_mb']:.1f}MB -> {memory_after['rss_mb']:.1f}MB")
-                    
-                    # Force garbage collection after each step
-                    gc.collect()
-                    
-                except Exception as e:
-                    logger.error(f"Error in step {step_num} ({step_name}): {e}")
-                    logger.error(traceback.format_exc())
-                    # Continue with next step even if one fails
-                    gc.collect()
-                    continue
-            
-            # Final progress update
-            progress_tracker(len(processing_steps))
-            
-            total_duration = time.time() - self.start_time
-            final_memory = get_memory_usage()
-            
-            logger.info(f"Monthly Report Package processing completed in {format_duration(total_duration)}")
-            logger.info(f"Final memory usage: {final_memory['rss_mb']:.2f}MB ({final_memory['percent']:.1f}%)")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Fatal error in monthly report processing: {e}")
-            logger.error(traceback.format_exc())
-            return False
 
     # Additional processing methods (placeholders for remaining steps 9-29)
     def process_hourly_volumes(self):
@@ -3356,6 +3281,100 @@ class MonthlyReportProcessor:
             logger.error(f"Error in get_monthly_cctv_uptime: {e}")
             return pd.DataFrame()
 
+    def run_all_processing_steps(self):
+        """Main method to run all 29 processing steps with memory optimization"""
+        try:
+            self.start_time = time.time()
+            logger.info("Starting Monthly Report Package processing")
+            logger.info(f"Week Calcs Start Date: {self.wk_calcs_start_date}")
+            logger.info(f"Calcs Start Date: {self.calcs_start_date}")
+            logger.info(f"Report End Date: {self.report_end_date}")
+            
+            # Log initial memory usage
+            memory_info = get_memory_usage()
+            logger.info(f"Initial memory usage: {memory_info['rss_mb']:.2f}MB ({memory_info['percent']:.1f}%)")
+            
+            # Create progress tracker
+            progress_tracker = create_progress_tracker(29, "Monthly Report Processing")
+            
+            processing_steps = [
+                (0, "Travel Times", self.process_travel_times),
+                # (1, "Vehicle Detector Uptime", self.process_detector_uptime),
+                # (2, "Pedestrian Pushbutton Uptime", self.process_pedestrian_uptime),
+                # (3, "Watchdog Alerts", self.process_watchdog_alerts),
+                # (4, "Daily Pedestrian Activations", self.process_daily_pedestrian_activations),
+                # (5, "Hourly Pedestrian Activations", self.process_hourly_pedestrian_activations),
+                # (6, "Pedestrian Delay", self.process_ped_delay),
+                # (7, "Communication Uptime", self.process_comm_uptime),
+                # (8, "Daily Volumes", self.process_daily_volumes),
+                # (9, "Hourly Volumes", self.process_hourly_volumes),
+                # (10, "Daily Throughput", self.process_daily_throughput),
+                # (11, "Daily Arrivals on Green", self.process_daily_aog),
+                # (12, "Hourly Arrivals on Green", self.process_hourly_aog),
+                # (13, "Daily Progression Ratio", self.process_daily_progression_ratio),
+                # (14, "Hourly Progression Ratio", self.process_hourly_progression_ratio),
+                # (15, "Daily Split Failures", self.process_daily_split_failures),
+                # (16, "Hourly Split Failures", self.process_hourly_split_failures),
+                # (17, "Daily Queue Spillback", self.process_daily_queue_spillback),
+                # (18, "Hourly Queue Spillback", self.process_hourly_queue_spillback),
+                # (19, "Travel Time Indexes", self.process_travel_time_indexes),
+                # (20, "CCTV Uptime", self.process_cctv_uptime),
+                # (21, "Travel Time Speeds", self.process_travel_time_speeds),
+                # (22, "Ramp Meter Features", self.process_ramp_meter_features),
+                # (23, "Counts 1hr Calcs", self.process_counts_1hr_calcs),
+                # (24, "Monthly Summary Calcs", self.process_monthly_summary_calcs),
+                # (25, "Hi-res Calcs", self.process_high_resolution_calcs),
+                # (26, "Lane-by-lane Volume Calcs", self.process_lane_by_lane_volume_calcs),
+                # (27, "Mainline Green Utilization", self.process_mainline_green_utilization),
+                # (28, "Coordination and Preemption", self.process_coordination_and_preemption),
+                # (29, "Task Completion and Cleanup", self.process_task_completion_and_cleanup)
+            ]
+            
+            # Execute each processing step with memory monitoring
+            for step_num, step_name, step_function in processing_steps:
+                try:
+                    progress_tracker(step_num)
+                    logger.info(f"Starting step {step_num}: {step_name}")
+                    
+                    # Monitor memory before step
+                    memory_before = get_memory_usage()
+                    step_start_time = time.time()
+                    
+                    # Execute step with memory cleanup
+                    with memory_cleanup():
+                        step_function()
+                    
+                    step_duration = time.time() - step_start_time
+                    memory_after = get_memory_usage()
+                    
+                    logger.info(f"Completed step {step_num}: {step_name} in {format_duration(step_duration)}")
+                    logger.info(f"Memory: {memory_before['rss_mb']:.1f}MB -> {memory_after['rss_mb']:.1f}MB")
+                    
+                    # Force garbage collection after each step
+                    gc.collect()
+                    
+                except Exception as e:
+                    logger.error(f"Error in step {step_num} ({step_name}): {e}")
+                    logger.error(traceback.format_exc())
+                    # Continue with next step even if one fails
+                    gc.collect()
+                    continue
+            
+            # Final progress update
+            progress_tracker(len(processing_steps))
+            
+            total_duration = time.time() - self.start_time
+            final_memory = get_memory_usage()
+            
+            logger.info(f"Monthly Report Package processing completed in {format_duration(total_duration)}")
+            logger.info(f"Final memory usage: {final_memory['rss_mb']:.2f}MB ({final_memory['percent']:.1f}%)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Fatal error in monthly report processing: {e}")
+            logger.error(traceback.format_exc())
+            return False
 
 # Context managers and utility functions
 
@@ -3394,52 +3413,6 @@ def optimize_dataframe_memory(df):
     except Exception as e:
         logger.warning(f"Error optimizing DataFrame memory: {e}")
         return df
-
-
-def main():
-    """
-    Main execution function for the Monthly Report Package
-    """
-    try:
-        # Setup logging first
-        logger = setup_logging()
-        
-        # Load configuration
-        config_path = 'Monthly_Report.yaml'
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
-            
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        logger.info("Starting Monthly Report Package")
-        logger.info(f"Configuration loaded from {config_path}")
-        
-        # Validate configuration
-        if not validate_config(config):
-            raise ValueError("Invalid configuration")
-        
-        # Initialize and run the monthly report processor
-        processor = MonthlyReportProcessor(config)
-        
-        # Log initial memory usage
-        initial_memory = get_memory_usage()
-        logger.info(f"Initial memory usage: {initial_memory['rss_mb']:.2f}MB ({initial_memory['percent']:.1f}%)")
-        
-        # Run all processing steps
-        success = processor.run_all_processing_steps()
-        
-        if success:
-            logger.info("Monthly Report Package completed successfully")
-            return 0
-        else:
-            logger.error("Monthly Report Package completed with errors")
-            return 1
-            
-    except Exception as e:
-        logger.error(f"Failed to initialize Monthly Report Package: {e}")
-        logger.error(traceback.format_exc())
-        return 1
 
 
 def validate_config(config):
@@ -3519,7 +3492,7 @@ def setup_logging(log_level='INFO'):
     logs_dir.mkdir(exist_ok=True)
     
     # Setup log file with timestamp
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime('%Y%m%d')
     log_filename = logs_dir / f"monthly_report_{timestamp}.log"
     
     # Create custom formatter
