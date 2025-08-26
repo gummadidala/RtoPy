@@ -51,6 +51,7 @@ from aggregations import (
     # get_quarterly,
     # calculate_reliability_metrics
 )
+from s3_parquet_io import s3_read_parquet_parallel
 from configs import get_corridors
 from monthly_report_functions import parallel_process_dates
 from database_functions import execute_athena_query
@@ -190,26 +191,6 @@ def get_usable_cores() -> int:
         return 1
 
 @retry_on_failure(max_retries=3, delay=1.0, backoff=2.0)
-def read_parquet_from_s3_not(bucket: str, key: str) -> pd.DataFrame:
-    """Read parquet file from S3 with retry logic"""
-    try:
-        s3_client = boto3.client('s3')
-        response = s3_client.get_object(Bucket=bucket, Key=key)
-        
-        # Read parquet from bytes
-        parquet_file = pq.ParquetFile(io.BytesIO(response['Body'].read()))
-        df = parquet_file.read().to_pandas()
-        
-        # Optimize memory usage
-        df = optimize_dataframe_memory(df)
-        
-        return df
-        
-    except Exception as e:
-        logger.error(f"Error reading parquet from S3 {bucket}/{key}: {e}")
-        raise
-
-@retry_on_failure(max_retries=3, delay=1.0, backoff=2.0)
 def write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str):
     """Write parquet file to S3 with retry logic"""
     try:
@@ -237,98 +218,6 @@ def write_parquet_to_s3(df: pd.DataFrame, bucket: str, key: str):
 def read_parquet_file(bucket: str, key: str) -> pd.DataFrame:
     """Read parquet file from S3"""
     return read_parquet_from_s3(bucket, key)
-
-def s3_read_parquet_parallel(bucket: str, table_name: str, start_date: str, end_date: str, 
-                           signals_list: List[str] = None, callback=None, parallel: bool = True,
-                           s3root: str = "atspm", chunk_size: int = 5000) -> pd.DataFrame:
-    """Read parquet files from S3 in parallel with date partitioning and memory optimization"""
-    try:
-        s3_client = boto3.client('s3')
-        
-        # Generate date range
-        start_dt = pd.to_datetime(start_date)
-        end_dt = pd.to_datetime(end_date)
-        date_range = pd.date_range(start_dt, end_dt, freq='D')
-        
-        def process_date(date_str):
-            try:
-                if isinstance(date_str, pd.Timestamp):
-                    date_str = date_str.strftime('%Y-%m-%d')
-                
-                # Construct S3 key based on table structure
-                key = f"{s3root}/{table_name}/date={date_str}/{table_name}_{date_str}.parquet"
-                
-                with memory_cleanup():
-                    df = read_parquet_from_s3(bucket, key)
-                    
-                    # Filter by signals if provided
-                    if signals_list and 'SignalID' in df.columns:
-                        df = df[df['SignalID'].isin(signals_list)]
-                    
-                    # Apply callback if provided
-                    if callback:
-                        df = callback(df)
-                    
-                    # Optimize memory
-                    df = optimize_dataframe_memory(df)
-                    
-                    return df
-                    
-            except Exception as e:
-                logger.debug(f"Could not read data for date {date_str}: {e}")
-                return pd.DataFrame()
-        
-        dataframes = []
-        
-        if parallel and len(date_range) > 1:
-            max_workers = min(5, len(date_range))  # Limit workers for memory efficiency
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_date = {executor.submit(process_date, date): date for date in date_range}
-                
-                for future in as_completed(future_to_date):
-                    try:
-                        df = future.result()
-                        if not df.empty:
-                            dataframes.append(df)
-                            
-                        # Force garbage collection periodically
-                        if len(dataframes) % 10 == 0:
-                            gc.collect()
-                            
-                    except Exception as e:
-                        logger.debug(f"Error processing date: {e}")
-        else:
-            for date in date_range:
-                df = process_date(date)
-                if not df.empty:
-                    dataframes.append(df)
-                    
-                # Force garbage collection periodically
-                if len(dataframes) % 10 == 0:
-                    gc.collect()
-        
-        if dataframes:
-            # Concatenate in chunks to manage memory
-            if len(dataframes) > 20:
-                result_chunks = []
-                for chunk in chunk_dataframe(dataframes, 20):
-                    chunk_result = pd.concat(list(chunk), ignore_index=True)
-                    result_chunks.append(optimize_dataframe_memory(chunk_result))
-                    gc.collect()
-                result = pd.concat(result_chunks, ignore_index=True)
-            else:
-                result = pd.concat(dataframes, ignore_index=True)
-            
-            result = optimize_dataframe_memory(result)
-            logger.info(f"Read {len(result)} records from {table_name} for date range {start_date} to {end_date}")
-            return result
-        else:
-            logger.warning(f"No data found for {table_name} in date range {start_date} to {end_date}")
-            return pd.DataFrame()
-            
-    except Exception as e:
-        logger.error(f"Error in s3_read_parquet_parallel: {e}")
-        return pd.DataFrame()
 
 def get_tuesdays(df: pd.DataFrame) -> pd.DataFrame:
     """Get Tuesday mapping for weekly calculations"""
@@ -480,41 +369,7 @@ class MonthlyReportProcessor:
         except Exception as e:
             logger.warning(f"Could not load signals list: {e}")
             return []
-        
-    def _load_camera_config_notinscope(self) -> pd.DataFrame:
-        """Load camera configuration"""
-        try:
-            cctv_config_file = self.config.get('cctv_config_filename', '')
-            if not cctv_config_file:
-                logger.info("No CCTV config file specified")
-                return pd.DataFrame(columns=[
-                    'CameraID', 'Location', 'SignalID', 'As_of_Date', 
-                    'Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Description'
-                ])
-            
-            # Read camera config from S3
-            bucket = self.config.get('bucket', '')
-            if bucket and cctv_config_file:
-                try:
-                    cam_config = read_parquet_from_s3(bucket, cctv_config_file)
-                    cam_config = optimize_dataframe_memory(cam_config)
-                    logger.info(f"Loaded {len(cam_config)} camera configurations")
-                    return cam_config
-                except Exception as e:
-                    logger.warning(f"Could not read camera config from S3: {e}")
-            
-            return pd.DataFrame(columns=[
-                'CameraID', 'Location', 'SignalID', 'As_of_Date', 
-                'Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Description'
-            ])
-            
-        except Exception as e:
-            logger.warning(f"Could not load camera config: {e}")
-            return pd.DataFrame(columns=[
-                'CameraID', 'Location', 'SignalID', 'As_of_Date', 
-                'Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Description'
-            ])
-
+    
     def _load_camera_config(self) -> pd.DataFrame:
         """Load camera configuration with better error handling"""
         try:
@@ -3298,8 +3153,8 @@ class MonthlyReportProcessor:
             progress_tracker = create_progress_tracker(29, "Monthly Report Processing")
             
             processing_steps = [
-                (0, "Travel Times", self.process_travel_times),
-                # (1, "Vehicle Detector Uptime", self.process_detector_uptime),
+                # (0, "Travel Times", self.process_travel_times),
+                (1, "Vehicle Detector Uptime", self.process_detector_uptime),
                 # (2, "Pedestrian Pushbutton Uptime", self.process_pedestrian_uptime),
                 # (3, "Watchdog Alerts", self.process_watchdog_alerts),
                 # (4, "Daily Pedestrian Activations", self.process_daily_pedestrian_activations),
@@ -3327,7 +3182,7 @@ class MonthlyReportProcessor:
                 # (26, "Lane-by-lane Volume Calcs", self.process_lane_by_lane_volume_calcs),
                 # (27, "Mainline Green Utilization", self.process_mainline_green_utilization),
                 # (28, "Coordination and Preemption", self.process_coordination_and_preemption),
-                # (29, "Task Completion and Cleanup", self.process_task_completion_and_cleanup)
+                (29, "Task Completion and Cleanup", self.process_task_completion_and_cleanup)
             ]
             
             # Execute each processing step with memory monitoring
@@ -3627,91 +3482,6 @@ def check_s3_connectivity(bucket):
         return False
 
 
-def estimate_processing_time(config, signals_list):
-    """Estimate total processing time based on configuration"""
-    try:
-        # Base time estimates (in minutes) for each step
-        step_estimates = {
-            'travel_times': 5,
-            'detector_uptime': 10,
-            'pedestrian_uptime': 15,
-            'watchdog_alerts': 8,
-            'daily_volumes': 12,
-            'hourly_volumes': 15,
-            'throughput': 10,
-            'aog': 20,
-            'split_failures': 18,
-            'queue_spillback': 15,
-            'travel_time_indexes': 12,
-            'cctv_uptime': 8,
-            'green_utilization': 10,
-            'preemption': 5,
-            'summary_calcs': 10
-        }
-        
-        # Scale based on number of signals and date range
-        num_signals = len(signals_list)
-        date_range_days = (pd.to_datetime(config['report_end_date']) - 
-                          pd.to_datetime(config['calcs_start_date'])).days
-        
-        # Scaling factors
-        signal_factor = max(1.0, num_signals / 1000)  # Base on 1000 signals
-        date_factor = max(1.0, date_range_days / 30)  # Base on 30 days
-        
-        total_estimate = sum(step_estimates.values()) * signal_factor * date_factor
-        
-        logger.info(f"Estimated processing time: {total_estimate:.1f} minutes")
-        logger.info(f"Scaling factors - Signals: {signal_factor:.2f}, Date range: {date_factor:.2f}")
-        
-        return total_estimate
-        
-    except Exception as e:
-        logger.warning(f"Could not estimate processing time: {e}")
-        return 120  # Default estimate of 2 hours
-
-
-def create_processing_report(processor, success, duration):
-    """Create a comprehensive processing report"""
-    try:
-        report_data = {
-            'processing_date': datetime.now().isoformat(),
-            'success': success,
-            'duration_minutes': duration / 60,
-            'signals_processed': len(processor.signals_list),
-            'corridors_processed': len(processor.corridors['Corridor'].unique()) if 'Corridor' in processor.corridors.columns else 0,
-            'report_period_start': str(processor.calcs_start_date),
-            'report_period_end': str(processor.report_end_date),
-            'config_file': 'Monthly_Report.yaml',
-            'python_version': sys.version,
-            'memory_usage_mb': get_memory_usage()['rss_mb']
-        }
-        
-        # Add step-specific information if available
-        if hasattr(processor, 'step_durations'):
-            report_data['step_durations'] = processor.step_durations
-        
-        # Save report
-        report_df = pd.DataFrame([report_data])
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
-        # Save locally
-        report_file = f"logs/processing_report_{timestamp}.json"
-        with open(report_file, 'w') as f:
-            json.dump(report_data, f, indent=2, default=str)
-        
-        # Save to S3 if possible
-        try:
-            processor.save_results([(report_df, f"processing_report_{timestamp}.parquet", "reports")])
-        except:
-            logger.warning("Could not save processing report to S3")
-        
-        logger.info(f"Processing report saved: {report_file}")
-        return report_data
-        
-    except Exception as e:
-        logger.error(f"Error creating processing report: {e}")
-        return None
-
 if __name__ == "__main__":
     import sys
     import json
@@ -3745,19 +3515,12 @@ if __name__ == "__main__":
         # Initialize processor
         processor = MonthlyReportProcessor(config)
         
-        # Estimate processing time
-        estimated_time = estimate_processing_time(config, processor.signals_list)
-        logger.info(f"Estimated processing time: {estimated_time:.1f} minutes")
-        
         start_time = time.time()
         
         # Run all processing steps
         success = processor.run_all_processing_steps()
         
         duration = time.time() - start_time
-        
-        # Create processing report
-        report = create_processing_report(processor, success, duration)
         
         # Final logging
         if success:
