@@ -1,0 +1,62 @@
+2025-08-26 15:44:36,872 - __main__ - INFO - [monthly_report_package.py:86] - Logging initialized - log file: logs\monthly_report_20250826.log
+2025-08-26 15:44:36,882 - __main__ - INFO - [monthly_report_package.py:193] - Week Calcs Start Date: 2025-05-25
+2025-08-26 15:44:36,882 - __main__ - INFO - [monthly_report_package.py:194] - Calcs Start Date: 2025-02-25
+2025-08-26 15:44:36,882 - __main__ - INFO - [monthly_report_package.py:195] - Report Start Date: 2025-07-25
+2025-08-26 15:44:36,882 - __main__ - INFO - [monthly_report_package.py:196] - Report End Date: 2025-08-25
+2025-08-26 15:44:36,882 - __main__ - INFO - [monthly_report_package.py:1401] - 2025-08-26 15:44:36.882637 Starting Monthly Report Package
+2025-08-26 15:44:45,890 - configs - INFO - [configs.py:128] - Loaded 4974 corridor configurations
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:227] - Setup 4974 subcorridor mappings
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:228] - Subcorridors columns: ['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Milepost', 'Agency', 'Name', 'Asof', 'Latitude', 'Longitude', 'TeamsLocationID', 'Priority', 'Classification', 'Description']
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:243] - Loaded 4878 signals to process
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:274] - Loaded 4974 corridors
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:275] - Corridors columns: ['SignalID', 'Zone', 'Zone_Group', 'Corridor', 'Subcorridor', 'Milepost', 'Agency', 'Name', 'Asof', 'Latitude', 'Longitude', 'TeamsLocationID', 'Priority', 'Classification', 'Description']
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:276] - Loaded 4974 subcorridors
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:277] - Processing 4878 signals
+2025-08-26 15:44:45,906 - __main__ - INFO - [monthly_report_package.py:340] - Vehicle Detector Uptime [1 of 29 (sigops)]
+2025-08-26 15:53:21,507 - __main__ - INFO - [monthly_report_package.py:356] - Detector uptime data columns: ['SignalID', 'CallPhase', 'Date_Hour', 'setback', 'uptime', 'all', 'Date']
+2025-08-26 15:53:21,523 - __main__ - INFO - [monthly_report_package.py:357] - Detector uptime data shape: (85840108, 7)
+2025-08-26 15:54:43,751 - __main__ - INFO - [monthly_report_package.py:375] - Corridors columns: ['SignalID', 'Zone', 'Zone_Group', 'Corridor', 'Subcorridor', 'Milepost', 'Agency', 'Name', 'Asof', 'Latitude', 'Longitude', 'TeamsLocationID', 'Priority', 'Classification', 'Description']
+2025-08-26 15:54:43,765 - __main__ - INFO - [monthly_report_package.py:376] - Corridors shape: (4974, 15)
+2025-08-26 15:54:43,765 - __main__ - INFO - [monthly_report_package.py:391] - Subcorridors columns: ['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Milepost', 'Agency', 'Name', 'Asof', 'Latitude', 'Longitude', 'TeamsLocationID', 'Priority', 'Classification', 'Description']
+2025-08-26 15:54:43,765 - __main__ - INFO - [monthly_report_package.py:412] - Processing cor_avg_daily_detector_uptime...
+2025-08-26 15:55:18,496 - __main__ - WARNING - [monthly_report_package.py:418] - Error in cor_avg_daily_detector_uptime: 'Zone_Group'
+2025-08-26 15:55:22,954 - __main__ - INFO - [monthly_report_package.py:427] - Processing sub_avg_daily_detector_uptime...
+2025-08-26 15:56:00,503 - __main__ - WARNING - [monthly_report_package.py:435] - Error in sub_avg_daily_detector_uptime: 'Zone_Group'
+2025-08-26 15:56:04,240 - __main__ - INFO - [monthly_report_package.py:443] - Processing weekly_detector_uptime...
+2025-08-26 16:04:35,910 - __main__ - WARNING - [monthly_report_package.py:447] - Error in weekly_detector_uptime: Unable to allocate 1.28 GiB for an array with shape (2, 85846753) and data type int64
+2025-08-26 16:06:03,798 - __main__ - WARNING - [monthly_report_package.py:478] - Error in monthly_detector_uptime: Unable to allocate 655. MiB for an array with shape (85841361,) and data type int64
+2025-08-26 16:10:24,263 - __main__ - ERROR - [monthly_report_package.py:2494] - Error saving avg_daily_detector_uptime.pkl: 
+2025-08-26 16:10:24,326 - __main__ - INFO - [monthly_report_package.py:553] - Skipping weekly_detector_uptime - no data
+2025-08-26 16:10:24,326 - __main__ - INFO - [monthly_report_package.py:553] - Skipping monthly_detector_uptime - no data
+2025-08-26 16:10:24,326 - __main__ - INFO - [monthly_report_package.py:553] - Skipping cor_avg_daily_detector_uptime - no data
+2025-08-26 16:10:24,326 - __main__ - INFO - [monthly_report_package.py:553] - Skipping cor_weekly_detector_uptime - no data
+2025-08-26 16:10:24,326 - __main__ - INFO - [monthly_report_package.py:553] - Skipping cor_monthly_detector_uptime - no data
+2025-08-26 16:10:24,346 - __main__ - INFO - [monthly_report_package.py:553] - Skipping sub_avg_daily_detector_uptime - no data
+2025-08-26 16:10:24,347 - __main__ - INFO - [monthly_report_package.py:553] - Skipping sub_weekly_detector_uptime - no data
+2025-08-26 16:10:24,347 - __main__ - INFO - [monthly_report_package.py:553] - Skipping sub_monthly_detector_uptime - no data
+2025-08-26 16:10:24,347 - __main__ - INFO - [monthly_report_package.py:555] - Vehicle detector uptime processing completed
+2025-08-26 16:10:31,448 - __main__ - INFO - [monthly_report_package.py:564] - Ped Pushbutton Uptime [2 of 29 (sigops)]
+2025-08-26 16:27:04,332 - __main__ - ERROR - [monthly_report_package.py:693] - Error processing ped pushbutton uptime: Unable to allocate 186. GiB for an array with shape (99974725578,) and data type int16
+2025-08-26 16:27:04,880 - __main__ - INFO - [monthly_report_package.py:697] - watchdog alerts [3 of 29 (sigops)]
+2025-08-26 16:27:04,880 - __main__ - INFO - [monthly_report_package.py:855] - Watchdog alerts processing completed
+2025-08-26 16:27:04,880 - __main__ - INFO - [monthly_report_package.py:862] - Daily Pedestrian Activations [4 of 29 (sigops)]
+2025-08-26 16:27:04,896 - __main__ - WARNING - [monthly_report_package.py:880] - papd not found, skipping daily ped activations
+2025-08-26 16:27:04,896 - __main__ - INFO - [monthly_report_package.py:930] - Hourly Pedestrian Activations [5 of 29 (sigops)]
+2025-08-26 16:27:04,896 - __main__ - INFO - [monthly_report_package.py:988] - Hourly pedestrian activations processing skipped (disabled)
+2025-08-26 16:27:04,896 - __main__ - INFO - [monthly_report_package.py:992] - Pedestrian Delay [6 of 29 (sigops)]
+2025-08-26 16:36:15,085 - __main__ - ERROR - [monthly_report_package.py:1071] - Error processing ped delay: Can only use .dt accessor with datetimelike values
+2025-08-26 16:36:15,117 - __main__ - INFO - [monthly_report_package.py:1075] - Communication Uptime [7 of 29 (sigops)]
+2025-08-26 17:10:59,468 - __main__ - ERROR - [monthly_report_package.py:1145] - Error processing comm uptime: Can only use .dt accessor with datetimelike values
+2025-08-26 17:10:59,510 - __main__ - INFO - [monthly_report_package.py:1149] - Daily Volumes [8 of 29 (sigops)]
+2025-08-26 17:18:21,644 - __main__ - ERROR - [monthly_report_package.py:1211] - Error processing daily volumes: Can only use .dt accessor with datetimelike values
+2025-08-26 17:18:21,691 - __main__ - INFO - [monthly_report_package.py:1215] - Hourly Volumes [9 of 29 (sigops)]
+2025-08-26 17:27:09,935 - __main__ - ERROR - [monthly_report_package.py:1322] - Error processing hourly volumes: cannot insert Date, already exists
+2025-08-26 17:27:10,359 - __main__ - INFO - [monthly_report_package.py:1326] - Daily Throughput [10 of 29 (sigops)]
+2025-08-26 17:34:25,893 - __main__ - ERROR - [monthly_report_package.py:1396] - Error processing throughput: Can only use .dt accessor with datetimelike values
+2025-08-26 17:34:25,923 - __main__ - INFO - [monthly_report_package.py:1446] - Arrivals on Green [11 of 29 (sigops)]
+2025-08-26 17:45:27,464 - __main__ - ERROR - [monthly_report_package.py:1520] - Error processing arrivals on green: 'vehicles'
+2025-08-26 17:45:28,880 - __main__ - INFO - [monthly_report_package.py:1524] - Split Failures [12 of 29 (sigops)]
+2025-08-26 17:52:19,594 - __main__ - ERROR - [monthly_report_package.py:1576] - Error processing split failures: 'sf_events'
+2025-08-26 17:52:21,134 - __main__ - INFO - [monthly_report_package.py:1580] - Progression Ratio [13 of 29 (sigops)]
+2025-08-26 17:54:57,478 - __main__ - ERROR - [monthly_report_package.py:1617] - Error processing progression ratio: 'SignalID'
+2025-08-26 17:54:57,478 - __main__ - INFO - [monthly_report_package.py:1621] - Queue Spillback [14 of 29 (sigops)]
