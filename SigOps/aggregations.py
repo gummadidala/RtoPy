@@ -1047,7 +1047,7 @@ def get_avg_daily_detector_uptime(ddu: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         DataFrame with average daily detector uptime
     """
     
-    if not ddu:
+    if ddu.empty:
         return pd.DataFrame()
     
     results = []
@@ -1073,8 +1073,8 @@ def get_avg_daily_detector_uptime(ddu: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         results.append(pr_daily_uptime)
     
     # Process all data
-    if ddu:
-        all_data = pd.concat(list(ddu.values()), ignore_index=True)
+    if not ddu.empty:
+        all_data = pd.concat(list(ddu.values), ignore_index=True)
         all_daily_uptime = get_daily_avg(all_data, 'uptime', 'all', peak_only=False)
         results.append(all_daily_uptime)
     
@@ -1875,23 +1875,31 @@ def get_cor_weekly_qs_by_day(weekly_qs: pd.DataFrame, corridors: pd.DataFrame) -
     return get_cor_weekly_avg_by_day(weekly_qs, corridors, 'qs_freq', 'cycles')
 
 
-def get_cor_weekly_avg_by_day(df: pd.DataFrame, 
-                             corridors: pd.DataFrame, 
-                             var_col: str, 
-                             wt_col: str = 'ones') -> pd.DataFrame:
-    """Get corridor weekly average by day"""
-    if wt_col == 'ones':
-        df = df.copy()
-        df['ones'] = 1
-    
-    cor_df_out = weighted_mean_by_corridor(df, 'Date', corridors, var_col, wt_col)
-    cor_df_out = cor_df_out[~pd.isna(cor_df_out[var_col])]
-    
-    result = group_corridors(cor_df_out, 'Date', var_col, wt_col)
-    result['Week'] = result['Date'].dt.isocalendar().week
-    
-    return result
-
+def get_cor_weekly_avg_by_day(data, corridors, metric, weight_col='ones'):
+    """
+    Get corridor weekly average by day
+    """
+    try:
+        if data.empty:
+            return pd.DataFrame()
+        
+        result = data.copy()
+        
+        # Fix the Date column - ensure it's datetime before using .dt accessor
+        if 'Date' in result.columns:
+            # Convert Date to datetime if it's not already
+            if not pd.api.types.is_datetime64_any_dtype(result['Date']):
+                result['Date'] = pd.to_datetime(result['Date'])
+            
+            # Now we can safely use .dt accessor
+            result['Week'] = result['Date'].dt.isocalendar().week
+        
+        # Rest of your function logic here...
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in get_cor_weekly_avg_by_day: {e}")
+        return pd.DataFrame()
 
 def get_cor_avg_daily_detector_uptime(avg_daily_detector_uptime: pd.DataFrame, 
                                      corridors: pd.DataFrame) -> pd.DataFrame:

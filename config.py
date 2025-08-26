@@ -6,6 +6,8 @@ import boto3
 import time
 from datetime import datetime, timedelta
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 
 s3 = boto3.client("s3")
@@ -29,7 +31,7 @@ def get_date_from_string(
     table_exclude_regex_pattern="_outstand|_report|_resolv|_task|_tpri|_tsou|_tsub|_ttyp|_kabco|_maint|_ops|_safety|_alert|_udc|_summ",
 ):
     if type(x) == str:
-        re_da = re.compile("\d+(?= *days ago)")
+        re_da = re.compile(r"\d+(?= *days ago)")
         if x == "today":
             x = datetime.today().strftime("%F")
         elif x == "yesterday":
@@ -41,7 +43,7 @@ def get_date_from_string(
             if s3bucket is not None and s3prefix is not None:
                 s3 = boto3.resource("s3")
                 all_dates = [
-                    re.search("(?<=date\=)(\d+-\d+-\d+)", obj.key)
+                    re.search(r"(?<=date\=)(\d+-\d+-\d+)", obj.key)
                     for obj in s3.Bucket(s3bucket).objects.filter(Prefix=s3prefix)
                 ]
                 all_dates = [date_.group() for date_ in all_dates if date_ is not None]
