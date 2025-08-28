@@ -38,8 +38,6 @@ from aggregations import (
 from monthly_report_package_1_helper import get_pau_gamma, get_bad_ped_detectors
 
 # Add this at the top of the file with other imports
-# Add this at the top of the file with other imports
-# Add this at the top of the file with other imports
 from aggregations import (
     get_monthly_avg_by_day, get_cor_monthly_avg_by_day,
     get_daily_avg, get_weekly_avg_by_day, get_vph,
