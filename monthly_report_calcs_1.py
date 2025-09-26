@@ -18,9 +18,255 @@ from monthly_report_calcs_init import main as init_main
 from monthly_report_functions import *
 from counts import *
 from s3_parquet_io import *
+import duckdb
+from parquet_lib import batch_read_atspm_duckdb, read_s3_parquet_pattern_duckdb
+from typing import List, Dict, Any, Optional
 
 # Setup logging
 logger = logging.getLogger(__name__)
+
+def process_multiple_dates_duckdb(date_range: List[str], 
+                                 bucket: str, 
+                                 conf_athena: Dict[str, Any],
+                                 signal_ids: Optional[List[int]] = None) -> pd.DataFrame:
+    """
+    Process counts for multiple dates at once using DuckDB
+    Much faster than processing one date at a time
+    
+    Args:
+        date_range: List of date strings to process
+        bucket: S3 bucket name
+        conf_athena: Athena configuration
+        signal_ids: Optional list of specific signal IDs
+    
+    Returns:
+        Combined results DataFrame
+    """
+    try:
+        if signal_ids is None:
+            # Read signal list from configuration or use pattern matching
+            pattern = f"atspm/date={{{','.join(date_range)}}}/atspm_*_*.parquet"
+        else:
+            # Use batch read for specific signals
+            return batch_read_atspm_duckdb(
+                bucket=bucket,
+                signal_ids=signal_ids,
+                date_range=date_range
+            )
+        
+        # Use pattern-based reading for all signals
+        return read_s3_parquet_pattern_duckdb(
+            bucket=bucket,
+            pattern=pattern
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in multi-date processing: {e}")
+        # Fallback to individual date processing
+        results = []
+        for date_str in date_range:
+            try:
+                result = process_single_date_counts(date_str, bucket, conf_athena)
+                if result is not None:
+                    results.append(result)
+            except Exception as date_error:
+                logger.error(f"Error processing {date_str}: {date_error}")
+        
+        return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+
+def get_counts_batch_duckdb(signal_ids: List[int], 
+                           date_range: List[str], 
+                           bucket: str,
+                           uptime: bool = True,
+                           counts: bool = True) -> Dict[str, pd.DataFrame]:
+    """
+    Get counts for multiple signals and dates using DuckDB batch processing
+    
+    Args:
+        signal_ids: List of signal IDs
+        date_range: List of date strings
+        bucket: S3 bucket name
+        uptime: Whether to calculate uptime
+        counts: Whether to calculate counts
+    
+    Returns:
+        Dictionary with 'uptime' and 'counts' DataFrames
+    """
+    try:
+        conn = duckdb.connect()
+        conn.execute("SET s3_region='us-east-1';")
+        
+        # Build file pattern for all combinations
+        file_patterns = []
+        for date_str in date_range:
+            for signal_id in signal_ids:
+                pattern = f"s3://{bucket}/atspm/date={date_str}/atspm_{signal_id}_{date_str}.parquet"
+                file_patterns.append(pattern)
+        
+        file_list = "', '".join(file_patterns)
+        
+        results = {}
+        
+        if counts:
+            # Calculate counts using DuckDB aggregation
+            counts_query = f"""
+            SELECT 
+                SignalID,
+                Date,
+                CallPhase,
+                DATE_TRUNC('hour', TimeStamp) as Hour,
+                COUNT(*) as vol
+            FROM read_parquet(['{file_list}'])
+            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            GROUP BY SignalID, Date, CallPhase, Hour
+            ORDER BY SignalID, Date, CallPhase, Hour
+            """
+            
+            results['counts'] = conn.execute(counts_query).df()
+        
+        if uptime:
+            # Calculate uptime using DuckDB
+            uptime_query = f"""
+            WITH signal_hours AS (
+                SELECT 
+                    SignalID,
+                    Date,
+                    DATE_TRUNC('hour', TimeStamp) as Hour,
+                    COUNT(DISTINCT EventCode) as event_types
+                FROM read_parquet(['{file_list}'])
+                GROUP BY SignalID, Date, Hour
+            ),
+            expected_hours AS (
+                SELECT 
+                    SignalID,
+                    Date,
+                    24 as expected_hours
+                FROM (SELECT DISTINCT SignalID, Date FROM signal_hours)
+            )
+            SELECT 
+                eh.SignalID,
+                eh.Date,
+                COUNT(sh.Hour) as active_hours,
+                eh.expected_hours,
+                (COUNT(sh.Hour)::float / eh.expected_hours) * 100 as uptime_pct
+            FROM expected_hours eh
+            LEFT JOIN signal_hours sh ON eh.SignalID = sh.SignalID AND eh.Date = sh.Date
+            GROUP BY eh.SignalID, eh.Date, eh.expected_hours
+            ORDER BY eh.SignalID, eh.Date
+            """
+            
+            results['uptime'] = conn.execute(uptime_query).df()
+        
+        conn.close()
+        
+        logger.info(f"Successfully processed batch counts for {len(signal_ids)} signals across {len(date_range)} dates")
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in batch counts calculation: {e}")
+        return {'counts': pd.DataFrame(), 'uptime': pd.DataFrame()}
+
+def monthly_aggregations_duckdb(bucket: str, 
+                               month_pattern: str,
+                               signal_ids: Optional[List[int]] = None) -> Dict[str, pd.DataFrame]:
+    """
+    Perform monthly aggregations directly from S3 using DuckDB
+    
+    Args:
+        bucket: S3 bucket name
+        month_pattern: Pattern like 'atspm/date=2024-01-*/atspm_*.parquet'
+        signal_ids: Optional specific signal IDs
+    
+    Returns:
+        Dictionary with various monthly aggregations
+    """
+    try:
+        conn = duckdb.connect()
+        conn.execute("SET s3_region='us-east-1';")
+        
+        s3_pattern = f"s3://{bucket}/{month_pattern}"
+        
+        # Filter by signal IDs if provided
+        signal_filter = ""
+        if signal_ids:
+            signal_list = ",".join(map(str, signal_ids))
+            signal_filter = f"AND SignalID IN ({signal_list})"
+        
+        results = {}
+        
+        # Monthly volume by signal and phase
+        volume_query = f"""
+        SELECT 
+            SignalID,
+            CallPhase,
+            EXTRACT(month FROM Date) as Month,
+            EXTRACT(year FROM Date) as Year,
+            SUM(vol) as total_volume,
+            AVG(vol) as avg_daily_volume,
+            COUNT(DISTINCT Date) as active_days
+        FROM read_parquet('{s3_pattern}')
+        WHERE EventCode IN (81, 82)  -- Vehicle detection
+        {signal_filter}
+        GROUP BY SignalID, CallPhase, Year, Month
+        ORDER BY SignalID, CallPhase, Year, Month
+        """
+        
+        results['monthly_volume'] = conn.execute(volume_query).df()
+        
+        # Monthly uptime summary
+        uptime_query = f"""
+        WITH daily_uptime AS (
+            SELECT 
+                SignalID,
+                Date,
+                COUNT(DISTINCT DATE_TRUNC('hour', TimeStamp)) as active_hours,
+                24 as expected_hours
+            FROM read_parquet('{s3_pattern}')
+            {signal_filter.replace('AND', 'WHERE') if signal_filter else ''}
+            GROUP BY SignalID, Date
+        )
+        SELECT 
+            SignalID,
+            EXTRACT(month FROM Date) as Month,
+            EXTRACT(year FROM Date) as Year,
+            AVG((active_hours::float / expected_hours) * 100) as avg_uptime_pct,
+            MIN((active_hours::float / expected_hours) * 100) as min_uptime_pct,
+            MAX((active_hours::float / expected_hours) * 100) as max_uptime_pct,
+            COUNT(*) as total_days
+        FROM daily_uptime
+        GROUP BY SignalID, Year, Month
+        ORDER BY SignalID, Year, Month
+        """
+        
+        results['monthly_uptime'] = conn.execute(uptime_query).df()
+        
+        # Peak hour analysis
+        peak_hours_query = f"""
+        SELECT 
+            SignalID,
+            CallPhase,
+            EXTRACT(hour FROM TimeStamp) as Hour,
+            EXTRACT(month FROM Date) as Month,
+            EXTRACT(year FROM Date) as Year,
+            AVG(vol) as avg_hourly_volume
+        FROM read_parquet('{s3_pattern}')
+        WHERE EventCode IN (81, 82)
+        AND EXTRACT(hour FROM TimeStamp) IN (6,7,8,9,16,17,18,19)  -- Peak hours
+        {signal_filter}
+        GROUP BY SignalID, CallPhase, Hour, Year, Month
+        ORDER BY SignalID, CallPhase, Year, Month, Hour
+        """
+        
+        results['peak_hours'] = conn.execute(peak_hours_query).df()
+        
+        conn.close()
+        
+        logger.info(f"Successfully completed monthly aggregations")
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in monthly aggregations: {e}")
+        return {key: pd.DataFrame() for key in ['monthly_volume', 'monthly_uptime', 'peak_hours']}
 
 def run_async_scripts(conf: dict):
     """
@@ -73,18 +319,27 @@ def run_async_scripts(conf: dict):
     
     return processes
 
-def process_single_date_counts(date_str, bucket, conf_athena):
+# Enhanced version of your existing function
+def process_single_date_counts(date_str: str, 
+                             bucket: str, 
+                             conf_athena: Dict[str, Any],
+                             use_duckdb: bool = True):
     """
-    Process counts for a single date - module level function for multiprocessing
-    
-    Args:
-        date_str: Date string to process
-        bucket: S3 bucket name
-        conf_athena: Athena configuration
-    
-    Returns:
-        Result of processing or None if failed
+    Enhanced single date processing with DuckDB option
     """
+    if use_duckdb:
+        # Use DuckDB for faster processing
+        try:
+            pattern = f"atspm/date={date_str}/atspm_*_{date_str}.parquet"
+            return read_s3_parquet_pattern_duckdb(
+                bucket=bucket,
+                pattern=pattern,
+                columns=['SignalID', 'TimeStamp', 'EventCode', 'EventParam', 'CallPhase']
+            )
+        except Exception as e:
+            logger.error(f"DuckDB processing failed for {date_str}, falling back to original method: {e}")
+    
+    # Fallback to original implementation
     try:
         return keep_trying(
             get_counts2,
@@ -96,7 +351,7 @@ def process_single_date_counts(date_str, bucket, conf_athena):
             counts=True
         )
     except Exception as e:
-        logger.error(f"Error processing counts for {date_str}: {e}")
+        logger.error(f"Error processing {date_str}: {e}")
         return None
 
 def process_counts(conf: dict, start_date: str, end_date: str, usable_cores: int):
