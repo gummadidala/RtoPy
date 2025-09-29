@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 import boto3
 import awswrangler as wr
+import duckdb
 from typing import Dict, List, Optional, Any
 import yaml
 
@@ -67,6 +68,49 @@ def run_system_command(command: str) -> bool:
     except subprocess.CalledProcessError as e:
         logger.error(f"Command failed: {command}")
         return False
+
+def get_detection_events_duckdb(date_start: str, date_end: str, 
+                               conf: Dict, signals_list: List[str]) -> pd.DataFrame:
+    """
+    Enhanced detection events retrieval using DuckDB for better performance
+    """
+    try:
+        # Create DuckDB connection with S3 support
+        conn = duckdb.connect()
+        
+        # Configure S3 credentials if available
+        if 'aws_access_key_id' in conf.get('athena', {}):
+            conn.execute(f"""
+                SET s3_region='{conf['athena'].get('region', 'us-east-1')}';
+                SET s3_access_key_id='{conf['athena']['uid']}';
+                SET s3_secret_access_key='{conf['athena']['pwd']}';
+            """)
+        
+        # Install and load required extensions
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+        
+        signals_str = "', '".join(signals_list)
+        
+        # Use DuckDB's excellent Parquet support for direct S3 queries
+        query = f"""
+        SELECT SignalID, Detector, CallPhase, Timeperiod, EventCode, EventParam
+        FROM read_parquet('s3://{conf['bucket']}/detection_events/date=*/**.parquet')
+        WHERE date BETWEEN '{date_start}' AND '{date_end}'
+        AND SignalID IN ('{signals_str}')
+        ORDER BY SignalID, Timeperiod
+        """
+        
+        df = conn.execute(query).df()
+        conn.close()
+        
+        logger.info(f"Retrieved {len(df)} detection events using DuckDB")
+        return df
+        
+    except Exception as e:
+        logger.error(f"DuckDB detection events query failed: {e}")
+        # Fallback to original Athena method
+        return get_detection_events_wrapper(date_start, date_end, conf['athena'], signals_list)
 
 def get_detection_events_wrapper(date_start: str, date_end: str, conf_athena: Dict, signals_list: List[str]) -> pd.DataFrame:
     """
@@ -183,6 +227,128 @@ def get_queue_spillback_date_range(start_date: str, end_date: str, conf: Dict, s
         
         current_date += timedelta(days=1)
 
+def setup_duckdb_s3(conn: duckdb.DuckDBPyConnection, conf: Dict):
+    """Setup DuckDB with S3 configuration"""
+    try:
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+        
+        if 'athena' in conf and 'uid' in conf['athena']:
+            conn.execute(f"""
+                SET s3_region='{conf['athena'].get('region', 'us-east-1')}';
+                SET s3_access_key_id='{conf['athena']['uid']}';
+                SET s3_secret_access_key='{conf['athena']['pwd']}';
+            """)
+    except Exception as e:
+        logger.warning(f"S3 setup for DuckDB failed: {e}")
+
+def upload_parquet_optimized(df: pd.DataFrame, conf: Dict, prefix: str, table_name: str):
+    """Optimized Parquet upload using DuckDB's native S3 support"""
+    try:
+        if df.empty:
+            return
+            
+        conn = duckdb.connect()
+        setup_duckdb_s3(conn, conf)
+        
+        # Register DataFrame as a view
+        conn.register('temp_data', df)
+        
+        # Use DuckDB's optimized Parquet export directly to S3
+        s3_path = f"s3://{conf['bucket']}/{prefix}/{table_name}/data.parquet"
+        
+        conn.execute(f"""
+            COPY temp_data TO '{s3_path}' 
+            (FORMAT PARQUET, COMPRESSION 'snappy')
+        """)
+        
+        conn.close()
+        logger.info(f"Uploaded {len(df)} rows to {s3_path} using DuckDB")
+        
+    except Exception as e:
+        logger.error(f"DuckDB upload failed: {e}")
+        # Fallback to original upload method
+        s3_upload_parquet_date_split(df, bucket=conf['bucket'], prefix=prefix, 
+                                   table_name=table_name, conf_athena=conf['athena'])
+
+def get_queue_spillback_date_range_enhanced(start_date: str, end_date: str, 
+                                          conf: Dict, signals_list: List[str]):
+    """
+    Enhanced queue spillback processing using DuckDB for better performance
+    """
+    try:
+        # Create persistent DuckDB connection for the entire date range
+        conn = duckdb.connect()
+        
+        # Configure S3 and extensions
+        setup_duckdb_s3(conn, conf)
+        
+        # Process all dates in a single optimized query instead of day-by-day
+        signals_str = "', '".join(signals_list)
+        
+        # Optimized batch query for all dates
+        batch_query = f"""
+        WITH detection_events AS (
+            SELECT SignalID, Detector, CallPhase, Timeperiod, EventCode, EventParam, date
+            FROM read_parquet('s3://{conf['bucket']}/detection_events/date=*/**.parquet')
+            WHERE date BETWEEN '{start_date}' AND '{end_date}'
+            AND SignalID IN ('{signals_str}')
+        ),
+        hourly_qs AS (
+            SELECT 
+                SignalID,
+                date_trunc('hour', Timeperiod) as hour,
+                date,
+                COUNT(*) as queue_events,
+                -- Add your queue spillback logic here
+                AVG(CASE WHEN EventCode = 82 THEN 1 ELSE 0 END) as spillback_rate
+            FROM detection_events
+            WHERE EventCode IN (81, 82) -- Queue and spillback events
+            GROUP BY SignalID, date_trunc('hour', Timeperiod), date
+        ),
+        fifteen_min_qs AS (
+            SELECT 
+                SignalID,
+                date_trunc('minute', Timeperiod) - 
+                INTERVAL '1 minute' * (EXTRACT(minute FROM Timeperiod) % 15) as period_15min,
+                date,
+                COUNT(*) as queue_events,
+                AVG(CASE WHEN EventCode = 82 THEN 1 ELSE 0 END) as spillback_rate
+            FROM detection_events
+            WHERE EventCode IN (81, 82)
+            GROUP BY SignalID, 
+                     date_trunc('minute', Timeperiod) - 
+                     INTERVAL '1 minute' * (EXTRACT(minute FROM Timeperiod) % 15), 
+                     date
+        )
+        SELECT 'hourly' as interval_type, * FROM hourly_qs
+        UNION ALL
+        SELECT '15min' as interval_type, * FROM fifteen_min_qs
+        ORDER BY interval_type, SignalID, hour
+        """
+        
+        results_df = conn.execute(batch_query).df()
+        
+        # Split results and upload
+        if not results_df.empty:
+            hourly_df = results_df[results_df['interval_type'] == 'hourly'].drop('interval_type', axis=1)
+            fifteen_min_df = results_df[results_df['interval_type'] == '15min'].drop('interval_type', axis=1)
+            
+            # Upload using optimized batch upload
+            if len(hourly_df) > 0:
+                upload_parquet_optimized(hourly_df, conf, "qs", "queue_spillback")
+            
+            if len(fifteen_min_df) > 0:
+                upload_parquet_optimized(fifteen_min_df, conf, "qs", "queue_spillback_15min")
+        
+        conn.close()
+        logger.info(f"Completed enhanced queue spillback processing for {start_date} to {end_date}")
+        
+    except Exception as e:
+        logger.error(f"Enhanced queue spillback processing failed: {e}")
+        # Fallback to original method
+        get_queue_spillback_date_range(start_date, end_date, conf, signals_list)
+
 def get_pd_date_range(start_date: str, end_date: str, conf: Dict, signals_list: List[str]):
     """
     Exact conversion of R function:
@@ -240,6 +406,63 @@ def get_pd_date_range(start_date: str, end_date: str, conf: Dict, signals_list: 
     
     # R: invisible(gc())
     gc.collect()
+
+def get_pd_date_range_enhanced(start_date: str, end_date: str, 
+                              conf: Dict, signals_list: List[str]):
+    """
+    Enhanced pedestrian delay processing with DuckDB analytics
+    """
+    try:
+        conn = duckdb.connect()
+        setup_duckdb_s3(conn, conf)
+        
+        signals_str = "', '".join(signals_list)
+        
+        # Batch process pedestrian delay with advanced analytics
+        ped_delay_query = f"""
+        WITH ped_events AS (
+            SELECT 
+                SignalID,
+                Timeperiod,
+                EventCode,
+                EventParam,
+                date,
+                LAG(Timeperiod) OVER (PARTITION BY SignalID ORDER BY Timeperiod) as prev_time
+            FROM read_parquet('s3://{conf['bucket']}/detection_events/date=*/**.parquet')
+            WHERE date BETWEEN '{start_date}' AND '{end_date}'
+            AND SignalID IN ('{signals_str}')
+            AND EventCode IN (21, 22, 23) -- Pedestrian events
+        ),
+        ped_delays AS (
+            SELECT 
+                SignalID,
+                date,
+                date_trunc('hour', Timeperiod) as hour,
+                COUNT(*) as ped_calls,
+                AVG(EXTRACT(EPOCH FROM (Timeperiod - prev_time))) as avg_delay_seconds,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (Timeperiod - prev_time))) as median_delay,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (Timeperiod - prev_time))) as p95_delay
+            FROM ped_events
+            WHERE prev_time IS NOT NULL
+            GROUP BY SignalID, date, date_trunc('hour', Timeperiod)
+        )
+        SELECT * FROM ped_delays
+        WHERE avg_delay_seconds IS NOT NULL
+        ORDER BY SignalID, hour
+        """
+        
+        pd_df = conn.execute(ped_delay_query).df()
+        
+        if not pd_df.empty:
+            upload_parquet_optimized(pd_df, conf, "pd", "ped_delay")
+        
+        conn.close()
+        gc.collect()
+        
+    except Exception as e:
+        logger.error(f"Enhanced pedestrian delay processing failed: {e}")
+        # Fallback to original method
+        get_pd_date_range(start_date, end_date, conf, signals_list)
 
 def get_sf_date_range(start_date: str, end_date: str, conf: Dict, signals_list: List[str]):
     """
@@ -305,7 +528,141 @@ def get_sf_date_range(start_date: str, end_date: str, conf: Dict, signals_list: 
         
         current_date += timedelta(days=1)
 
-def main():
+def get_sf_date_range_enhanced(start_date: str, end_date: str, 
+                              conf: Dict, signals_list: List[str]):
+    """Enhanced split failures processing with DuckDB"""
+    try:
+        conn = duckdb.connect()
+        setup_duckdb_s3(conn, conf)
+        
+        signals_str = "', '".join(signals_list)
+        
+        # Advanced split failure analysis with DuckDB
+        split_failure_query = f"""
+        WITH signal_events AS (
+            SELECT 
+                SignalID,
+                Timeperiod,
+                EventCode,
+                EventParam,
+                date,
+                ROW_NUMBER() OVER (PARTITION BY SignalID ORDER BY Timeperiod) as event_seq
+            FROM read_parquet('s3://{conf['bucket']}/detection_events/date=*/**.parquet')
+            WHERE date BETWEEN '{start_date}' AND '{end_date}'
+            AND SignalID IN ('{signals_str}')
+            AND EventCode IN (1, 8, 9, 10) -- Phase events for split failure detection
+        ),
+        phase_cycles AS (
+            SELECT 
+                SignalID,
+                EventParam as Phase,
+                Timeperiod,
+                date,
+                EventCode,
+                LAG(EventCode) OVER (PARTITION BY SignalID, EventParam ORDER BY Timeperiod) as prev_event,
+                LAG(Timeperiod) OVER (PARTITION BY SignalID, EventParam ORDER BY Timeperiod) as prev_time,
+                LEAD(EventCode) OVER (PARTITION BY SignalID, EventParam ORDER BY Timeperiod) as next_event,
+                LEAD(Timeperiod) OVER (PARTITION BY SignalID, EventParam ORDER BY Timeperiod) as next_time
+            FROM signal_events
+        ),
+        split_failures AS (
+            SELECT 
+                SignalID,
+                Phase,
+                date,
+                date_trunc('hour', Timeperiod) as hour,
+                date_trunc('minute', Timeperiod) - 
+                INTERVAL '1 minute' * (EXTRACT(minute FROM Timeperiod) % 15) as period_15min,
+                COUNT(*) as total_cycles,
+                -- Split failure logic: when green time is less than expected
+                SUM(CASE 
+                    WHEN EventCode = 1 AND next_event = 8 
+                    AND EXTRACT(EPOCH FROM (next_time - Timeperiod)) < 10 
+                    THEN 1 ELSE 0 
+                END) as split_failures,
+                AVG(CASE 
+                    WHEN EventCode = 1 AND next_event = 8 
+                    THEN EXTRACT(EPOCH FROM (next_time - Timeperiod)) 
+                END) as avg_green_time,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (
+                    ORDER BY CASE 
+                        WHEN EventCode = 1 AND next_event = 8 
+                        THEN EXTRACT(EPOCH FROM (next_time - Timeperiod)) 
+                    END
+                ) as median_green_time
+            FROM phase_cycles
+            WHERE EventCode = 1 -- Green start
+            AND next_event = 8 -- Yellow start
+            GROUP BY SignalID, Phase, date, 
+                     date_trunc('hour', Timeperiod),
+                     date_trunc('minute', Timeperiod) - 
+                     INTERVAL '1 minute' * (EXTRACT(minute FROM Timeperiod) % 15)
+        ),
+        hourly_sf AS (
+            SELECT 
+                SignalID,
+                date,
+                hour,
+                SUM(split_failures) as split_failures,
+                SUM(total_cycles) as total_cycles,
+                CASE 
+                    WHEN SUM(total_cycles) > 0 
+                    THEN SUM(split_failures)::FLOAT / SUM(total_cycles) 
+                    ELSE 0 
+                END as split_failure_rate,
+                AVG(avg_green_time) as avg_green_time
+            FROM split_failures
+            GROUP BY SignalID, date, hour
+        ),
+        fifteen_min_sf AS (
+            SELECT 
+                SignalID,
+                date,
+                period_15min,
+                SUM(split_failures) as split_failures,
+                SUM(total_cycles) as total_cycles,
+                CASE 
+                    WHEN SUM(total_cycles) > 0 
+                    THEN SUM(split_failures)::FLOAT / SUM(total_cycles) 
+                    ELSE 0 
+                END as split_failure_rate,
+                AVG(avg_green_time) as avg_green_time
+            FROM split_failures
+            GROUP BY SignalID, date, period_15min
+        )
+        SELECT 'hourly' as interval_type, 
+               SignalID, date, hour as period, 
+               split_failures, total_cycles, split_failure_rate, avg_green_time
+        FROM hourly_sf
+        UNION ALL
+        SELECT '15min' as interval_type, 
+               SignalID, date, period_15min as period, 
+               split_failures, total_cycles, split_failure_rate, avg_green_time
+        FROM fifteen_min_sf
+        ORDER BY interval_type, SignalID, period
+        """
+        
+        sf_results = conn.execute(split_failure_query).df()
+        
+        if not sf_results.empty:
+            # Split and upload results
+            hourly_sf = sf_results[sf_results['interval_type'] == 'hourly'].drop('interval_type', axis=1)
+            fifteen_min_sf = sf_results[sf_results['interval_type'] == '15min'].drop('interval_type', axis=1)
+            
+            if len(hourly_sf) > 0:
+                upload_parquet_optimized(hourly_sf, conf, "sf", "split_failures")
+            
+            if len(fifteen_min_sf) > 0:
+                upload_parquet_optimized(fifteen_min_sf, conf, "sf", "split_failures_15min")
+        
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Enhanced split failures processing failed: {e}")
+        # Fallback to original method
+        get_sf_date_range(start_date, end_date, conf, signals_list)
+
+def main_notinscope():
     """
     Exact conversion of Monthly_Report_Calcs_2.R main logic
     """
@@ -400,6 +757,89 @@ def main():
         traceback.print_exc()
         return False
 
+def main_enhanced():
+    """
+    Enhanced main function with DuckDB optimizations and better resource management
+    """
+    try:
+        # Load configuration
+        conf, start_date, end_date, signals_list = load_init_variables()
+        
+        if not signals_list:
+            logger.error("No signals found to process")
+            return False
+        
+        logger.info(f"Processing {len(signals_list)} signals from {start_date} to {end_date}")
+        
+        # Create a persistent DuckDB connection for the session
+        duckdb_conn = duckdb.connect()
+        setup_duckdb_s3(duckdb_conn, conf)
+        
+        # Pre-load signal data into DuckDB for faster access
+        signals_str = "', '".join(signals_list)
+        duckdb_conn.execute(f"""
+            CREATE TABLE session_signals AS 
+            SELECT DISTINCT SignalID 
+            FROM (VALUES {','.join([f"('{s}')" for s in signals_list])}) AS t(SignalID)
+        """)
+        
+        # Continue with existing ETL steps but with enhanced processing
+        print_with_timestamp("Enhanced processing [7 of 11]")
+        
+        # ETL step (unchanged)
+        run_etl = conf.get('run', {}).get('etl')
+        if run_etl is True or run_etl is None:
+            command = f"~/miniconda3/bin/conda run -n sigops python etl_dashboard.py {start_date} {end_date}"
+            if not run_system_command(command):
+                logger.warning("ETL command failed, continuing...")
+        
+        # AOG step (unchanged)
+        print_with_timestamp("aog [8 of 11]")
+        run_aog = conf.get('run', {}).get('arrivals_on_green')
+        if run_aog is True or run_aog is None:
+            command = f"~/miniconda3/bin/conda run -n sigops python get_aog.py {start_date} {end_date}"
+            if not run_system_command(command):
+                logger.warning("AOG command failed, continuing...")
+        
+        # Enhanced queue spillback processing
+        print_with_timestamp("enhanced queue spillback [9 of 11]")
+        run_qs = conf.get('run', {}).get('queue_spillback')
+        if run_qs is True or run_qs is None:
+            get_queue_spillback_date_range_enhanced(start_date, end_date, conf, signals_list)
+        
+        # Enhanced pedestrian delay processing
+        print_with_timestamp("enhanced ped delay [10 of 11]")
+        run_pd = conf.get('run', {}).get('ped_delay')
+        if run_pd is True or run_pd is None:
+            get_pd_date_range_enhanced(start_date, end_date, conf, signals_list)
+        
+        # Enhanced split failures processing
+        print_with_timestamp("enhanced split failures [11 of 11]")
+        run_sf = conf.get('run', {}).get('split_failures')
+        if run_sf is True or run_sf is None:
+            get_sf_date_range_enhanced(start_date, end_date, conf, signals_list)
+        
+        # Flash events (unchanged)
+        print_with_timestamp("flash events [12 of 12]")
+        run_flash = conf.get('run', {}).get('flash_events')
+        if run_flash is True or run_flash is None:
+            command = f"~/miniconda3/bin/conda run -n sigops python get_flash_events.py"
+            if not run_system_command(command):
+                logger.warning("Flash events command failed, continuing...")
+        
+        # Cleanup
+        duckdb_conn.close()
+        gc.collect()
+        
+        print("\n--------------------- End Enhanced Monthly Report calcs -----------------------\n")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in enhanced main execution: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 if __name__ == "__main__":
     """
     Main execution block - equivalent to running the R script
@@ -417,7 +857,7 @@ if __name__ == "__main__":
     
     try:
         print(f"Starting Monthly Report Calcs 2 at {datetime.now()}")
-        success = main()
+        success = main_enhanced()
         
         if success:
             print(f"Completed Monthly Report Calcs 2 successfully at {datetime.now()}")

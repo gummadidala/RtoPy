@@ -21,8 +21,469 @@ import multiprocessing
 import concurrent.futures
 import threading
 from contextlib import contextmanager
+import duckdb
+from pathlib import Path
+import tempfile
 
 logger = logging.getLogger(__name__)
+
+def export_to_duckdb(df: pd.DataFrame, 
+                    database_path: Union[str, Path], 
+                    table_name: str,
+                    if_exists: str = 'replace') -> bool:
+    """
+    Export DataFrame to DuckDB database
+    
+    Args:
+        df: DataFrame to export
+        database_path: Path to DuckDB database file
+        table_name: Name of table to create
+        if_exists: What to do if table exists ('replace', 'append', 'fail')
+    
+    Returns:
+        Success status
+    """
+    try:
+        database_path = str(database_path)
+        
+        # Connect to DuckDB database
+        conn = duckdb.connect(database_path)
+        
+        if if_exists == 'replace':
+            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        elif if_exists == 'fail':
+            # Check if table exists
+            result = conn.execute(f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table_name}'").fetchone()
+            if result[0] > 0:
+                raise ValueError(f"Table {table_name} already exists")
+        
+        # Register DataFrame and create table
+        conn.register('temp_df', df)
+        
+        if if_exists == 'append':
+            conn.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
+        else:
+            conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
+        
+        conn.close()
+        
+        logger.info(f"Successfully exported {len(df)} rows to DuckDB table {table_name}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error exporting to DuckDB: {e}")
+        return False
+
+def query_s3_with_duckdb(bucket: str, 
+                        pattern: str, 
+                        sql_query: str,
+                        output_format: str = 'dataframe') -> Union[pd.DataFrame, str, bool]:
+    """
+    Query S3 parquet files directly using DuckDB SQL
+    
+    Args:
+        bucket: S3 bucket name
+        pattern: S3 file pattern
+        sql_query: SQL query to execute (use 'source_data' as table name)
+        output_format: 'dataframe', 'csv', 'parquet'
+    
+    Returns:
+        Query results in specified format
+    """
+    try:
+        conn = duckdb.connect()
+        conn.execute("SET s3_region='us-east-1';")
+        
+        s3_pattern = f"s3://{bucket}/{pattern}"
+        
+        # Create view from S3 data
+        conn.execute(f"CREATE VIEW source_data AS SELECT * FROM read_parquet('{s3_pattern}')")
+        
+        if output_format == 'dataframe':
+            result = conn.execute(sql_query).df()
+        elif output_format == 'csv':
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+                conn.execute(f"COPY ({sql_query}) TO '{f.name}' (FORMAT CSV, HEADER)")
+                result = f.name
+        elif output_format == 'parquet':
+            with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as f:
+                conn.execute(f"COPY ({sql_query}) TO '{f.name}' (FORMAT PARQUET)")
+                result = f.name
+        else:
+            raise ValueError(f"Unsupported output format: {output_format}")
+        
+        conn.close()
+        
+        logger.info(f"Successfully executed S3 query")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error querying S3 with DuckDB: {e}")
+        return pd.DataFrame() if output_format == 'dataframe' else None
+
+def compare_dataframes_duckdb(df1: pd.DataFrame, 
+                             df2: pd.DataFrame, 
+                             key_columns: List[str],
+                             compare_columns: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Compare two DataFrames using DuckDB for faster processing
+    
+    Args:
+        df1: First DataFrame
+        df2: Second DataFrame
+        key_columns: Columns to use as keys for comparison
+        compare_columns: Specific columns to compare (optional)
+    
+    Returns:
+        Dictionary with comparison results
+    """
+    try:
+        conn = duckdb.connect()
+        
+        # Register DataFrames
+        conn.register('df1', df1)
+        conn.register('df2', df2)
+        
+        # Basic statistics
+        comparison = {
+            'shape_df1': df1.shape,
+            'shape_df2': df2.shape,
+            'columns_df1': set(df1.columns),
+            'columns_df2': set(df2.columns),
+        }
+        
+        common_columns = set(df1.columns) & set(df2.columns)
+        comparison['common_columns'] = common_columns
+        comparison['columns_only_df1'] = set(df1.columns) - set(df2.columns)
+        comparison['columns_only_df2'] = set(df2.columns) - set(df1.columns)
+        
+        if compare_columns is None:
+            compare_columns = list(common_columns - set(key_columns))
+        
+        # Find records only in df1
+        key_cols_str = ", ".join(key_columns)
+        only_df1_query = f"""
+        SELECT {key_cols_str}, 'only_in_df1' as status
+        FROM df1
+        WHERE ({key_cols_str}) NOT IN (SELECT {key_cols_str} FROM df2)
+        """
+        comparison['only_in_df1'] = conn.execute(only_df1_query).df()
+        
+        # Find records only in df2
+        only_df2_query = f"""
+        SELECT {key_cols_str}, 'only_in_df2' as status
+        FROM df2
+        WHERE ({key_cols_str}) NOT IN (SELECT {key_cols_str} FROM df1)
+        """
+        comparison['only_in_df2'] = conn.execute(only_df2_query).df()
+        
+        # Find value differences for common records
+        if compare_columns:
+            join_condition = " AND ".join([f"a.{col} = b.{col}" for col in key_columns])
+            
+            differences = []
+            for col in compare_columns:
+                if col in common_columns:
+                    diff_query = f"""
+                    SELECT {key_cols_str}, 
+                           a.{col} as {col}_df1,
+                           b.{col} as {col}_df2,
+                           '{col}' as column_name
+                    FROM df1 a
+                    INNER JOIN df2 b ON {join_condition}
+                    WHERE a.{col} != b.{col} OR (a.{col} IS NULL AND b.{col} IS NOT NULL) OR (a.{col} IS NOT NULL AND b.{col} IS NULL)
+                    """
+                    diff_result = conn.execute(diff_query).df()
+                    if not diff_result.empty:
+                        differences.append(diff_result)
+            
+            comparison['value_differences'] = pd.concat(differences, ignore_index=True) if differences else pd.DataFrame()
+        
+        # Summary statistics
+        comparison['summary'] = {
+            'total_records_df1': len(df1),
+            'total_records_df2': len(df2),
+            'common_records': len(df1) + len(df2) - len(comparison['only_in_df1']) - len(comparison['only_in_df2']),
+            'only_in_df1_count': len(comparison['only_in_df1']),
+            'only_in_df2_count': len(comparison['only_in_df2']),
+            'value_differences_count': len(comparison.get('value_differences', pd.DataFrame()))
+        }
+        
+        conn.close()
+        
+        logger.info("Successfully compared DataFrames using DuckDB")
+        return comparison
+        
+    except Exception as e:
+        logger.error(f"Error comparing DataFrames with DuckDB: {e}")
+        # Fallback to original pandas method
+        return compare_dataframes(df1, df2, key_columns)
+
+def detect_outliers_duckdb(data_source: Union[pd.DataFrame, Dict[str, Any]], 
+                          column: str, 
+                          method: str = 'iqr',
+                          threshold: float = 1.5,
+                          group_by: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Detect outliers using DuckDB statistical functions
+    
+    Args:
+        data_source: DataFrame or S3 source info
+        column: Column to analyze for outliers
+        method: Method ('iqr', 'zscore', 'modified_zscore')
+        threshold: Threshold for outlier detection
+        group_by: Optional grouping columns
+    
+    Returns:
+        DataFrame with outlier flags
+    """
+    try:
+        conn = duckdb.connect()
+        
+        # Handle data source
+        if isinstance(data_source, dict):
+            bucket = data_source['bucket']
+            pattern = data_source['pattern']
+            conn.execute("SET s3_region='us-east-1';")
+            s3_pattern = f"s3://{bucket}/{pattern}"
+            conn.execute(f"CREATE VIEW source_data AS SELECT * FROM read_parquet('{s3_pattern}')")
+        else:
+            conn.register('source_data', data_source)
+        
+        # Build GROUP BY clause
+        group_clause = ""
+        partition_clause = ""
+        if group_by:
+            group_cols = ", ".join(group_by)
+            partition_clause = f"PARTITION BY {group_cols}"
+        
+        if method == 'iqr':
+            query = f"""
+            WITH stats AS (
+                SELECT *,
+                       PERCENTILE_CONT(0.25) OVER ({partition_clause}) as Q1,
+                       PERCENTILE_CONT(0.75) OVER ({partition_clause}) as Q3
+                FROM source_data
+                WHERE {column} IS NOT NULL
+            ),
+            outlier_bounds AS (
+                SELECT *,
+                       Q1 - {threshold} * (Q3 - Q1) as lower_bound,
+                       Q3 + {threshold} * (Q3 - Q1) as upper_bound
+                FROM stats
+            )
+            SELECT *,
+                   CASE WHEN {column} < lower_bound OR {column} > upper_bound 
+                        THEN true ELSE false END as is_outlier,
+                   CASE WHEN {column} < lower_bound THEN 'low'
+                        WHEN {column} > upper_bound THEN 'high'
+                        ELSE 'normal' END as outlier_type
+            FROM outlier_bounds
+            """
+            
+        elif method == 'zscore':
+            query = f"""
+            WITH stats AS (
+                SELECT *,
+                       AVG({column}) OVER ({partition_clause}) as mean_val,
+                       STDDEV({column}) OVER ({partition_clause}) as std_val
+                FROM source_data
+                WHERE {column} IS NOT NULL
+            )
+            SELECT *,
+                   ABS(({column} - mean_val) / std_val) as zscore,
+                   CASE WHEN ABS(({column} - mean_val) / std_val) > {threshold} 
+                        THEN true ELSE false END as is_outlier,
+                   CASE WHEN ({column} - mean_val) / std_val > {threshold} THEN 'high'
+                        WHEN ({column} - mean_val) / std_val < -{threshold} THEN 'low'
+                        ELSE 'normal' END as outlier_type
+            FROM stats
+            """
+            
+        else:
+            raise ValueError(f"Unsupported outlier detection method: {method}")
+        
+        result = conn.execute(query).df()
+        conn.close()
+        
+        logger.info(f"Successfully detected outliers using {method} method")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error detecting outliers with DuckDB: {e}")
+        # Fallback to original pandas method
+        if isinstance(data_source, pd.DataFrame):
+            outliers = detect_outliers(data_source[column], method, threshold)
+            data_source['is_outlier'] = outliers
+            return data_source
+        else:
+            return pd.DataFrame()
+
+def create_duckdb_from_s3_pattern(bucket: str, 
+                                 pattern: str, 
+                                 db_path: Union[str, Path],
+                                 table_name: str,
+                                 partition_by: Optional[List[str]] = None) -> bool:
+    """
+    Create DuckDB database from S3 parquet files
+    
+    Args:
+        bucket: S3 bucket name
+        pattern: S3 file pattern
+        db_path: Path for DuckDB database
+        table_name: Name of table to create
+        partition_by: Optional partition columns
+    
+    Returns:
+        Success status
+    """
+    try:
+        db_path = str(db_path)
+        
+        # Connect to DuckDB database
+        conn = duckdb.connect(db_path)
+        conn.execute("SET s3_region='us-east-1';")
+        
+        s3_pattern = f"s3://{bucket}/{pattern}"
+        
+        # Create table from S3 data
+        if partition_by:
+            # Create partitioned table
+            partition_cols = ", ".join(partition_by)
+            query = f"""
+            CREATE TABLE {table_name} AS 
+            SELECT * FROM read_parquet('{s3_pattern}')
+            """
+            # Note: DuckDB doesn't support PARTITION BY in CREATE TABLE AS
+            # We'll create the table first, then the data will be naturally partitioned by the pattern
+        else:
+            query = f"CREATE TABLE {table_name} AS SELECT * FROM read_parquet('{s3_pattern}')"
+        
+        conn.execute(query)
+        
+        # Create indexes for better performance
+        if partition_by:
+            for col in partition_by:
+                try:
+                    conn.execute(f"CREATE INDEX idx_{table_name}_{col} ON {table_name}({col})")
+                except:
+                    pass  # Index might already exist or column might not be suitable
+        
+        # Get table statistics
+        stats = conn.execute(f"SELECT COUNT(*) as row_count FROM {table_name}").fetchone()
+        
+        conn.close()
+        
+        logger.info(f"Successfully created DuckDB table {table_name} with {stats[0]} rows")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error creating DuckDB from S3 pattern: {e}")
+        return False
+
+# Enhanced export function
+def export_to_multiple_formats(df: pd.DataFrame, 
+                             base_filename: str, 
+                             formats: List[str] = ['csv', 'parquet', 'json'],
+                             include_duckdb: bool = True):
+    """
+    Enhanced export function with DuckDB support
+    """
+    try:
+        exported_files = []
+        
+        for fmt in formats:
+            filename = f"{base_filename}.{fmt}"
+            
+            if fmt == 'csv':
+                df.to_csv(filename, index=False)
+            elif fmt == 'parquet':
+                df.to_parquet(filename, index=False)
+            elif fmt == 'json':
+                df.to_json(filename, orient='records', date_format='iso')
+            elif fmt == 'xlsx':
+                df.to_excel(filename, index=False)
+            elif fmt == 'feather':
+                df.to_feather(filename)
+            else:
+                logger.warning(f"Unsupported format: {fmt}")
+                continue
+            
+            exported_files.append(filename)
+            logger.info(f"Exported to {filename}")
+        
+        # Add DuckDB export if requested
+        if include_duckdb:
+            db_filename = f"{base_filename}.duckdb"
+            table_name = Path(base_filename).stem  # Use filename as table name
+            if export_to_duckdb(df, db_filename, table_name):
+                exported_files.append(db_filename)
+        
+        return exported_files
+        
+    except Exception as e:
+        logger.error(f"Error exporting to multiple formats: {e}")
+        return []
+
+def analyze_s3_parquet_structure(bucket: str, 
+                               pattern: str,
+                               sample_size: int = 1000) -> Dict[str, Any]:
+    """
+    Analyze S3 parquet file structure using DuckDB
+    
+    Args:
+        bucket: S3 bucket name
+        pattern: S3 file pattern
+        sample_size: Number of rows to sample for analysis
+    
+    Returns:
+        Dictionary with structure analysis
+    """
+    try:
+        conn = duckdb.connect()
+        conn.execute("SET s3_region='us-east-1';")
+        
+        s3_pattern = f"s3://{bucket}/{pattern}"
+        
+        # Get schema information
+        schema_query = f"DESCRIBE SELECT * FROM read_parquet('{s3_pattern}') LIMIT 1"
+        schema_info = conn.execute(schema_query).df()
+        
+        # Get sample data for analysis
+        sample_query = f"SELECT * FROM read_parquet('{s3_pattern}') USING SAMPLE {sample_size}"
+        sample_data = conn.execute(sample_query).df()
+        
+        # Get file count and size estimates
+        files_query = f"""
+        SELECT 
+            COUNT(*) as file_count,
+            SUM(file_size) as total_size_bytes
+        FROM read_parquet_metadata('{s3_pattern}')
+        """
+        try:
+            file_stats = conn.execute(files_query).df()
+        except:
+            file_stats = pd.DataFrame({'file_count': [0], 'total_size_bytes': [0]})
+        
+        analysis = {
+            'schema': schema_info.to_dict('records'),
+            'column_count': len(schema_info),
+            'sample_row_count': len(sample_data),
+            'file_statistics': file_stats.to_dict('records')[0] if not file_stats.empty else {},
+            'data_types': dict(zip(schema_info['column_name'], schema_info['column_type'])),
+            'null_counts': sample_data.isnull().sum().to_dict(),
+            'unique_counts': {col: sample_data[col].nunique() for col in sample_data.columns},
+            'sample_data': sample_data.head(10).to_dict('records')
+        }
+        
+        conn.close()
+        
+        logger.info(f"Successfully analyzed S3 parquet structure")
+        return analysis
+    
+    except Exception as e:
+        logger.error(f"Error analyzing S3 parquet structure: {e}")
+        return {}
 
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
     """
@@ -1634,7 +2095,7 @@ def create_summary_stats(df: pd.DataFrame, group_cols: List[str],
         logger.error(f"Error creating summary statistics: {e}")
         return pd.DataFrame()
 
-def export_to_multiple_formats(df: pd.DataFrame, base_filename: str, 
+def export_to_multiple_formats_notinscope(df: pd.DataFrame, base_filename: str, 
                               formats: List[str] = ['csv', 'parquet', 'json']):
     """
     Export DataFrame to multiple file formats
