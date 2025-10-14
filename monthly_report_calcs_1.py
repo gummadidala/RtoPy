@@ -188,7 +188,7 @@ def keep_trying(func, n_tries: int = 3, timeout: int = 60, *args, **kwargs):
             logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {wait_time} seconds...")
             time.sleep(wait_time)
 
-def get_parquet_schema(conn, pattern: str) -> List[str]:
+def get_parquet_schema_notinscope(conn, pattern: str) -> List[str]:
     """Get the schema of parquet files to check available columns"""
     try:
         # First, try to get just one file to check schema
@@ -736,21 +736,44 @@ def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
         # Build S3 pattern for ATSPM data
         pattern = f"s3://{bucket}/atspm/date={date_str}/atspm_*_{date_str}.parquet"
         
-        # Query to aggregate data by hour
-        query = f"""
-        SELECT 
-            SignalID,
-            DATE_TRUNC('hour', TimeStamp) as TimeStamp,
-            CallPhase,
-            Detector,
-            COUNT(*) as vol,
-            '{date_str}' as Date,
-            EXTRACT(hour FROM TimeStamp) as Hour
-        FROM read_parquet('{pattern}')
-        WHERE EventCode IN (81, 82)  -- Vehicle detection events
-        GROUP BY SignalID, DATE_TRUNC('hour', TimeStamp), CallPhase, Detector
-        ORDER BY SignalID, TimeStamp, CallPhase, Detector
-        """
+        # First check what columns are actually available
+        logger.info(f"Checking schema for pattern: {pattern}")
+        columns = get_parquet_schema(conn, pattern)
+        
+        # Build query based on available columns
+        if 'CallPhase' in columns and 'Detector' in columns:
+            # Use actual columns if they exist
+            query = f"""
+            SELECT 
+                SignalID,
+                DATE_TRUNC('hour', TimeStamp) as TimeStamp,
+                CallPhase,
+                Detector,
+                COUNT(*) as vol,
+                '{date_str}' as Date,
+                EXTRACT(hour FROM TimeStamp) as Hour
+            FROM read_parquet('{pattern}')
+            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            GROUP BY SignalID, DATE_TRUNC('hour', TimeStamp), CallPhase, Detector
+            ORDER BY SignalID, TimeStamp, CallPhase, Detector
+            """
+        else:
+            # Fallback query without missing columns
+            logger.info(f"CallPhase/Detector columns not found, using fallback query")
+            query = f"""
+            SELECT 
+                SignalID,
+                DATE_TRUNC('hour', TimeStamp) as TimeStamp,
+                COALESCE(EventParam, 1) as CallPhase,
+                1 as Detector,
+                COUNT(*) as vol,
+                '{date_str}' as Date,
+                EXTRACT(hour FROM TimeStamp) as Hour
+            FROM read_parquet('{pattern}')
+            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            GROUP BY SignalID, DATE_TRUNC('hour', TimeStamp), COALESCE(EventParam, 1)
+            ORDER BY SignalID, TimeStamp, CallPhase
+            """
         
         result = conn.execute(query).df()
         logger.info(f"Retrieved {len(result)} hourly count records for {date_str}")
@@ -788,27 +811,55 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
         # Build S3 pattern for ATSPM data
         pattern = f"s3://{bucket}/atspm/date={date_str}/atspm_*_{date_str}.parquet"
         
-        # Query to aggregate data by 15-minute intervals
-        query = f"""
-        SELECT 
-            SignalID,
-            DATE_TRUNC('minute', TimeStamp) - 
-            (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute' as TimeStamp,
-            CallPhase,
-            Detector,
-            COUNT(*) as vol,
-            '{date_str}' as Date,
-            EXTRACT(hour FROM TimeStamp) as Hour,
-            FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter
-        FROM read_parquet('{pattern}')
-        WHERE EventCode IN (81, 82)  -- Vehicle detection events
-        GROUP BY 
-            SignalID, 
-            DATE_TRUNC('minute', TimeStamp) - (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute',
-            CallPhase, 
-            Detector
-        ORDER BY SignalID, TimeStamp, CallPhase, Detector
-        """
+        # First check what columns are actually available
+        logger.info(f"Checking schema for pattern: {pattern}")
+        columns = get_parquet_schema(conn, pattern)
+        
+        # Build query based on available columns
+        if 'CallPhase' in columns and 'Detector' in columns:
+            # Use actual columns if they exist
+            query = f"""
+            SELECT 
+                SignalID,
+                DATE_TRUNC('minute', TimeStamp) - 
+                (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute' as TimeStamp,
+                CallPhase,
+                Detector,
+                COUNT(*) as vol,
+                '{date_str}' as Date,
+                EXTRACT(hour FROM TimeStamp) as Hour,
+                FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter
+            FROM read_parquet('{pattern}')
+            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            GROUP BY 
+                SignalID, 
+                DATE_TRUNC('minute', TimeStamp) - (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute',
+                CallPhase, 
+                Detector
+            ORDER BY SignalID, TimeStamp, CallPhase, Detector
+            """
+        else:
+            # Fallback query without missing columns
+            logger.info(f"CallPhase/Detector columns not found, using fallback query")
+            query = f"""
+            SELECT 
+                SignalID,
+                DATE_TRUNC('minute', TimeStamp) - 
+                (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute' as TimeStamp,
+                COALESCE(EventParam, 1) as CallPhase,
+                1 as Detector,
+                COUNT(*) as vol,
+                '{date_str}' as Date,
+                EXTRACT(hour FROM TimeStamp) as Hour,
+                FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter
+            FROM read_parquet('{pattern}')
+            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            GROUP BY 
+                SignalID, 
+                DATE_TRUNC('minute', TimeStamp) - (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute',
+                COALESCE(EventParam, 1)
+            ORDER BY SignalID, TimeStamp, CallPhase
+            """
         
         result = conn.execute(query).df()
         logger.info(f"Retrieved {len(result)} 15-minute count records for {date_str}")
@@ -824,6 +875,43 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
                 conn.close()
             except:
                 pass
+
+def get_parquet_schema(conn, pattern: str) -> List[str]:
+    """Get the schema of parquet files to check available columns"""
+    try:
+        # First, try to get just one file to check schema
+        schema_query = f"""
+        SELECT * FROM read_parquet('{pattern}')
+        LIMIT 0
+        """
+        result = conn.execute(schema_query)
+        columns = [desc[0] for desc in result.description]
+        logger.info(f"Available columns in parquet files: {columns}")
+        return columns
+    except Exception as e:
+        logger.warning(f"Could not determine parquet schema from pattern {pattern}: {e}")
+        # Try to get schema from a single file if pattern fails
+        try:
+            # Extract bucket and path info to try individual files
+            import re
+            match = re.search(r's3://([^/]+)/(.+)/([^/]+)', pattern)
+            if match:
+                bucket_name = match.group(1)
+                base_path = match.group(2)
+                # Try to list some files and get schema from one
+                simple_pattern = f"s3://{bucket_name}/{base_path}/*.parquet"
+                schema_query = f"""
+                SELECT * FROM read_parquet('{simple_pattern}')
+                LIMIT 0
+                """
+                result = conn.execute(schema_query)
+                columns = [desc[0] for desc in result.description]
+                logger.info(f"Available columns from fallback query: {columns}")
+                return columns
+        except Exception as e2:
+            logger.warning(f"Fallback schema detection also failed: {e2}")
+        
+        return []
 
 def process_hourly_counts_fallback(date_str: str, conf: dict) -> pd.DataFrame:
     """
@@ -921,6 +1009,57 @@ def process_15min_counts_fallback(date_str: str, conf: dict) -> pd.DataFrame:
         raise
 
 def get_counts_based_measures(month_abbrs: list, conf: dict, end_date: str, usable_cores: int):
+    """Process counts-based measures for each month with fallback"""
+    
+    logger.info("Starting monthly counts-based measures [5 of 11]")
+    logger.info("Starting counts-based measures [6 of 11]")
+    
+    if not conf['run'].get('counts_based_measures', True):  # Enable by default but with better error handling
+        logger.info("Counts-based measures processing disabled in configuration")
+        return
+    
+    def process_month(yyyy_mm: str):
+        """Process a single month with error handling"""
+        try:
+            logger.info(f"Processing month: {yyyy_mm}")
+            
+            # Calculate start and end days of the month
+            start_day = pd.to_datetime(f"{yyyy_mm}-01")
+            end_day = start_day + pd.DateOffset(months=1) - pd.DateOffset(days=1)
+            end_day = min(end_day, pd.to_datetime(end_date))
+            
+            date_range = pd.date_range(start=start_day, end=end_day, freq='D')
+            date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
+            
+            # Process hourly counts with better error handling
+            try:
+                process_hourly_counts(yyyy_mm, date_strings, conf, usable_cores)
+            except Exception as e:
+                logger.error(f"Error processing hourly counts for {yyyy_mm}: {e}")
+            
+            # Process 15-minute counts with better error handling  
+            try:
+                process_15min_counts(yyyy_mm, date_strings, conf, usable_cores)
+            except Exception as e:
+                logger.error(f"Error processing 15-minute counts for {yyyy_mm}: {e}")
+            
+            logger.info(f"Completed processing for month: {yyyy_mm}")
+            
+        except Exception as e:
+            logger.error(f"Error processing month {yyyy_mm}: {e}")
+            # Don't re-raise to allow other months to process
+    
+    # Process each month
+    for yyyy_mm in month_abbrs:
+        try:
+            process_month(yyyy_mm)
+        except Exception as e:
+            logger.error(f"Failed to process month {yyyy_mm}: {e}")
+            continue
+    
+    logger.info("--- Finished counts-based measures ---")
+
+def get_counts_based_measures_notinscope(month_abbrs: list, conf: dict, end_date: str, usable_cores: int):
     """Process counts-based measures for each month with fallback"""
     
     logger.info("Starting monthly counts-based measures [5 of 11]")
@@ -1162,7 +1301,7 @@ def validate_configuration(conf: dict) -> bool:
         logger.error(f"Error validating configuration: {e}")
         return False
 
-def create_safe_init_results(start_date: str = None, end_date: str = None) -> dict:
+def create_safe_init_results_notinscope(start_date: str = None, end_date: str = None) -> dict:
     """Create safe initialization results when init fails"""
     
     # Use provided dates or default to yesterday
@@ -1203,6 +1342,54 @@ def create_safe_init_results(start_date: str = None, end_date: str = None) -> di
         'month_abbrs': month_abbrs,
         'signals_list': [],
         'usable_cores': min(multiprocessing.cpu_count(), 2)  # Conservative core usage
+    }
+
+def create_safe_init_results(start_date: str = None, end_date: str = None) -> dict:
+    """Create safe initialization results when init fails"""
+    
+    # Use provided dates or default to yesterday
+    if not start_date or not end_date:
+        yesterday = datetime.now() - timedelta(days=1)
+        start_date = end_date = yesterday.strftime('%Y-%m-%d')
+    
+    # Generate month abbreviations
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+    
+    month_abbrs = []
+    current = start_dt.replace(day=1)
+    while current <= end_dt:
+        month_abbrs.append(current.strftime('%Y-%m'))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    
+    # Safe configuration with conservative settings
+    safe_conf = {
+        'bucket': 'gdot-spm-sbox',  # Use the bucket from the logs
+        'athena': {},
+        'run': {
+            'counts': True,
+            'cctv': True,  # Enable but with better error handling
+            'travel_times': True,  # Enable but with better error handling
+            'counts_based_measures': True,  # Enable but with schema checking
+            'rsus': False,  # Keep disabled
+            'etl': True,
+            'arrivals_on_green': True,
+            'queue_spillback': True,
+            'ped_delay': True,
+            'split_failures': True
+        }
+    }
+    
+    return {
+        'conf': safe_conf,
+        'start_date': start_date,
+        'end_date': end_date,
+        'month_abbrs': month_abbrs,
+        'signals_list': [],
+        'usable_cores': min(multiprocessing.cpu_count(), 8)  # Match the logs showing 8 cores
     }
 
 def test_dependencies():
