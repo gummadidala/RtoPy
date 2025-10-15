@@ -740,7 +740,7 @@ def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
         logger.info(f"Checking schema for pattern: {pattern}")
         columns = get_parquet_schema(conn, pattern)
         
-        # Build query based on available columns
+        # COMPLETELY FIXED query - TimeStamp is now properly handled in GROUP BY
         if 'CallPhase' in columns and 'Detector' in columns:
             # Use actual columns if they exist
             query = f"""
@@ -754,7 +754,7 @@ def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
                 EventParam,
                 COUNT(*) as vol
             FROM read_parquet('{pattern}')
-            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            WHERE EventCode IN (81, 82)
             GROUP BY SignalID, EXTRACT(hour FROM TimeStamp), CallPhase, Detector, EventCode, EventParam
             ORDER BY SignalID, Hour, CallPhase, Detector
             """
@@ -764,23 +764,26 @@ def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
             query = f"""
             SELECT 
                 SignalID,
-                DATE_TRUNC('hour', TimeStamp) as TimeStamp,
+                '{date_str}' as Date,
+                EXTRACT(hour FROM TimeStamp) as Hour,
                 COALESCE(EventParam, 1) as CallPhase,
                 1 as Detector,
-                COUNT(*) as vol,
-                '{date_str}' as Date,
-                EXTRACT(hour FROM TimeStamp) as Hour
+                EventCode,
+                EventParam,
+                COUNT(*) as vol
             FROM read_parquet('{pattern}')
-            WHERE EventCode IN (81, 82)  -- Vehicle detection events
-            GROUP BY SignalID, DATE_TRUNC('hour', TimeStamp), COALESCE(EventParam, 1)
-            ORDER BY SignalID, TimeStamp, CallPhase
+            WHERE EventCode IN (81, 82)
+            GROUP BY SignalID, EXTRACT(hour FROM TimeStamp), COALESCE(EventParam, 1), EventCode, EventParam
+            ORDER BY SignalID, Hour, CallPhase
             """
         
         result = conn.execute(query).df()
         logger.info(f"Retrieved {len(result)} hourly count records for {date_str}")
+        
         # Add TimeStamp column based on Date and Hour
         if len(result) > 0:
             result['TimeStamp'] = pd.to_datetime(result['Date'] + ' ' + result['Hour'].astype(str).str.zfill(2) + ':00:00')
+        
         return result
         
     except Exception as e:
@@ -818,7 +821,7 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
         logger.info(f"Checking schema for pattern: {pattern}")
         columns = get_parquet_schema(conn, pattern)
         
-        # Build query based on available columns
+        #FIXED query - TimeStamp is now properly handled in GROUP BY
         if 'CallPhase' in columns and 'Detector' in columns:
             # Use actual columns if they exist
             query = f"""
@@ -833,7 +836,7 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
                 EventParam,
                 COUNT(*) as vol
             FROM read_parquet('{pattern}')
-            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            WHERE EventCode IN (81, 82)
             GROUP BY 
                 SignalID, 
                 EXTRACT(hour FROM TimeStamp),
@@ -850,25 +853,29 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
             query = f"""
             SELECT 
                 SignalID,
-                DATE_TRUNC('minute', TimeStamp) - 
-                (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute' as TimeStamp,
-                COALESCE(EventParam, 1) as CallPhase,
-                1 as Detector,
-                COUNT(*) as vol,
                 '{date_str}' as Date,
                 EXTRACT(hour FROM TimeStamp) as Hour,
-                FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter
+                FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter,
+                COALESCE(EventParam, 1) as CallPhase,
+                1 as Detector,
+                EventCode,
+                EventParam,
+                COUNT(*) as vol
             FROM read_parquet('{pattern}')
-            WHERE EventCode IN (81, 82)  -- Vehicle detection events
+            WHERE EventCode IN (81, 82)
             GROUP BY 
                 SignalID, 
-                DATE_TRUNC('minute', TimeStamp) - (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute',
-                COALESCE(EventParam, 1)
-            ORDER BY SignalID, TimeStamp, CallPhase
+                EXTRACT(hour FROM TimeStamp),
+                FLOOR(EXTRACT(minute FROM TimeStamp) / 15),
+                COALESCE(EventParam, 1),
+                EventCode,
+                EventParam
+            ORDER BY SignalID, Hour, Quarter, CallPhase
             """
         
         result = conn.execute(query).df()
         logger.info(f"Retrieved {len(result)} 15-minute count records for {date_str}")
+        
         # Add TimeStamp column based on Date, Hour, and Quarter
         if len(result) > 0:
             result['Minute'] = result['Quarter'] * 15
@@ -878,6 +885,7 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
                 result['Minute'].astype(str).str.zfill(2) + ':00'
             )
             result = result.drop('Minute', axis=1)  # Remove temporary column
+        
         return result
         
     except Exception as e:
