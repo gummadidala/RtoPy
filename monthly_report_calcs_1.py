@@ -746,16 +746,17 @@ def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
             query = f"""
             SELECT 
                 SignalID,
-                DATE_TRUNC('hour', TimeStamp) as TimeStamp,
+                '{date_str}' as Date,
+                EXTRACT(hour FROM TimeStamp) as Hour,
                 CallPhase,
                 Detector,
-                COUNT(*) as vol,
-                '{date_str}' as Date,
-                EXTRACT(hour FROM TimeStamp) as Hour
+                EventCode,
+                EventParam,
+                COUNT(*) as vol
             FROM read_parquet('{pattern}')
             WHERE EventCode IN (81, 82)  -- Vehicle detection events
-            GROUP BY SignalID, DATE_TRUNC('hour', TimeStamp), CallPhase, Detector
-            ORDER BY SignalID, TimeStamp, CallPhase, Detector
+            GROUP BY SignalID, EXTRACT(hour FROM TimeStamp), CallPhase, Detector, EventCode, EventParam
+            ORDER BY SignalID, Hour, CallPhase, Detector
             """
         else:
             # Fallback query without missing columns
@@ -777,7 +778,9 @@ def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
         
         result = conn.execute(query).df()
         logger.info(f"Retrieved {len(result)} hourly count records for {date_str}")
-        
+        # Add TimeStamp column based on Date and Hour
+        if len(result) > 0:
+            result['TimeStamp'] = pd.to_datetime(result['Date'] + ' ' + result['Hour'].astype(str).str.zfill(2) + ':00:00')
         return result
         
     except Exception as e:
@@ -821,22 +824,25 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
             query = f"""
             SELECT 
                 SignalID,
-                DATE_TRUNC('minute', TimeStamp) - 
-                (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute' as TimeStamp,
-                CallPhase,
-                Detector,
-                COUNT(*) as vol,
                 '{date_str}' as Date,
                 EXTRACT(hour FROM TimeStamp) as Hour,
-                FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter
+                FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter,
+                CallPhase,
+                Detector,
+                EventCode,
+                EventParam,
+                COUNT(*) as vol
             FROM read_parquet('{pattern}')
             WHERE EventCode IN (81, 82)  -- Vehicle detection events
             GROUP BY 
                 SignalID, 
-                DATE_TRUNC('minute', TimeStamp) - (EXTRACT(minute FROM TimeStamp) % 15) * INTERVAL '1 minute',
+                EXTRACT(hour FROM TimeStamp),
+                FLOOR(EXTRACT(minute FROM TimeStamp) / 15),
                 CallPhase, 
-                Detector
-            ORDER BY SignalID, TimeStamp, CallPhase, Detector
+                Detector,
+                EventCode,
+                EventParam
+            ORDER BY SignalID, Hour, Quarter, CallPhase, Detector
             """
         else:
             # Fallback query without missing columns
@@ -863,7 +869,15 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
         
         result = conn.execute(query).df()
         logger.info(f"Retrieved {len(result)} 15-minute count records for {date_str}")
-        
+        # Add TimeStamp column based on Date, Hour, and Quarter
+        if len(result) > 0:
+            result['Minute'] = result['Quarter'] * 15
+            result['TimeStamp'] = pd.to_datetime(
+                result['Date'] + ' ' + 
+                result['Hour'].astype(str).str.zfill(2) + ':' + 
+                result['Minute'].astype(str).str.zfill(2) + ':00'
+            )
+            result = result.drop('Minute', axis=1)  # Remove temporary column
         return result
         
     except Exception as e:
