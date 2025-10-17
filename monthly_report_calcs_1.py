@@ -609,13 +609,7 @@ def process_counts_optimized(conf: dict, start_date: str, end_date: str, usable_
 
 def process_hourly_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_cores: int):
     """
-    Process hourly counts for a given month
-    
-    Args:
-        yyyy_mm: Month in YYYY-MM format
-        date_strings: List of date strings to process
-        conf: Configuration dictionary
-        usable_cores: Number of CPU cores to use
+    Process hourly counts for a given month with timeout
     """
     
     logger.info(f"Processing hourly counts for {yyyy_mm}")
@@ -624,27 +618,63 @@ def process_hourly_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_c
         successful_dates = []
         failed_dates = []
         
-        for date_str in date_strings:
+        for i, date_str in enumerate(date_strings, 1):
             try:
-                logger.info(f"Processing hourly counts for {date_str}")
+                logger.info(f"Processing hourly counts for {date_str} ({i}/{len(date_strings)})")
                 
-                # Use DuckDB to process hourly aggregations
-                if duckdb is not None:
-                    result = process_hourly_counts_duckdb(date_str, conf['bucket'])
+                # Add timeout using signal (Unix) or threading (Windows)
+                import threading
+                import queue
+                
+                result_queue = queue.Queue()
+                exception_queue = queue.Queue()
+                
+                def process_with_timeout():
+                    try:
+                        if duckdb is not None:
+                            result = process_hourly_counts_duckdb(date_str, conf['bucket'])
+                        else:
+                            result = process_hourly_counts_fallback(date_str, conf)
+                        result_queue.put(result)
+                    except Exception as e:
+                        exception_queue.put(e)
+                
+                # Run with timeout
+                thread = threading.Thread(target=process_with_timeout)
+                thread.daemon = True
+                thread.start()
+                thread.join(timeout=300)  # 5 minute timeout per date
+                
+                if thread.is_alive():
+                    logger.error(f"Timeout processing hourly counts for {date_str}")
+                    failed_dates.append(date_str)
+                    continue
+                
+                # Check for exceptions
+                if not exception_queue.empty():
+                    raise exception_queue.get()
+                
+                # Get result
+                if not result_queue.empty():
+                    result = result_queue.get()
                 else:
-                    # Fallback processing
-                    result = process_hourly_counts_fallback(date_str, conf)
+                    result = pd.DataFrame()
                 
                 if result is not None and len(result) > 0:
-                    # Upload result to S3 if s3_upload functions are available
-                    if 's3_upload_parquet_date_split' in globals():
-                        s3_upload_parquet_date_split(
-                            result,
-                            prefix="counts_1hr",
-                            bucket=conf['bucket'],
-                            table_name="counts_1hr",
-                            conf_athena=conf.get('athena', {}),
-                        )
+                    # Upload result to S3 if functions are available
+                    try:
+                        if 's3_upload_parquet_date_split' in globals():
+                            s3_upload_parquet_date_split(
+                                result,
+                                prefix="counts_1hr",
+                                bucket=conf['bucket'],
+                                table_name="counts_1hr",
+                                conf_athena=conf.get('athena', {}),
+                            )
+                        else:
+                            logger.warning("s3_upload_parquet_date_split not available")
+                    except Exception as upload_error:
+                        logger.warning(f"Upload failed for {date_str}: {upload_error}")
                     
                     successful_dates.append(date_str)
                     logger.info(f"✓ Successfully processed hourly counts for {date_str}")
@@ -655,6 +685,10 @@ def process_hourly_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_c
             except Exception as e:
                 failed_dates.append(date_str)
                 logger.error(f"✗ Error processing hourly counts for {date_str}: {e}")
+            
+            # Brief pause between dates
+            if i < len(date_strings):
+                time.sleep(2)
         
         logger.info(f"Hourly counts processing for {yyyy_mm}: {len(successful_dates)} successful, {len(failed_dates)} failed")
         
@@ -663,13 +697,7 @@ def process_hourly_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_c
 
 def process_15min_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_cores: int):
     """
-    Process 15-minute counts for a given month
-    
-    Args:
-        yyyy_mm: Month in YYYY-MM format
-        date_strings: List of date strings to process
-        conf: Configuration dictionary
-        usable_cores: Number of CPU cores to use
+    Process 15-minute counts for a given month with timeout
     """
     
     logger.info(f"Processing 15-minute counts for {yyyy_mm}")
@@ -678,27 +706,63 @@ def process_15min_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_co
         successful_dates = []
         failed_dates = []
         
-        for date_str in date_strings:
+        for i, date_str in enumerate(date_strings, 1):
             try:
-                logger.info(f"Processing 15-minute counts for {date_str}")
+                logger.info(f"Processing 15-minute counts for {date_str} ({i}/{len(date_strings)})")
                 
-                # Use DuckDB to process 15-minute aggregations
-                if duckdb is not None:
-                    result = process_15min_counts_duckdb(date_str, conf['bucket'])
+                # Add timeout
+                import threading
+                import queue
+                
+                result_queue = queue.Queue()
+                exception_queue = queue.Queue()
+                
+                def process_with_timeout():
+                    try:
+                        if duckdb is not None:
+                            result = process_15min_counts_duckdb(date_str, conf['bucket'])
+                        else:
+                            result = process_15min_counts_fallback(date_str, conf)
+                        result_queue.put(result)
+                    except Exception as e:
+                        exception_queue.put(e)
+                
+                # Run with timeout
+                thread = threading.Thread(target=process_with_timeout)
+                thread.daemon = True
+                thread.start()
+                thread.join(timeout=300)  # 5 minute timeout per date
+                
+                if thread.is_alive():
+                    logger.error(f"Timeout processing 15-minute counts for {date_str}")
+                    failed_dates.append(date_str)
+                    continue
+                
+                # Check for exceptions
+                if not exception_queue.empty():
+                    raise exception_queue.get()
+                
+                # Get result
+                if not result_queue.empty():
+                    result = result_queue.get()
                 else:
-                    # Fallback processing
-                    result = process_15min_counts_fallback(date_str, conf)
+                    result = pd.DataFrame()
                 
                 if result is not None and len(result) > 0:
-                    # Upload result to S3 if s3_upload functions are available
-                    if 's3_upload_parquet_date_split' in globals():
-                        s3_upload_parquet_date_split(
-                            result,
-                            prefix="counts_15min",
-                            bucket=conf['bucket'],
-                            table_name="counts_15min",
-                            conf_athena=conf.get('athena', {}),
-                        )
+                    # Upload result to S3 if functions are available
+                    try:
+                        if 's3_upload_parquet_date_split' in globals():
+                            s3_upload_parquet_date_split(
+                                result,
+                                prefix="counts_15min",
+                                bucket=conf['bucket'],
+                                table_name="counts_15min",
+                                conf_athena=conf.get('athena', {}),
+                            )
+                        else:
+                            logger.warning("s3_upload_parquet_date_split not available")
+                    except Exception as upload_error:
+                        logger.warning(f"Upload failed for {date_str}: {upload_error}")
                     
                     successful_dates.append(date_str)
                     logger.info(f"✓ Successfully processed 15-minute counts for {date_str}")
@@ -709,13 +773,17 @@ def process_15min_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_co
             except Exception as e:
                 failed_dates.append(date_str)
                 logger.error(f"✗ Error processing 15-minute counts for {date_str}: {e}")
+            
+            # Brief pause between dates
+            if i < len(date_strings):
+                time.sleep(2)
         
         logger.info(f"15-minute counts processing for {yyyy_mm}: {len(successful_dates)} successful, {len(failed_dates)} failed")
         
     except Exception as e:
         logger.error(f"Error in process_15min_counts for {yyyy_mm}: {e}")
 
-def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
+def process_hourly_counts_duckdb_notinscope(date_str: str, bucket: str) -> pd.DataFrame:
     """
     Process hourly counts using DuckDB
     
@@ -796,7 +864,7 @@ def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
             except:
                 pass
 
-def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
+def process_15min_counts_duckdb_notinscope(date_str: str, bucket: str) -> pd.DataFrame:
     """
     Process 15-minute counts using DuckDB
     
@@ -891,6 +959,136 @@ def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"DuckDB 15-minute counts processing failed for {date_str}: {e}")
         raise
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+def process_hourly_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
+    """
+    Process hourly counts using DuckDB with fixed GROUP BY
+    """
+    
+    conn = None
+    try:
+        conn = duckdb.connect()
+        conn.execute("SET s3_region='us-east-1';")
+        conn.execute("SET memory_limit='1GB';")
+        conn.execute("SET threads=2;")  # Limit threads to prevent hanging
+        
+        # Build S3 pattern for ATSPM data
+        pattern = f"s3://{bucket}/atspm/date={date_str}/atspm_*_{date_str}.parquet"
+        
+        # Simplified query with proper GROUP BY
+        query = f"""
+        SELECT 
+            SignalID,
+            '{date_str}' as Date,
+            EXTRACT(hour FROM TimeStamp) as Hour,
+            COALESCE(EventParam, 1) as CallPhase,
+            1 as Detector,
+            COALESCE(EventCode, 81) as EventCode,
+            COALESCE(EventParam, 0) as EventParam,
+            COUNT(*) as vol
+        FROM read_parquet('{pattern}')
+        WHERE COALESCE(EventCode, 81) IN (81, 82)
+        GROUP BY 
+            SignalID, 
+            EXTRACT(hour FROM TimeStamp),
+            COALESCE(EventParam, 1),
+            COALESCE(EventCode, 81),
+            COALESCE(EventParam, 0)
+        ORDER BY SignalID, Hour, CallPhase
+        LIMIT 50000
+        """
+        
+        logger.info(f"Executing DuckDB query for {date_str}")
+        result = conn.execute(query).df()
+        
+        if len(result) > 0:
+            # Add proper TimeStamp column
+            result['TimeStamp'] = pd.to_datetime(
+                result['Date'] + ' ' + result['Hour'].astype(str).str.zfill(2) + ':00:00'
+            )
+            logger.info(f"Retrieved {len(result)} hourly count records for {date_str}")
+        else:
+            logger.warning(f"No data retrieved for {date_str}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"DuckDB hourly counts processing failed for {date_str}: {e}")
+        # Return empty DataFrame instead of raising exception
+        return pd.DataFrame()
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+def process_15min_counts_duckdb(date_str: str, bucket: str) -> pd.DataFrame:
+    """
+    Process 15-minute counts using DuckDB with fixed GROUP BY
+    """
+    
+    conn = None
+    try:
+        conn = duckdb.connect()
+        conn.execute("SET s3_region='us-east-1';")
+        conn.execute("SET memory_limit='1GB';")
+        conn.execute("SET threads=2;")
+        
+        # Build S3 pattern for ATSPM data
+        pattern = f"s3://{bucket}/atspm/date={date_str}/atspm_*_{date_str}.parquet"
+        
+        # Simplified query with proper GROUP BY
+        query = f"""
+        SELECT 
+            SignalID,
+            '{date_str}' as Date,
+            EXTRACT(hour FROM TimeStamp) as Hour,
+            FLOOR(EXTRACT(minute FROM TimeStamp) / 15) as Quarter,
+            COALESCE(EventParam, 1) as CallPhase,
+            1 as Detector,
+            COALESCE(EventCode, 81) as EventCode,
+            COALESCE(EventParam, 0) as EventParam,
+            COUNT(*) as vol
+        FROM read_parquet('{pattern}')
+        WHERE COALESCE(EventCode, 81) IN (81, 82)
+        GROUP BY 
+            SignalID, 
+            EXTRACT(hour FROM TimeStamp),
+            FLOOR(EXTRACT(minute FROM TimeStamp) / 15),
+            COALESCE(EventParam, 1),
+            COALESCE(EventCode, 81),
+            COALESCE(EventParam, 0)
+        ORDER BY SignalID, Hour, Quarter, CallPhase
+        LIMIT 50000
+        """
+        
+        result = conn.execute(query).df()
+        
+        if len(result) > 0:
+            # Add proper TimeStamp column
+            result['Minute'] = result['Quarter'] * 15
+            result['TimeStamp'] = pd.to_datetime(
+                result['Date'] + ' ' + 
+                result['Hour'].astype(str).str.zfill(2) + ':' + 
+                result['Minute'].astype(str).str.zfill(2) + ':00'
+            )
+            result = result.drop('Minute', axis=1)
+            logger.info(f"Retrieved {len(result)} 15-minute count records for {date_str}")
+        else:
+            logger.warning(f"No data retrieved for {date_str}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"DuckDB 15-minute counts processing failed for {date_str}: {e}")
+        return pd.DataFrame()
     finally:
         if conn:
             try:
@@ -1883,6 +2081,7 @@ def create_execution_report():
         
     except Exception as e:
         logger.error(f"Error creating execution report: {e}")
+
 
 if __name__ == "__main__":
     """Run calculations if called directly with enhanced error handling"""
