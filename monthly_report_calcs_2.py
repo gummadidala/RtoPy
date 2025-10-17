@@ -644,7 +644,7 @@ def run_etl_step(start_date: str, end_date: str, conf: Dict) -> bool:
         
         logger.info(f"Executing ETL command: {command}")
         # Increase timeout to 45 minutes (2700 seconds) for ETL
-        success = run_system_command(command, timeout=2700)
+        success = run_system_command(command, timeout=27000)
         
         if success:
             logger.info("✓ ETL step completed successfully")
@@ -678,7 +678,7 @@ def run_aog_step(start_date: str, end_date: str, conf: Dict) -> bool:
         
         logger.info(f"Executing AOG command: {command}")
         # Standard timeout for AOG (20 minutes)
-        success = run_system_command(command, timeout=1200)
+        success = run_system_command(command, timeout=12000)
         
         if success:
             logger.info("✓ AOG step completed successfully")
