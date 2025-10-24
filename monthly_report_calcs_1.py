@@ -643,7 +643,7 @@ def process_hourly_counts(yyyy_mm: str, date_strings: list, conf: dict, usable_c
                 thread = threading.Thread(target=process_with_timeout)
                 thread.daemon = True
                 thread.start()
-                thread.join(timeout=300)  # 5 minute timeout per date
+                thread.join(timeout=30000)  # 5 minute timeout per date
                 
                 if thread.is_alive():
                     logger.error(f"Timeout processing hourly counts for {date_str}")
