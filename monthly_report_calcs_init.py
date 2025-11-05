@@ -89,31 +89,21 @@ def main():
     #                   unlist() %>% unique()
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')
     date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
-    if 'SignalID' in corridors.columns:
-        signals_list = corridors['SignalID'].dropna().unique().tolist()
-    elif 'signal_id' in corridors.columns:
-        signals_list = corridors['signal_id'].dropna().unique().tolist()
-    elif 'signalid' in corridors.columns:
-        signals_list = corridors['signalid'].dropna().unique().tolist()
-    else:
-        # Fallback to original S3 method if SignalID column not found
-        logger.warning("SignalID column not found in corridors file, falling back to S3 method")
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
-        # Create partial function with bucket parameter
-        get_signalids_with_bucket = partial(get_signalids_from_s3, bucket=conf['bucket'])
-        
-        # Process dates in parallel (equivalent to mclapply)
-        with ProcessPoolExecutor(max_workers=usable_cores) as executor:
-            results = list(executor.map(get_signalids_with_bucket, date_strings))
     
-        # Flatten and get unique signals (equivalent to unlist() %>% unique())
-        signals_list = []
-        for result in results:
-            if result:
-                signals_list.extend(result)
+    # Create partial function with bucket parameter
+    get_signalids_with_bucket = partial(get_signalids_from_s3, bucket=conf['bucket'])
     
-        signals_list = list(set(signals_list))  # unique()
+    # Process dates in parallel (equivalent to mclapply)
+    with ProcessPoolExecutor(max_workers=usable_cores) as executor:
+        results = list(executor.map(get_signalids_with_bucket, date_strings))
+    
+    # Flatten and get unique signals (equivalent to unlist() %>% unique())
+    signals_list = []
+    for result in results:
+        if result:
+            signals_list.extend(result)
+    
+    signals_list = list(set(signals_list))  # unique()
     
     # R: get_latest_det_config(conf) %>% s3write_using(qsave, bucket = conf$bucket, object = "ATSPM_Det_Config_Good_Latest.qs")
     det_config = get_latest_det_config(conf)

@@ -16,8 +16,6 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing
 from pathlib import Path
 import re
-import duckdb
-from parquet_lib import read_s3_parquet_pattern_duckdb
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -162,242 +160,6 @@ def get_usable_cores() -> int:
     # Cap at reasonable number to avoid memory issues
     return min(usable, 8)
 
-# Enhanced version of your existing function
-def process_single_date_counts(date_str: str, 
-                             bucket: str, 
-                             conf_athena: Dict[str, Any],
-                             use_duckdb: bool = True):
-    """
-    Enhanced single date processing with DuckDB option
-    """
-    if use_duckdb:
-        # Use DuckDB for faster processing
-        try:
-            pattern = f"atspm/date={date_str}/atspm_*_{date_str}.parquet"
-            return read_s3_parquet_pattern_duckdb(
-                bucket=bucket,
-                pattern=pattern,
-                columns=['SignalID', 'TimeStamp', 'EventCode', 'EventParam', 'CallPhase']
-            )
-        except Exception as e:
-            logger.error(f"DuckDB processing failed for {date_str}, falling back to original method: {e}")
-    
-    # Fallback to original implementation
-    try:
-        return keep_trying(
-            get_counts2,
-            n_tries=2,
-            date_=date_str,
-            bucket=bucket,
-            conf_athena=conf_athena,
-            uptime=True,
-            counts=True
-        )
-    except Exception as e:
-        logger.error(f"Error processing {date_str}: {e}")
-        return None
-
-def get_usable_cores_enhanced() -> int:
-    """
-    Enhanced core detection that considers DuckDB availability
-    If DuckDB is available, we can use fewer cores for parallel processing
-    since DuckDB handles parallelization internally
-    """
-    try:
-        total_cores = multiprocessing.cpu_count()
-        # With DuckDB, use fewer parallel workers since DuckDB parallelizes internally
-        return max(1, total_cores // 4)
-    except ImportError:
-        # Fallback to original implementation
-        return get_usable_cores()
-
-def optimize_processing_strategy(data_size_estimate: int, 
-                               date_count: int,
-                               signal_count: int) -> Dict[str, Any]:
-    """
-    Determine optimal processing strategy based on data characteristics
-    
-    Args:
-        data_size_estimate: Estimated data size in MB
-        date_count: Number of dates to process
-        signal_count: Number of signals to process
-    
-    Returns:
-        Dictionary with processing recommendations
-    """
-    
-    strategy = {
-        'use_duckdb': False,
-        'batch_size': 1,
-        'parallel_workers': get_usable_cores(),
-        'chunk_by': 'date',
-        'reasoning': []
-    }
-    
-    # Large dataset - favor DuckDB
-    if data_size_estimate > 1000:  # > 1GB
-        strategy['use_duckdb'] = True
-        strategy['parallel_workers'] = max(1, strategy['parallel_workers'] // 2)
-        strategy['reasoning'].append("Large dataset detected - using DuckDB for efficiency")
-    
-    # Many small files - favor batching
-    if date_count > 30 and signal_count < 100:
-        strategy['batch_size'] = min(7, date_count // 4)  # Weekly batches
-        strategy['chunk_by'] = 'date'
-        strategy['reasoning'].append("Many dates with few signals - batching by date")
-    
-    # Many signals, few dates - different strategy
-    if signal_count > 500 and date_count < 10:
-        strategy['batch_size'] = min(50, signal_count // 10)
-        strategy['chunk_by'] = 'signal'
-        strategy['reasoning'].append("Many signals with few dates - batching by signal")
-    
-    # Very large scale - definitely use DuckDB
-    if date_count > 100 or signal_count > 1000:
-        strategy['use_duckdb'] = True
-        strategy['parallel_workers'] = 2
-        strategy['reasoning'].append("Very large scale processing - using DuckDB with minimal parallelization")
-    
-    return strategy
-
-def adaptive_batch_processing(date_range: List[str],
-                            bucket: str,
-                            signal_ids: Optional[List[int]] = None,
-                            **kwargs) -> pd.DataFrame:
-    """
-    Adaptively choose processing strategy based on data characteristics
-    
-    Args:
-        date_range: List of dates to process
-        bucket: S3 bucket name
-        signal_ids: Optional signal IDs
-        **kwargs: Additional processing parameters
-    
-    Returns:
-        Processed results DataFrame
-    """
-    try:
-        # Estimate data characteristics
-        estimated_size = estimate_data_size(bucket, date_range, signal_ids)
-        strategy = optimize_processing_strategy(
-            estimated_size, 
-            len(date_range), 
-            len(signal_ids) if signal_ids else 1000  # Assume many signals if not specified
-        )
-        
-        logger.info(f"Processing strategy: {strategy}")
-        
-        if strategy['use_duckdb']:
-            # Use DuckDB-based processing
-            return batch_process_dates_duckdb(
-                date_range=date_range,
-                bucket=bucket,
-                signal_ids=signal_ids,
-                **kwargs
-            )
-        else:
-            # Use traditional parallel processing
-            if strategy['chunk_by'] == 'date':
-                # Process in date chunks
-                all_results = []
-                batch_size = strategy['batch_size']
-                
-                for i in range(0, len(date_range), batch_size):
-                    batch_dates = date_range[i:i + batch_size]
-                    
-                    batch_results = parallel_process_dates(
-                        date_range=batch_dates,
-                        process_function=process_single_date_counts,
-                        max_workers=strategy['parallel_workers'],
-                        bucket=bucket,
-                        **kwargs
-                    )
-                    
-                    valid_results = [r for r in batch_results if r is not None]
-                    if valid_results:
-                        all_results.extend(valid_results)
-                
-                return pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
-            
-            else:
-                # Standard parallel processing
-                return parallel_process_dates(
-                    date_range=date_range,
-                    process_function=process_single_date_counts,
-                    max_workers=strategy['parallel_workers'],
-                    bucket=bucket,
-                    **kwargs
-                )
-    
-    except Exception as e:
-        logger.error(f"Error in adaptive batch processing: {e}")
-        return pd.DataFrame()
-
-def estimate_data_size(bucket: str, 
-                      date_range: List[str], 
-                      signal_ids: Optional[List[int]] = None) -> int:
-    """
-    Estimate data size in MB for processing strategy decisions
-    
-    Args:
-        bucket: S3 bucket name
-        date_range: List of dates
-        signal_ids: Optional signal IDs
-    
-    Returns:
-        Estimated size in MB
-    """
-    try:
-        import boto3
-        s3_client = boto3.client('s3')
-        
-        # Sample a few files to estimate average size
-        sample_size = 0
-        sample_count = 0
-        max_samples = 10
-        
-        for date_str in date_range[:3]:  # Sample first 3 dates
-            if sample_count >= max_samples:
-                break
-                
-            prefix = f"atspm/date={date_str}/"
-            
-            response = s3_client.list_objects_v2(
-                Bucket=bucket,
-                Prefix=prefix,
-                MaxKeys=5  # Sample few files per date
-            )
-            
-            if 'Contents' in response:
-                for obj in response['Contents']:
-                    sample_size += obj['Size']
-                    sample_count += 1
-                    if sample_count >= max_samples:
-                        break
-        
-        if sample_count == 0:
-            return 100  # Default estimate
-        
-        # Calculate average file size
-        avg_file_size = sample_size / sample_count
-        
-        # Estimate total files
-        if signal_ids:
-            total_files = len(date_range) * len(signal_ids)
-        else:
-            # Estimate based on typical signal count
-            total_files = len(date_range) * 200  # Assume 200 signals per day
-        
-        # Total size in MB
-        total_size_mb = (total_files * avg_file_size) / (1024 * 1024)
-        
-        logger.info(f"Estimated data size: {total_size_mb:.1f} MB for {total_files} files")
-        return int(total_size_mb)
-        
-    except Exception as e:
-        logger.warning(f"Could not estimate data size: {e}. Using default estimate.")
-        return 500  # Default estimate
-
 def get_peak_hours(config: Dict[str, Any]) -> tuple:
     """
     Get AM and PM peak hours from configuration
@@ -413,6 +175,33 @@ def get_peak_hours(config: Dict[str, Any]) -> tuple:
     pm_peak = config.get('PM_PEAK_HOURS', [16, 17, 18])
     
     return am_peak, pm_peak
+
+# def get_date_from_string(date_string: str, 
+#                         s3bucket: Optional[str] = None, 
+#                         s3prefix: Optional[str] = None) -> str:
+#     """
+#     Parse date from string, with special handling for 'yesterday'
+    
+#     Args:
+#         date_string: Date string or 'yesterday'
+#         s3bucket: S3 bucket for fallback date detection
+#         s3prefix: S3 prefix for fallback date detection
+    
+#     Returns:
+#         Date string in YYYY-MM-DD format
+#     """
+    
+#     if date_string.lower() == 'yesterday':
+#         yesterday = datetime.now() - timedelta(days=1)
+#         return yesterday.strftime('%Y-%m-%d')
+    
+#     # Try to parse as date
+#     try:
+#         parsed_date = pd.to_datetime(date_string)
+#         return parsed_date.strftime('%Y-%m-%d')
+#     except:
+#         logger.warning(f"Could not parse date: {date_string}")
+#         return datetime.now().strftime('%Y-%m-%d')
 
 def get_date_from_string(
     x,
@@ -508,6 +297,46 @@ def get_signalids_from_s3(date: str, bucket: str) -> List[str]:
     except Exception as e:
         logger.error(f"Error getting signal IDs from S3: {e}")
         return []
+
+# def get_corridors(corridors_filename: str, filter_signals: bool = True) -> pd.DataFrame:
+#     """
+#     Read and process corridors configuration
+    
+#     Args:
+#         corridors_filename: Filename of corridors configuration
+#         filter_signals: Whether to filter for active signals only
+    
+#     Returns:
+#         DataFrame with corridor configuration
+#     """
+    
+#     try:
+#         # Read from S3 or local file
+#         if corridors_filename.startswith('s3://'):
+#             # Parse S3 path
+#             parts = corridors_filename.replace('s3://', '').split('/', 1)
+#             bucket = parts[0]
+#             key = parts[1]
+            
+#             corridors = s3read_using(
+#                 pd.read_excel,
+#                 bucket=bucket,
+#                 object=key
+#             )
+#         else:
+#             corridors = pd.read_excel(corridors_filename)
+#         # Filter for active signals if requested
+#         if filter_signals:
+#             corridors = corridors[corridors['Active'] == True].copy()
+        
+#         # Ensure SignalID is string
+#         corridors['SignalID'] = corridors['SignalID'].astype(str)
+        
+#         return corridors
+        
+#     except Exception as e:
+#         logger.error(f"Error reading corridors: {e}")
+#         return pd.DataFrame()
 
 def get_latest_det_config(config: Dict[str, Any]) -> pd.DataFrame:
     """
@@ -625,272 +454,6 @@ def parallel_process_dates(date_range: List[str],
                 results.append(None)
     
     return results
-
-def batch_process_dates_duckdb(date_range: List[str], 
-                              bucket: str,
-                              signal_ids: Optional[List[int]] = None,
-                              aggregation_type: str = 'daily') -> pd.DataFrame:
-    """
-    Batch process dates using DuckDB instead of parallel individual processing
-    
-    Args:
-        date_range: List of dates to process
-        bucket: S3 bucket name
-        signal_ids: Optional list of signal IDs
-        aggregation_type: Type of aggregation ('daily', 'hourly', 'signal_summary')
-    
-    Returns:
-        Processed results DataFrame
-    """
-    try:
-        conn = duckdb.connect()
-        conn.execute("SET s3_region='us-east-1';")
-        
-        # Build file pattern for date range
-        if len(date_range) == 1:
-            pattern = f"atspm/date={date_range[0]}/atspm_*_{date_range[0]}.parquet"
-        else:
-            # Use pattern with multiple dates
-            date_pattern = "{" + ",".join(date_range) + "}"
-            pattern = f"atspm/date={date_pattern}/atspm_*.parquet"
-        
-        s3_pattern = f"s3://{bucket}/{pattern}"
-        
-        # Add signal filter if specified
-        signal_filter = ""
-        if signal_ids:
-            signal_list = ",".join(map(str, signal_ids))
-            signal_filter = f"AND SignalID IN ({signal_list})"
-        
-        if aggregation_type == 'daily':
-            query = f"""
-            SELECT 
-                SignalID,
-                Date,
-                CallPhase,
-                COUNT(*) as total_events,
-                COUNT(CASE WHEN EventCode IN (81, 82) THEN 1 END) as vehicle_events,
-                COUNT(CASE WHEN EventCode IN (90, 91) THEN 1 END) as ped_events,
-                COUNT(DISTINCT DATE_TRUNC('hour', TimeStamp)) as active_hours,
-                MIN(TimeStamp) as first_event,
-                MAX(TimeStamp) as last_event
-            FROM read_parquet('{s3_pattern}')
-            WHERE 1=1 {signal_filter}
-            GROUP BY SignalID, Date, CallPhase
-            ORDER BY SignalID, Date, CallPhase
-            """
-            
-        elif aggregation_type == 'hourly':
-            query = f"""
-            SELECT 
-                SignalID,
-                Date,
-                CallPhase,
-                DATE_TRUNC('hour', TimeStamp) as Hour,
-                COUNT(*) as total_events,
-                COUNT(CASE WHEN EventCode IN (81, 82) THEN 1 END) as vehicle_events,
-                COUNT(CASE WHEN EventCode IN (90, 91) THEN 1 END) as ped_events
-            FROM read_parquet('{s3_pattern}')
-            WHERE 1=1 {signal_filter}
-            GROUP BY SignalID, Date, CallPhase, Hour
-            ORDER BY SignalID, Date, CallPhase, Hour
-            """
-            
-        elif aggregation_type == 'signal_summary':
-            query = f"""
-            SELECT 
-                SignalID,
-                COUNT(DISTINCT Date) as active_days,
-                COUNT(*) as total_events,
-                COUNT(CASE WHEN EventCode IN (81, 82) THEN 1 END) as total_vehicle_events,
-                COUNT(CASE WHEN EventCode IN (90, 91) THEN 1 END) as total_ped_events,
-                MIN(Date) as first_date,
-                MAX(Date) as last_date,
-                AVG(CASE WHEN EventCode IN (81, 82) THEN 1.0 ELSE 0.0 END) * 100 as vehicle_event_pct
-            FROM read_parquet('{s3_pattern}')
-            WHERE 1=1 {signal_filter}
-            GROUP BY SignalID
-            ORDER BY SignalID
-            """
-        else:
-            raise ValueError(f"Unsupported aggregation type: {aggregation_type}")
-        
-        result = conn.execute(query).df()
-        conn.close()
-        
-        logger.info(f"Successfully batch processed {len(date_range)} dates with {aggregation_type} aggregation")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in batch date processing: {e}")
-        # Fallback to original parallel processing
-        return parallel_process_dates(date_range, process_single_date_counts)
-
-def generate_report_from_s3_duckdb(bucket: str, 
-                                  report_config: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
-    """
-    Generate comprehensive report directly from S3 using DuckDB
-    
-    Args:
-        bucket: S3 bucket name
-        report_config: Configuration for report generation
-            {
-                'date_range': ['2024-01-01', '2024-01-31'],
-                'signal_ids': [1001, 1002, 1003],
-                'include_uptime': True,
-                'include_volume': True,
-                'include_performance': True,
-                'include_pedestrian': True
-            }
-    
-    Returns:
-        Dictionary with different report sections
-    """
-    try:
-        date_range = report_config['date_range']
-        signal_ids = report_config.get('signal_ids', [])
-        
-        conn = duckdb.connect()
-        conn.execute("SET s3_region='us-east-1';")
-        
-        # Build file pattern
-        if len(date_range) > 1:
-            start_date, end_date = min(date_range), max(date_range)
-            # For date ranges, we might need to be more specific about the pattern
-            pattern = f"atspm/date=*/atspm_*.parquet"  # Will filter in WHERE clause
-        else:
-            pattern = f"atspm/date={date_range[0]}/atspm_*_{date_range[0]}.parquet"
-        
-        s3_pattern = f"s3://{bucket}/{pattern}"
-        
-        # Build filters
-        filters = []
-        if len(date_range) > 1:
-            start_date, end_date = min(date_range), max(date_range)
-            filters.append(f"Date BETWEEN '{start_date}' AND '{end_date}'")
-        
-        if signal_ids:
-            signal_list = ",".join(map(str, signal_ids))
-            filters.append(f"SignalID IN ({signal_list})")
-        
-        where_clause = "WHERE " + " AND ".join(filters) if filters else ""
-        
-        report_sections = {}
-        
-        # Uptime Analysis
-        if report_config.get('include_uptime', True):
-            uptime_query = f"""
-            WITH hourly_activity AS (
-                SELECT 
-                    SignalID,
-                    Date,
-                    DATE_TRUNC('hour', TimeStamp) as Hour,
-                    COUNT(*) as event_count
-                FROM read_parquet('{s3_pattern}')
-                {where_clause}
-                GROUP BY SignalID, Date, Hour
-            ),
-            daily_uptime AS (
-                SELECT 
-                    SignalID,
-                    Date,
-                    COUNT(*) as active_hours,
-                    24 as expected_hours,
-                    (COUNT(*)::float / 24) * 100 as uptime_pct
-                FROM hourly_activity
-                GROUP BY SignalID, Date
-            )
-            SELECT 
-                SignalID,
-                AVG(uptime_pct) as avg_uptime_pct,
-                MIN(uptime_pct) as min_uptime_pct,
-                MAX(uptime_pct) as max_uptime_pct,
-                COUNT(*) as total_days,
-                SUM(CASE WHEN uptime_pct >= 90 THEN 1 ELSE 0 END) as days_above_90pct
-            FROM daily_uptime
-            GROUP BY SignalID
-            ORDER BY SignalID
-            """
-            report_sections['uptime'] = conn.execute(uptime_query).df()
-        
-        # Volume Analysis
-        if report_config.get('include_volume', True):
-            volume_query = f"""
-            SELECT 
-                SignalID,
-                CallPhase,
-                COUNT(CASE WHEN EventCode IN (81, 82) THEN 1 END) as total_volume,
-                COUNT(CASE WHEN EventCode IN (81, 82) THEN 1 END) / COUNT(DISTINCT Date) as avg_daily_volume,
-                EXTRACT(dow FROM Date) as day_of_week,
-                AVG(CASE WHEN EventCode IN (81, 82) AND EXTRACT(hour FROM TimeStamp) BETWEEN 6 AND 9 THEN 1.0 ELSE 0 END) * COUNT(*) as am_peak_volume,
-                AVG(CASE WHEN EventCode IN (81, 82) AND EXTRACT(hour FROM TimeStamp) BETWEEN 16 AND 19 THEN 1.0 ELSE 0 END) * COUNT(*) as pm_peak_volume
-            FROM read_parquet('{s3_pattern}')
-            {where_clause}
-            GROUP BY SignalID, CallPhase, day_of_week
-            ORDER BY SignalID, CallPhase, day_of_week
-            """
-            report_sections['volume'] = conn.execute(volume_query).df()
-        
-        # Performance Metrics
-        if report_config.get('include_performance', True):
-            performance_query = f"""
-            WITH signal_performance AS (
-                SELECT 
-                    SignalID,
-                    Date,
-                    COUNT(*) as total_events,
-                    COUNT(DISTINCT CallPhase) as active_phases,
-                    MAX(TimeStamp) - MIN(TimeStamp) as operation_span,
-                    COUNT(CASE WHEN EventCode = 1 THEN 1 END) as phase_begin_events,
-                    COUNT(CASE WHEN EventCode = 8 THEN 1 END) as phase_end_events
-                FROM read_parquet('{s3_pattern}')
-                {where_clause}
-                GROUP BY SignalID, Date
-            )
-            SELECT 
-                SignalID,
-                AVG(total_events) as avg_daily_events,
-                AVG(active_phases) as avg_active_phases,
-                AVG(EXTRACT(epoch FROM operation_span) / 3600) as avg_operation_hours,
-                AVG(phase_begin_events) as avg_phase_begins,
-                AVG(phase_end_events) as avg_phase_ends,
-                CASE WHEN AVG(phase_begin_events) > 0 
-                     THEN AVG(phase_end_events) / AVG(phase_begin_events) 
-                     ELSE 0 END as phase_completion_ratio
-            FROM signal_performance
-            GROUP BY SignalID
-            ORDER BY SignalID
-            """
-            report_sections['performance'] = conn.execute(performance_query).df()
-        
-        # Pedestrian Analysis
-        if report_config.get('include_pedestrian', True):
-            pedestrian_query = f"""
-            SELECT 
-                SignalID,
-                CallPhase,
-                COUNT(CASE WHEN EventCode = 90 THEN 1 END) as ped_calls,
-                COUNT(CASE WHEN EventCode = 91 THEN 1 END) as ped_begins,
-                COUNT(CASE WHEN EventCode = 92 THEN 1 END) as ped_ends,
-                EXTRACT(dow FROM Date) as day_of_week,
-                EXTRACT(hour FROM TimeStamp) as hour_of_day,
-                COUNT(*) as total_ped_events
-            FROM read_parquet('{s3_pattern}')
-            {where_clause}
-            AND EventCode IN (90, 91, 92)
-            GROUP BY SignalID, CallPhase, day_of_week, hour_of_day
-            ORDER BY SignalID, CallPhase, day_of_week, hour_of_day
-            """
-            report_sections['pedestrian'] = conn.execute(pedestrian_query).df()
-        
-        conn.close()
-        
-        logger.info(f"Successfully generated comprehensive report with {len(report_sections)} sections")
-        return report_sections
-        
-    except Exception as e:
-        logger.error(f"Error generating report from S3: {e}")
-        return {}
 
 def keep_trying(func, n_tries: int = 3, timeout: int = 30, *args, **kwargs):
     """

@@ -32,7 +32,7 @@ from teams import get_teams_tasks_from_s3
 from configs import get_det_config_factory
 from database_functions import execute_athena_query
 from configs import get_ped_config_factory, get_corridors
-from aggregations import get_hourly, get_vph_from_s3_duckdb, batch_read_atspm_duckdb, get_vph_duckdb_optimized
+from aggregations import get_hourly
 
 # Try to import additional modules
 try:
@@ -48,42 +48,10 @@ try:
 except ImportError:
     logging.warning("pyarrow not available - Parquet functionality will be limited")
 
-try:
-    import duckdb
-    DUCKDB_AVAILABLE = True
-    logger.info("DuckDB available for optimized processing")
-except ImportError:
-    DUCKDB_AVAILABLE = False
-    logging.warning("DuckDB not available - falling back to pandas processing")
-
 logger = logging.getLogger(__name__)
 
 import psutil
 import gc
-
-def get_duckdb_optimized_data(bucket: str, table_name: str, dates: dict, 
-                             config_data: dict, columns: List[str] = None):
-    """Generic DuckDB data reader with fallback"""
-    if DUCKDB_AVAILABLE:
-        try:
-            logger.info(f"Using DuckDB optimized processing for {table_name}")
-            date_range = pd.date_range(
-                dates['wk_calcs_start_date'], 
-                dates['report_end_date'], 
-                freq='D'
-            ).strftime('%Y-%m-%d').tolist()
-            
-            return batch_read_atspm_duckdb(
-                bucket=bucket,
-                signal_ids=config_data['signals_list'],
-                date_range=date_range,
-                table_name=table_name,
-                columns=columns
-            )
-        except Exception as e:
-            logger.warning(f"DuckDB processing failed for {table_name}: {e}")
-    
-    return None
 
 def log_memory_usage(step_name: str):
     """Log current memory usage"""
@@ -407,76 +375,27 @@ def load_data(filename):
         logger.error(f"Error loading {filename}: {e}")
         return pd.DataFrame()
 
-def read_data_with_duckdb_fallback(bucket: str, table_name: str, start_date, end_date,
-                                 signals_list: List, callback=None):
-    """Read data using DuckDB if available, fallback to s3_read_parquet_parallel"""
-    if DUCKDB_AVAILABLE and table_name in ['vehicles_ph', 'vehicles_pd']:
-        try:
-            # Convert dates to string format for DuckDB
-            date_range = pd.date_range(start_date, end_date, freq='D').strftime('%Y-%m-%d').tolist()
-            
-            if table_name == 'vehicles_ph':
-                return get_vph_from_s3_duckdb(
-                    bucket=bucket,
-                    signal_ids=signals_list,
-                    date_range=date_range,
-                    interval="1 hour"
-                )
-            elif table_name == 'vehicles_pd':
-                return batch_read_atspm_duckdb(
-                    bucket=bucket,
-                    signal_ids=signals_list,
-                    date_range=date_range,
-                    table_name=table_name
-                )
-        except Exception as e:
-            logger.warning(f"DuckDB processing failed, falling back to pandas: {e}")
-    
-    # Fallback to existing method
-    return s3_read_parquet_parallel(
-        bucket=bucket,
-        table_name=table_name,
-        start_date=start_date,
-        end_date=end_date,
-        signals_list=signals_list,
-        callback=callback
-    )
-
 def process_detector_uptime(dates, config_data):
     """Process vehicle detector uptime [1 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Vehicle Detector Uptime [1 of 29 (mark1)]")
     log_memory_usage("Start detector uptime")
     
     try:
-
-        # Try DuckDB first
-        avg_daily_detector_uptime = get_duckdb_optimized_data(
+        def callback(x):
+            result = get_avg_daily_detector_uptime(x)
+            del x
+            gc.collect()
+            return result
+        
+        avg_daily_detector_uptime = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="detector_uptime_pd",
-            dates=dates,
-            config_data=config_data
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list'],
+            callback=callback
         )
         
-        # Fallback to original method
-        if avg_daily_detector_uptime is None or avg_daily_detector_uptime.empty:
-            def callback(x):
-                result = get_avg_daily_detector_uptime(x)
-                del x
-                gc.collect()
-                return result
-            
-            avg_daily_detector_uptime = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="detector_uptime_pd",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list'],
-                callback=callback
-            )
-        else:
-            # Process DuckDB data
-            avg_daily_detector_uptime = get_avg_daily_detector_uptime(avg_daily_detector_uptime)
-
         if not avg_daily_detector_uptime.empty:
             log_memory_usage("After reading detector uptime data")
             avg_daily_detector_uptime['SignalID'] = avg_daily_detector_uptime['SignalID'].astype('category')
@@ -547,7 +466,7 @@ def process_detector_uptime(dates, config_data):
         logger.error(traceback.format_exc())
         gc.collect()
 
-def process_ped_pushbutton_uptime_notinscope(dates, config_data):
+def process_ped_pushbutton_uptime(dates, config_data):
     """Process pedestrian pushbutton uptime [2 of 29] - Extreme memory optimization"""
     logger.info(f"{datetime.now()} Ped Pushbutton Uptime [2 of 29 (mark1)]")
     log_memory_usage("Start ped pushbutton uptime")
@@ -945,491 +864,6 @@ def process_ped_pushbutton_uptime_notinscope(dates, config_data):
         gc.collect()
         log_memory_usage("Final cleanup complete")
 
-def process_ped_pushbutton_uptime(dates, config_data):
-    """Process pedestrian pushbutton uptime [2 of 29] - Memory optimized with DuckDB"""
-    logger.info(f"{datetime.now()} Ped Pushbutton Uptime [2 of 29 (mark1)]")
-    log_memory_usage("Start ped pushbutton uptime")
-    
-    try:
-        pau_start_date = min(
-            dates['calcs_start_date'],
-            dates['report_end_date'] - relativedelta(months=6)
-        )
-        
-        # Use DuckDB batch processing if available
-        if DUCKDB_AVAILABLE:
-            try:
-                logger.info("Using DuckDB optimized pedestrian data processing")
-                date_range = pd.date_range(pau_start_date, dates['report_end_date'], freq='D').strftime('%Y-%m-%d').tolist()
-                
-                counts_ped_hourly = batch_read_atspm_duckdb(
-                    bucket=conf.bucket,
-                    signal_ids=config_data['signals_list'],
-                    date_range=date_range,
-                    table_name="counts_ped_1hr",
-                    columns=['SignalID', 'CallPhase', 'Detector', 'Date', 'Timeperiod', 'vol']
-                )
-                
-                if not counts_ped_hourly.empty:
-                    # Process with DuckDB-optimized data
-                    counts_ped_hourly = counts_ped_hourly.dropna(subset=['CallPhase'])
-                    counts_ped_hourly = clean_signal_ids(counts_ped_hourly)
-                    counts_ped_hourly = calculate_time_periods(counts_ped_hourly)
-                    
-                    # Use more memory-efficient data types
-                    counts_ped_hourly['Detector'] = counts_ped_hourly['Detector'].astype('int16')
-                    counts_ped_hourly['CallPhase'] = counts_ped_hourly['CallPhase'].astype('int8')
-                    counts_ped_hourly['vol'] = pd.to_numeric(counts_ped_hourly['vol'], errors='coerce').astype('float32')
-                    
-                    # Calculate daily data
-                    papd = counts_ped_hourly.groupby([
-                        'SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase'
-                    ])['vol'].sum().reset_index()
-                    papd.rename(columns={'vol': 'papd'}, inplace=True)
-                    papd['papd'] = papd['papd'].astype('float32')
-                    
-                    # Calculate hourly data
-                    paph = counts_ped_hourly[['SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase', 'Timeperiod', 'vol']].copy()
-                    paph.rename(columns={'Timeperiod': 'Hour', 'vol': 'paph'}, inplace=True)
-                    paph['paph'] = paph['paph'].astype('float32')
-                    
-                    # Clear the large hourly dataset
-                    del counts_ped_hourly
-                    gc.collect()
-                    
-                    # Calculate PAU
-                    date_range_pau = pd.date_range(pau_start_date, dates['report_end_date'], freq='D')
-                    pau = get_pau_gamma(
-                        date_range_pau, papd, paph, config_data['corridors'], 
-                        dates['wk_calcs_start_date'], pau_start_date
-                    )
-                    
-                    if not pau.empty:
-                        # Process bad days and calculate metrics
-                        pau_with_replacements = pau.copy()
-                        pau_with_replacements.loc[pau_with_replacements['uptime'] == 0, 'papd'] = np.nan
-                        
-                        # Calculate monthly averages to replace NaN values
-                        monthly_avg = pau_with_replacements.groupby([
-                            'SignalID', 'Detector', 'CallPhase', 
-                            pau_with_replacements['Date'].dt.year,
-                            pau_with_replacements['Date'].dt.month
-                        ])['papd'].transform('mean')
-                        
-                        pau_with_replacements['papd'] = pau_with_replacements['papd'].fillna(monthly_avg.fillna(0))
-                        
-                        # Extract final papd data
-                        papd_final = pau_with_replacements[['SignalID', 'Detector', 'CallPhase', 'Date', 'DOW', 'Week', 'papd', 'uptime']].copy()
-                        del pau_with_replacements
-                        gc.collect()
-                        
-                        # Continue with existing processing logic...
-                        log_memory_usage("After DuckDB PAU calculation")
-                        
-                    else:
-                        logger.warning("No PAU data generated with DuckDB processing")
-                        pau = pd.DataFrame()
-                        
-                else:
-                    logger.warning("No pedestrian hourly data found with DuckDB")
-                    pau = pd.DataFrame()
-                    
-            except Exception as e:
-                logger.warning(f"DuckDB pedestrian processing failed, using fallback: {e}")
-                pau = pd.DataFrame()
-                
-        else:
-            pau = pd.DataFrame()
-            
-        # Fallback to original implementation if DuckDB failed or not available
-        if pau.empty:
-            logger.info("Using original pedestrian processing implementation")
-            
-            # Even smaller chunks - process weekly instead of monthly
-            def get_date_chunks(start_date, end_date, chunk_days=7):
-                date_chunks = []
-                current_date = start_date
-                
-                while current_date < end_date:
-                    chunk_end = min(current_date + timedelta(days=chunk_days-1), end_date)
-                    date_chunks.append((current_date, chunk_end))
-                    current_date = chunk_end + timedelta(days=1)
-                
-                return date_chunks
-            
-            # Temporary file management for intermediate results
-            import tempfile
-            import pickle
-            temp_dir = tempfile.mkdtemp()
-            logger.info(f"Using temporary directory: {temp_dir}")
-            
-            def save_temp_chunk(data, chunk_id, data_type):
-                """Save chunk to temporary file and return filename"""
-                if data is None or data.empty:
-                    return None
-                filename = os.path.join(temp_dir, f"{data_type}_chunk_{chunk_id}.pkl")
-                with open(filename, 'wb') as f:
-                    pickle.dump(data, f)
-                return filename
-            
-            def load_temp_chunk(filename):
-                """Load chunk from temporary file"""
-                if filename is None or not os.path.exists(filename):
-                    return pd.DataFrame()
-                with open(filename, 'rb') as f:
-                    return pickle.load(f)
-            
-            # Process one signal-date combination at a time
-            def process_minimal_chunk(signal_id, date_start, date_end):
-                try:
-                    # Process only one signal at a time
-                    counts_ped_hourly = s3_read_parquet_parallel(
-                        bucket=conf.bucket,
-                        table_name="counts_ped_1hr",
-                        start_date=date_start,
-                        end_date=date_end,
-                        signals_list=[signal_id],
-                        parallel=False
-                    )
-                    
-                    if counts_ped_hourly.empty:
-                        return None, None, None
-                    
-                    # Immediate preprocessing to reduce memory
-                    counts_ped_hourly = counts_ped_hourly.dropna(subset=['CallPhase'])
-                    counts_ped_hourly = clean_signal_ids(counts_ped_hourly)
-                    
-                    # Use more memory-efficient data types
-                    counts_ped_hourly['Detector'] = counts_ped_hourly['Detector'].astype('int16')
-                    counts_ped_hourly['CallPhase'] = counts_ped_hourly['CallPhase'].astype('int8')
-                    counts_ped_hourly['vol'] = pd.to_numeric(counts_ped_hourly['vol'], errors='coerce').astype('float32')
-                    
-                    counts_ped_hourly = calculate_time_periods(counts_ped_hourly)
-                    
-                    # Calculate daily immediately and drop hourly data
-                    counts_ped_daily = counts_ped_hourly.groupby([
-                        'SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase'
-                    ])['vol'].sum().reset_index()
-                    counts_ped_daily.rename(columns={'vol': 'papd'}, inplace=True)
-                    counts_ped_daily['papd'] = counts_ped_daily['papd'].astype('float32')
-                    
-                    # Keep only necessary columns for hourly data
-                    paph_data = counts_ped_hourly[['SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase', 'Timeperiod', 'vol']].copy()
-                    paph_data.rename(columns={'Timeperiod': 'Hour', 'vol': 'paph'}, inplace=True)
-                    paph_data['paph'] = paph_data['paph'].astype('float32')
-                    
-                    # Clear the large hourly dataset immediately
-                    del counts_ped_hourly
-                    gc.collect()
-                    
-                    return counts_ped_daily, paph_data, None  # Don't calculate PAU yet
-                    
-                except Exception as e:
-                    logger.error(f"Error in process_minimal_chunk for signal {signal_id}: {e}")
-                    gc.collect()
-                    return None, None, None
-            
-            # Get very small date chunks (weekly)
-            date_chunks = get_date_chunks(pau_start_date, dates['report_end_date'], chunk_days=7)
-            signals_list = config_data['signals_list']
-            
-            # Store temp file references
-            papd_files = []
-            paph_files = []
-            
-            total_operations = len(date_chunks) * len(signals_list)
-            current_operation = 0
-            
-            # Process each signal individually for each date chunk
-            for date_idx, (date_start, date_end) in enumerate(date_chunks):
-                logger.info(f"Processing date chunk {date_idx + 1}/{len(date_chunks)}: {date_start} to {date_end}")
-                
-                for signal_idx, signal_id in enumerate(signals_list):
-                    current_operation += 1
-                    
-                    if current_operation % 50 == 0:
-                        logger.info(f"Progress: {current_operation}/{total_operations} ({100*current_operation/total_operations:.1f}%)")
-                        log_memory_usage(f"After {current_operation} operations")
-                    
-                    try:
-                        papd_chunk, paph_chunk, _ = process_minimal_chunk(signal_id, date_start, date_end)
-                        
-                        # Save to temp files immediately
-                        if papd_chunk is not None and not papd_chunk.empty:
-                            papd_file = save_temp_chunk(papd_chunk, f"{date_idx}_{signal_idx}", "papd")
-                            if papd_file:
-                                papd_files.append(papd_file)
-                        
-                        if paph_chunk is not None and not paph_chunk.empty:
-                            paph_file = save_temp_chunk(paph_chunk, f"{date_idx}_{signal_idx}", "paph")
-                            if paph_file:
-                                paph_files.append(paph_file)
-                        
-                        # Clear memory immediately
-                        del papd_chunk, paph_chunk
-                        gc.collect()
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing signal {signal_id} for dates {date_start}-{date_end}: {e}")
-                        continue
-            
-            logger.info(f"Collected {len(papd_files)} papd files and {len(paph_files)} paph files")
-            
-            # Now combine temp files in very small batches
-            def combine_temp_files_efficiently(file_list, output_name, batch_size=5):
-                """Combine temporary files in small batches to avoid memory spikes"""
-                if not file_list:
-                    return pd.DataFrame()
-                
-                logger.info(f"Combining {len(file_list)} files for {output_name}")
-                combined_parts = []
-                
-                # Process files in tiny batches
-                for i in range(0, len(file_list), batch_size):
-                    batch_files = file_list[i:i + batch_size]
-                    batch_data = []
-                    
-                    for filename in batch_files:
-                        try:
-                            chunk_data = load_temp_chunk(filename)
-                            if not chunk_data.empty:
-                                batch_data.append(chunk_data)
-                            # Delete temp file immediately after loading
-                            os.remove(filename)
-                        except Exception as e:
-                            logger.error(f"Error loading temp file {filename}: {e}")
-                            continue
-                    
-                    if batch_data:
-                        batch_combined = pd.concat(batch_data, ignore_index=True)
-                        combined_parts.append(batch_combined)
-                        del batch_data
-                        gc.collect()
-                    
-                    if i % (batch_size * 10) == 0:
-                        log_memory_usage(f"Combined {i + batch_size} files for {output_name}")
-                
-                if combined_parts:
-                    final_result = pd.concat(combined_parts, ignore_index=True)
-                    del combined_parts
-                    gc.collect()
-                    return final_result
-                else:
-                    return pd.DataFrame()
-            
-            # Combine all papd data
-            log_memory_usage("Before combining papd files")
-            papd = combine_temp_files_efficiently(papd_files, "papd", batch_size=3)
-            
-            if papd.empty:
-                logger.warning("No papd data collected")
-                return
-            
-            save_data(papd, "papd_raw.pkl")
-            log_memory_usage("After combining papd")
-            
-            # Combine all paph data
-            log_memory_usage("Before combining paph files")
-            paph = combine_temp_files_efficiently(paph_files, "paph", batch_size=3)
-            
-            if paph.empty:
-                logger.warning("No paph data collected")
-                return
-            
-            save_data(paph, "paph_raw.pkl")
-            log_memory_usage("After combining paph")
-            
-            # Clean up temp directory
-            try:
-                import shutil
-                shutil.rmtree(temp_dir)
-                logger.info("Cleaned up temporary directory")
-            except Exception as e:
-                logger.warning(f"Could not clean up temp directory: {e}")
-            
-            # Now calculate PAU in smaller chunks
-            logger.info("Calculating pedestrian uptime (PAU)")
-            
-            # Process PAU calculation by signal groups
-            signal_groups = [config_data['signals_list'][i:i+5] for i in range(0, len(config_data['signals_list']), 5)]
-            pau_parts = []
-            
-            for group_idx, signal_group in enumerate(signal_groups):
-                logger.info(f"Processing PAU for signal group {group_idx + 1}/{len(signal_groups)}")
-                
-                try:
-                    # Filter data for this signal group
-                    papd_group = papd[papd['SignalID'].isin(signal_group)].copy()
-                    paph_group = paph[paph['SignalID'].isin(signal_group)].copy()
-                    
-                    if papd_group.empty or paph_group.empty:
-                        continue
-                    
-                    # Calculate PAU for this group
-                    date_range = pd.date_range(pau_start_date, dates['report_end_date'], freq='D')
-                    pau_group = get_pau_gamma(
-                        date_range, papd_group, paph_group, config_data['corridors'], 
-                        dates['wk_calcs_start_date'], pau_start_date
-                    )
-                    
-                    if not pau_group.empty:
-                        pau_parts.append(pau_group)
-                    
-                    del papd_group, paph_group, pau_group
-                    gc.collect()
-                    
-                except Exception as e:
-                    logger.error(f"Error calculating PAU for group {group_idx}: {e}")
-                    continue
-            
-            # Clear the large combined datasets
-            del papd, paph
-            gc.collect()
-            
-            if pau_parts:
-                logger.info("Combining PAU results")
-                pau = pd.concat(pau_parts, ignore_index=True)
-                del pau_parts
-                gc.collect()
-            else:
-                logger.warning("No PAU results generated")
-                pau = pd.DataFrame()
-        
-        # Continue processing if we have PAU data (from either DuckDB or fallback)
-        if not pau.empty:
-            log_memory_usage("After calculating PAU")
-            
-            # Process bad days and calculate metrics
-            pau_with_replacements = pau.copy()
-            pau_with_replacements.loc[pau_with_replacements['uptime'] == 0, 'papd'] = np.nan
-            
-            # Calculate monthly averages in smaller chunks to avoid memory issues
-            monthly_avg_parts = []
-            signal_chunks = [config_data['signals_list'][i:i+10] for i in range(0, len(config_data['signals_list']), 10)]
-            
-            for chunk_signals in signal_chunks:
-                chunk_data = pau_with_replacements[pau_with_replacements['SignalID'].isin(chunk_signals)]
-                if not chunk_data.empty:
-                    monthly_avg_chunk = chunk_data.groupby([
-                        'SignalID', 'Detector', 'CallPhase', 
-                        chunk_data['Date'].dt.year,
-                        chunk_data['Date'].dt.month
-                    ])['papd'].transform('mean')
-                    monthly_avg_parts.append(monthly_avg_chunk)
-                del chunk_data
-                gc.collect()
-            
-            if monthly_avg_parts:
-                monthly_avg = pd.concat(monthly_avg_parts)
-                del monthly_avg_parts
-                gc.collect()
-                
-                pau_with_replacements['papd'] = pau_with_replacements['papd'].fillna(monthly_avg.fillna(0))
-                del monthly_avg
-                gc.collect()
-            
-            # Extract papd for saving
-            papd_final = pau_with_replacements[['SignalID', 'Detector', 'CallPhase', 'Date', 'DOW', 'Week', 'papd', 'uptime']].copy()
-            del pau_with_replacements
-            gc.collect()
-            
-            # Bad detectors
-            bad_detectors = get_bad_ped_detectors(pau)
-            bad_detectors = bad_detectors[bad_detectors['Date'] >= dates['calcs_start_date']]
-            
-            if not bad_detectors.empty:
-                save_data(bad_detectors, "bad_ped_detectors.pkl")
-            del bad_detectors
-            gc.collect()
-            
-            save_data(pau, "pa_uptime.pkl")
-            pau['CallPhase'] = pau['Detector']
-            
-            # Calculate uptime metrics with smaller memory footprint
-            daily_pa_uptime = get_daily_avg(pau, "uptime", peak_only=False)
-            save_data(daily_pa_uptime, "daily_pa_uptime.pkl")
-            
-            weekly_pa_uptime = get_weekly_avg_by_day(pau, "uptime", peak_only=False)
-            save_data(weekly_pa_uptime, "weekly_pa_uptime.pkl")
-            
-            monthly_pa_uptime = get_monthly_avg_by_day(pau, "uptime", peak_only=False)
-            save_data(monthly_pa_uptime, "monthly_pa_uptime.pkl")
-            
-            # Clear pau to free memory
-            del pau
-            gc.collect()
-            
-            # Continue with corridor metrics using saved data
-            cor_daily_pa_uptime = get_cor_weekly_avg_by_day(
-                daily_pa_uptime, config_data['corridors'], "uptime"
-            )
-            save_data(cor_daily_pa_uptime, "cor_daily_pa_uptime.pkl")
-            del daily_pa_uptime, cor_daily_pa_uptime
-            gc.collect()
-            
-            cor_weekly_pa_uptime = get_cor_weekly_avg_by_day(
-                weekly_pa_uptime, config_data['corridors'], "uptime"
-            )
-            save_data(cor_weekly_pa_uptime, "cor_weekly_pa_uptime.pkl")
-            del weekly_pa_uptime, cor_weekly_pa_uptime
-            gc.collect()
-            
-            cor_monthly_pa_uptime = get_cor_monthly_avg_by_day(
-                monthly_pa_uptime, config_data['corridors'], "uptime"
-            )
-            save_data(cor_monthly_pa_uptime, "cor_monthly_pa_uptime.pkl")
-            del monthly_pa_uptime, cor_monthly_pa_uptime
-            gc.collect()
-            
-            # Subcorridor metrics - reload data as needed to minimize memory usage
-            daily_pa_uptime = load_data("daily_pa_uptime.pkl")
-            sub_daily_pa_uptime = get_cor_weekly_avg_by_day(
-                daily_pa_uptime, config_data['subcorridors'], "uptime"
-            ).dropna(subset=['Corridor'])
-            save_data(sub_daily_pa_uptime, "sub_daily_pa_uptime.pkl")
-            del daily_pa_uptime, sub_daily_pa_uptime
-            gc.collect()
-            
-            weekly_pa_uptime = load_data("weekly_pa_uptime.pkl")
-            sub_weekly_pa_uptime = get_cor_weekly_avg_by_day(
-                weekly_pa_uptime, config_data['subcorridors'], "uptime"
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_pa_uptime, "sub_weekly_pa_uptime.pkl")
-            del weekly_pa_uptime, sub_weekly_pa_uptime
-            gc.collect()
-            
-            monthly_pa_uptime = load_data("monthly_pa_uptime.pkl")
-            sub_monthly_pa_uptime = get_cor_monthly_avg_by_day(
-                monthly_pa_uptime, config_data['subcorridors'], "uptime"
-            )
-            if not sub_monthly_pa_uptime.empty:
-                sub_monthly_pa_uptime = sub_monthly_pa_uptime.dropna(subset=['Corridor'])
-            save_data(sub_monthly_pa_uptime, "sub_monthly_pa_uptime.pkl")
-            del monthly_pa_uptime, sub_monthly_pa_uptime
-            gc.collect()
-            
-            log_memory_usage("End ped pushbutton uptime")
-            logger.info("Pedestrian pushbutton uptime processing completed successfully")
-        else:
-            logger.warning("No PAU data generated")
-        
-    except Exception as e:
-        logger.error(f"Error in pedestrian pushbutton uptime processing: {e}")
-        logger.error(traceback.format_exc())
-        
-        # Emergency cleanup
-        try:
-            if 'temp_dir' in locals() and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-        except:
-            pass
-        gc.collect()
-    
-    finally:
-        # Final cleanup
-        gc.collect()
-        log_memory_usage("Final cleanup complete")
-
 # Additional helper function for even more aggressive memory management
 def process_ped_pushbutton_uptime_ultra_conservative(dates, config_data):
     """Ultra-conservative version - processes one signal per day to minimize memory usage"""
@@ -1654,22 +1088,13 @@ def process_watchdog_alerts(dates, config_data):
     log_memory_usage("Start watchdog alerts")
     
     try:
-        # Process bad vehicle detectors with DuckDB
-        bad_det = get_duckdb_optimized_data(
-            bucket=conf.bucket,
+        # Process bad vehicle detectors
+        bad_det = s3_read_parquet_parallel(
             table_name="bad_detectors",
-            dates={'wk_calcs_start_date': date.today() - timedelta(days=90),
-                   'report_end_date': date.today() - timedelta(days=1)},
-            config_data=config_data
+            start_date=date.today() - timedelta(days=90),
+            end_date=date.today() - timedelta(days=1),
+            bucket=conf.bucket
         )
-        
-        if bad_det is None or bad_det.empty:
-            bad_det = s3_read_parquet_parallel(
-                table_name="bad_detectors",
-                start_date=date.today() - timedelta(days=90),
-                end_date=date.today() - timedelta(days=1),
-                bucket=conf.bucket
-            )
         
         if not bad_det.empty:
             log_memory_usage("After reading bad detectors")
@@ -2000,36 +1425,21 @@ def process_pedestrian_delay(dates, config_data):
     log_memory_usage("Start pedestrian delay")
     
     try:
-        # Try DuckDB first
-        ped_delay = get_duckdb_optimized_data(
+        def callback(x):
+            if "Avg.Max.Ped.Delay" in x.columns:
+                x = x.rename(columns={"Avg.Max.Ped.Delay": "pd"})
+                x['CallPhase'] = 0
+            x = calculate_time_periods(x)
+            return x
+        
+        ped_delay = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="ped_delay",
-            dates=dates,
-            config_data=config_data
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list'],
+            callback=callback
         )
-        
-        if ped_delay is None or ped_delay.empty:
-            def callback(x):
-                if "Avg.Max.Ped.Delay" in x.columns:
-                    x = x.rename(columns={"Avg.Max.Ped.Delay": "pd"})
-                    x['CallPhase'] = 0
-                x = calculate_time_periods(x)
-                return x
-            
-            ped_delay = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="ped_delay",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list'],
-                callback=callback
-            )
-        else:
-            # Process DuckDB data
-            if "Avg.Max.Ped.Delay" in ped_delay.columns:
-                ped_delay = ped_delay.rename(columns={"Avg.Max.Ped.Delay": "pd"})
-                ped_delay['CallPhase'] = 0
-            ped_delay = calculate_time_periods(ped_delay)
         
         if not ped_delay.empty:
             log_memory_usage("After reading ped delay data")
@@ -2091,22 +1501,13 @@ def process_communications_uptime(dates, config_data):
     log_memory_usage("Start communications uptime")
     
     try:
-        # Try DuckDB first
-        cu = get_duckdb_optimized_data(
+        cu = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="comm_uptime",
-            dates=dates,
-            config_data=config_data
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list']
         )
-        
-        if cu is None or cu.empty:
-            cu = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="comm_uptime",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list']
-            )
         
         if not cu.empty:
             log_memory_usage("After reading comm uptime data")
@@ -2186,22 +1587,13 @@ def process_daily_volumes(dates, config_data):
     log_memory_usage("Start daily volumes")
     
     try:
-        # Use DuckDB implementation if available
-        vpd = get_duckdb_optimized_data(
+        vpd = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="vehicles_pd",
-            dates=dates,
-            config_data=config_data
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list']
         )
-        
-        if vpd is None or vpd.empty:
-            vpd = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="vehicles_pd",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list']
-            )
         
         if not vpd.empty:
             log_memory_usage("After reading daily volumes data")
@@ -2259,37 +1651,13 @@ def process_hourly_volumes(dates, config_data):
     log_memory_usage("Start hourly volumes")
     
     try:
-        # Use specialized DuckDB VPH implementation
-        if DUCKDB_AVAILABLE:
-            try:
-                logger.info("Using DuckDB optimized VPH processing")
-                date_range = pd.date_range(
-                    dates['wk_calcs_start_date'], 
-                    dates['report_end_date'], 
-                    freq='D'
-                ).strftime('%Y-%m-%d').tolist()
-                
-                vph = get_vph_from_s3_duckdb(
-                    bucket=conf.bucket,
-                    signal_ids=config_data['signals_list'],
-                    date_range=date_range,
-                    interval="1 hour"
-                )
-            except Exception as e:
-                logger.warning(f"DuckDB VPH processing failed: {e}")
-                vph = None
-        else:
-            vph = None
-        
-        # Fallback to original method
-        if vph is None or vph.empty:
-            vph = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="vehicles_ph",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list']
-            )
+        vph = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="vehicles_ph",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list']
+        )
         
         if not vph.empty:
             log_memory_usage("After reading hourly volumes data")
@@ -2391,22 +1759,13 @@ def process_daily_throughput(dates, config_data):
     log_memory_usage("Start daily throughput")
     
     try:
-         # Try DuckDB first
-        throughput = get_duckdb_optimized_data(
+        throughput = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="throughput",
-            dates=dates,
-            config_data=config_data
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list']
         )
-        
-        if throughput is None or throughput.empty:
-            throughput = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="throughput",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list']
-            )
         
         if not throughput.empty:
             log_memory_usage("After reading throughput data")
@@ -2469,22 +1828,13 @@ def process_arrivals_on_green(dates, config_data):
     log_memory_usage("Start arrivals on green")
     
     try:
-        # Try DuckDB first
-        aog = get_duckdb_optimized_data(
+        aog = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="arrivals_on_green",
-            dates=dates,
-            config_data=config_data
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list']
         )
-        
-        if aog is None or aog.empty:
-            aog = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="arrivals_on_green",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list']
-            )
         
         if not aog.empty:
             log_memory_usage("After reading AOG data")
@@ -2668,29 +2018,17 @@ def process_daily_split_failures(dates, config_data):
     log_memory_usage("Start daily split failures")
     
     try:
-        # Try DuckDB first
-        sf = get_duckdb_optimized_data(
+        def filter_callback(x):
+            return x[x['CallPhase'] == 0]
+        
+        sf = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="split_failures",
-            dates=dates,
-            config_data=config_data
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list'],
+            callback=filter_callback
         )
-        
-        if sf is None or sf.empty:
-            def filter_callback(x):
-                return x[x['CallPhase'] == 0]
-            
-            sf = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="split_failures",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list'],
-                callback=filter_callback
-            )
-        else:
-            # Filter DuckDB data
-            sf = sf[sf['CallPhase'] == 0]
         
         if not sf.empty:
             log_memory_usage("After reading split failures data")
@@ -2799,64 +2137,30 @@ def process_daily_split_failures(dates, config_data):
         gc.collect()
 
 def process_hourly_split_failures(dates, config_data):
-    """Process hourly split failures [16 of 29] - DuckDB optimized"""
+    """Process hourly split failures [16 of 29] - Memory optimized"""
     logger.info(f"{datetime.now()} Hourly Split Failures [16 of 29 (mark1)]")
     log_memory_usage("Start hourly split failures")
     
     try:
-        # Load existing split failures data or get fresh data
         sf = load_data("sf_data.pkl")
         
-        if sf.empty:
-            # Try DuckDB first
-            if DUCKDB_AVAILABLE:
-                try:
-                    logger.info("Using DuckDB for split failures data")
-                    date_range = pd.date_range(
-                        dates['wk_calcs_start_date'], 
-                        dates['report_end_date'], 
-                        freq='D'
-                    ).strftime('%Y-%m-%d').tolist()
-                    
-                    sf = batch_read_atspm_duckdb(
-                        bucket=conf.bucket,
-                        signal_ids=config_data['signals_list'],
-                        date_range=date_range,
-                        table_name="split_failures"
-                    )
-                    
-                    if not sf.empty:
-                        sf = sf[sf['CallPhase'] == 0]
-                        sf = clean_signal_ids(sf)
-                        sf = ensure_datetime_column(sf, 'Date')
-                    
-                except Exception as e:
-                    logger.warning(f"DuckDB split failures processing failed: {e}")
-                    sf = pd.DataFrame()
-            else:
-                sf = pd.DataFrame()
-        
         if not sf.empty:
-            # Add hour column if not present
-            if 'Date_Hour' in sf.columns:
-                sf['Hour'] = pd.to_datetime(sf['Date_Hour']).dt.hour
-            else:
-                sf['Hour'] = 12
+            sfh = get_sf_by_hr(sf)
+            msfh = get_monthly_sf_by_hr(sfh)
+            save_data(msfh, "msfh.pkl")
+            del sf, sfh
+            gc.collect()
             
-            # Process peak and off-peak separately
-            sfp = sf[sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
-            sfo = sf[~sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
+            cor_msfh = get_cor_monthly_sf_by_hr(msfh, config_data['corridors'])
+            save_data(cor_msfh, "cor_msfh.pkl")
+            del cor_msfh
+            gc.collect()
             
-            # Calculate hourly metrics
-            sf_by_hr = get_sf_by_hr(sfp)
-            monthly_sf_by_hr = get_monthly_sf_by_hr(sf_by_hr)
-            save_data(monthly_sf_by_hr, "monthly_sf_by_hr.pkl")
-            
-            sfo_by_hr = get_sf_by_hr(sfo)
-            monthly_sfo_by_hr = get_monthly_sf_by_hr(sfo_by_hr)
-            save_data(monthly_sfo_by_hr, "monthly_sfo_by_hr.pkl")
-            
-            del sf, sfp, sfo, sf_by_hr, sfo_by_hr
+            sub_msfh = get_cor_monthly_sf_by_hr(
+                msfh, config_data['subcorridors']
+            ).dropna(subset=['Corridor'])
+            save_data(sub_msfh, "sub_msfh.pkl")
+            del msfh, sub_msfh
             gc.collect()
             
             log_memory_usage("End hourly split failures")
@@ -2873,37 +2177,13 @@ def process_daily_queue_spillback(dates, config_data):
     log_memory_usage("Start daily queue spillback")
     
     try:
-        # Try DuckDB first
-        qs = None
-        if DUCKDB_AVAILABLE:
-            try:
-                logger.info("Using DuckDB for queue spillback data")
-                date_range = pd.date_range(
-                    dates['wk_calcs_start_date'], 
-                    dates['report_end_date'], 
-                    freq='D'
-                ).strftime('%Y-%m-%d').tolist()
-                
-                qs = batch_read_atspm_duckdb(
-                    bucket=conf.bucket,
-                    signal_ids=config_data['signals_list'],
-                    date_range=date_range,
-                    table_name="queue_spillback"
-                )
-                
-            except Exception as e:
-                logger.warning(f"DuckDB queue spillback processing failed: {e}")
-                qs = None
-        
-        # Fallback to original method
-        if qs is None or qs.empty:
-            qs = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="queue_spillback",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list']
-            )
+        qs = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="queue_spillback",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list']
+        )
         
         if not qs.empty:
             log_memory_usage("After reading queue spillback data")
@@ -2964,28 +2244,7 @@ def process_hourly_queue_spillback(dates, config_data):
     log_memory_usage("Start hourly queue spillback")
     
     try:
-        # Load existing qs_data or get fresh data with DuckDB
         qs = load_data("qs_data.pkl")
-        
-        if qs.empty and DUCKDB_AVAILABLE:
-            try:
-                logger.info("Using DuckDB for hourly queue spillback data")
-                date_range = pd.date_range(
-                    dates['wk_calcs_start_date'], 
-                    dates['report_end_date'], 
-                    freq='D'
-                ).strftime('%Y-%m-%d').tolist()
-                
-                qs = batch_read_atspm_duckdb(
-                    bucket=conf.bucket,
-                    signal_ids=config_data['signals_list'],
-                    date_range=date_range,
-                    table_name="queue_spillback"
-                )
-                
-            except Exception as e:
-                logger.warning(f"DuckDB hourly queue spillback processing failed: {e}")
-                qs = pd.DataFrame()
         
         if not qs.empty:
             qsh = get_qs_by_hr(qs)
@@ -3020,36 +2279,13 @@ def process_travel_time_indexes(dates, config_data):
     log_memory_usage("Start travel time indexes")
     
     try:
-         # Corridor Travel Time Metrics - Try DuckDB first
-        tt = None
-        if DUCKDB_AVAILABLE:
-            try:
-                logger.info("Using DuckDB for corridor travel time data")
-                date_range = pd.date_range(
-                    dates['calcs_start_date'], 
-                    dates['report_end_date'], 
-                    freq='D'
-                ).strftime('%Y-%m-%d').tolist()
-                
-                tt = batch_read_atspm_duckdb(
-                    bucket=conf.bucket,
-                    signal_ids=config_data['signals_list'],
-                    date_range=date_range,
-                    table_name="cor_travel_time_metrics_1hr"
-                )
-                
-            except Exception as e:
-                logger.warning(f"DuckDB corridor travel time processing failed: {e}")
-                tt = None
-        
-        # Fallback to original method
-        if tt is None or tt.empty:
-            tt = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="cor_travel_time_metrics_1hr",
-                start_date=dates['calcs_start_date'],
-                end_date=dates['report_end_date']
-            )
+        # Corridor Travel Time Metrics
+        tt = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="cor_travel_time_metrics_1hr",
+            start_date=dates['calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
         
         if not tt.empty:
             log_memory_usage("After reading corridor travel time data")
@@ -3602,37 +2838,13 @@ def process_flash_events(dates, config_data):
     log_memory_usage("Start flash events")
     
     try:
-         # Try DuckDB first
-        fe = None
-        if DUCKDB_AVAILABLE:
-            try:
-                logger.info("Using DuckDB for flash events data")
-                date_range = pd.date_range(
-                    dates['wk_calcs_start_date'], 
-                    dates['report_end_date'], 
-                    freq='D'
-                ).strftime('%Y-%m-%d').tolist()
-                
-                fe = batch_read_atspm_duckdb(
-                    bucket=conf.bucket,
-                    signal_ids=config_data['signals_list'],
-                    date_range=date_range,
-                    table_name="flash_events"
-                )
-                
-            except Exception as e:
-                logger.warning(f"DuckDB flash events processing failed: {e}")
-                fe = None
-        
-        # Fallback to original method
-        if fe is None or fe.empty:
-            fe = s3_read_parquet_parallel(
-                bucket=conf.bucket,
-                table_name="flash_events",
-                start_date=dates['wk_calcs_start_date'],
-                end_date=dates['report_end_date'],
-                signals_list=config_data['signals_list']
-            )
+        fe = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="flash_events",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date'],
+            signals_list=config_data['signals_list']
+        )
         
         if not fe.empty:
             log_memory_usage("After reading flash events data")
@@ -4209,33 +3421,6 @@ def convert_to_utc(df):
         logger.warning(f"Error converting to UTC: {e}")
         return df
 
-def process_large_dataset_with_duckdb(bucket: str, table_name: str, dates: dict, 
-                                     config_data: dict, processing_func):
-    """Generic function to process large datasets with DuckDB optimization"""
-    if DUCKDB_AVAILABLE:
-        try:
-            logger.info(f"Using DuckDB optimized processing for {table_name}")
-            date_range = pd.date_range(
-                dates['wk_calcs_start_date'], 
-                dates['report_end_date'], 
-                freq='D'
-            ).strftime('%Y-%m-%d').tolist()
-            
-            data = batch_read_atspm_duckdb(
-                bucket=bucket,
-                signal_ids=config_data['signals_list'],
-                date_range=date_range,
-                table_name=table_name
-            )
-            
-            if not data.empty:
-                return processing_func(data)
-            
-        except Exception as e:
-            logger.warning(f"DuckDB processing failed for {table_name}: {e}")
-    
-    return None
-
 def main():
     """Main function to run the monthly report package - Memory optimized"""
     logger.info("Starting Monthly Report Package Processing")
@@ -4254,32 +3439,32 @@ def main():
         
         # Process each section sequentially with memory optimization
         processing_functions = [
-            (process_detector_uptime, "Vehicle Detector Uptime"),
-            (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
-            (process_watchdog_alerts, "Watchdog Alerts"),
-            (process_daily_ped_activations, "Daily Pedestrian Activations"),
-            (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
-            (process_pedestrian_delay, "Pedestrian Delay"),
-            (process_communications_uptime, "Communications Uptime"),
-            (process_daily_volumes, "Daily Volumes"),
+            # (process_detector_uptime, "Vehicle Detector Uptime"),
+            # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
+            # (process_watchdog_alerts, "Watchdog Alerts"),
+            # (process_daily_ped_activations, "Daily Pedestrian Activations"),
+            # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
+            # (process_pedestrian_delay, "Pedestrian Delay"),
+            # (process_communications_uptime, "Communications Uptime"),
+            # (process_daily_volumes, "Daily Volumes"),
             (process_hourly_volumes, "Hourly Volumes"),
-            (process_daily_throughput, "Daily Throughput"),
-            (process_arrivals_on_green, "Arrivals on Green"),
-            (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
-            (process_daily_progression_ratio, "Daily Progression Ratio"),
-            (process_hourly_progression_ratio, "Hourly Progression Ratio"),
-            (process_daily_split_failures, "Daily Split Failures"),
-            (process_hourly_split_failures, "Hourly Split Failures"),
-            (process_daily_queue_spillback, "Daily Queue Spillback"),
-            (process_hourly_queue_spillback, "Hourly Queue Spillback"),
+            # (process_daily_throughput, "Daily Throughput"),
+            # (process_arrivals_on_green, "Arrivals on Green"),
+            # (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
+            # (process_daily_progression_ratio, "Daily Progression Ratio"),
+            # (process_hourly_progression_ratio, "Hourly Progression Ratio"),
+            # (process_daily_split_failures, "Daily Split Failures"),
+            # (process_hourly_split_failures, "Hourly Split Failures"),
+            # (process_daily_queue_spillback, "Daily Queue Spillback"),
+            # (process_hourly_queue_spillback, "Hourly Queue Spillback"),
             (process_travel_time_indexes, "Travel Time Indexes"),
-            (process_cctv_uptime, "CCTV Uptime"),
-            (process_teams_activities, "TEAMS Activities"),
-            (process_user_delay_costs, "User Delay Costs"),
-            (process_flash_events, "Flash Events"),
-            (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
-            (process_relative_speed_index, "Relative Speed Index"),
-            (process_crash_indices, "Crash Indices")
+            # (process_cctv_uptime, "CCTV Uptime"),
+            # (process_teams_activities, "TEAMS Activities"),
+            # (process_user_delay_costs, "User Delay Costs"),
+            # (process_flash_events, "Flash Events"),
+            # (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
+            # (process_relative_speed_index, "Relative Speed Index"),
+            # (process_crash_indices, "Crash Indices")
         ]
         
         # Track progress
@@ -4578,3 +3763,6 @@ if __name__ == "__main__":
         logger.error(f"Fatal error: {e}")
         logger.error(traceback.format_exc())
         sys.exit(1)
+
+
+

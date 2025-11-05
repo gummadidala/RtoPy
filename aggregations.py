@@ -11,8 +11,6 @@ from datetime import datetime, timedelta
 import warnings
 from typing import Optional, Union, List, Dict, Any
 import logging
-import duckdb
-from parquet_lib import read_s3_parquet_pattern_duckdb, batch_read_atspm_duckdb
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -747,434 +745,69 @@ def get_cor_monthly_avg_by_day(df: pd.DataFrame,
     
     return result
 
-def get_vph_from_s3_duckdb(bucket: str, 
-                          signal_ids: List[int],
-                          date_range: List[str],
-                          interval: str = "1 hour", 
-                          mainline_only: bool = True,
-                          columns: Optional[List[str]] = None) -> pd.DataFrame:
+def get_vph(counts_df: pd.DataFrame, 
+           interval: str = "1 hour", 
+           mainline_only: bool = True) -> pd.DataFrame:
     """
-    Calculate VPH directly from S3 parquet files using DuckDB
-    Much faster than reading files individually
-    
-    Args:
-        bucket: S3 bucket name
-        signal_ids: List of signal IDs
-        date_range: List of date strings
-        interval: Time interval ('1 hour', '15 min', etc.)
-        mainline_only: Whether to use only mainline phases (2,6)
-        columns: Optional specific columns to read
-    
-    Returns:
-        DataFrame with VPH data
-    """
-    try:
-        # Define columns needed for VPH calculation
-        if columns is None:
-            columns = ['SignalID', 'CallPhase', 'Timeperiod', 'vol', 'Date']
-        
-        # Read data using DuckDB batch read
-        df = batch_read_atspm_duckdb(
-            bucket=bucket,
-            signal_ids=signal_ids,
-            date_range=date_range,
-            columns=columns
-        )
-        
-        if df.empty:
-            logger.warning("No data found for VPH calculation")
-            return pd.DataFrame()
-        
-        # Use existing get_vph logic but with DuckDB preprocessing
-        return get_vph_duckdb_optimized(df, interval, mainline_only)
-        
-    except Exception as e:
-        logger.error(f"Error calculating VPH from S3: {e}")
-        return pd.DataFrame()
-
-def get_vph_duckdb_optimized(counts_df: pd.DataFrame, 
-                           interval: str = "1 hour", 
-                           mainline_only: bool = True) -> pd.DataFrame:
-    """
-    Calculate VPH using DuckDB for faster aggregation
+    Calculate vehicles per hour from counts data
     
     Args:
         counts_df: DataFrame with count data
-        interval: Time interval
-        mainline_only: Whether to use only mainline phases
+        interval: Time interval ('1 hour', '15 min', etc.)
+        mainline_only: Whether to use only mainline phases (2,6)
     
     Returns:
         DataFrame with VPH data
     """
-    try:
-        if counts_df.empty:
-            return pd.DataFrame()
-        
-        conn = duckdb.connect()
-        
-        # Register DataFrame with DuckDB
-        conn.register('counts_data', counts_df)
-        
-        # Build filter condition
-        phase_filter = ""
-        if mainline_only:
-            phase_filter = "WHERE CallPhase IN (2, 6)"
-        
-        # Build time interval floor function
-        if interval == "15 min":
-            time_floor = "date_trunc('minute', Timeperiod) + INTERVAL (EXTRACT(minute FROM Timeperiod)::int / 15 * 15) MINUTE"
-        elif interval == "1 hour":
-            time_floor = "date_trunc('hour', Timeperiod)"
-        else:
-            # Custom interval parsing
-            time_floor = f"date_trunc('{interval}', Timeperiod)"
-        
-        # SQL query for aggregation
-        query = f"""
-        SELECT 
-            SignalID,
-            EXTRACT(week FROM timeperiod_floor) as Week,
-            EXTRACT(dow FROM timeperiod_floor) as DOW,
-            timeperiod_floor as Timeperiod,
-            timeperiod_floor::date as Date,
-            SUM(vol) as vph
-        FROM (
-            SELECT 
-                SignalID,
-                CallPhase,
-                {time_floor} as timeperiod_floor,
-                vol
-            FROM counts_data
-            {phase_filter}
-        ) subq
-        GROUP BY SignalID, Week, DOW, timeperiod_floor
-        ORDER BY SignalID, timeperiod_floor
-        """
-        
-        result = conn.execute(query).df()
-        
-        # Rename columns based on interval
-        if interval == "1 hour":
-            result = result.rename(columns={'Timeperiod': 'Hour'})
-        
-        conn.close()
-        
-        logger.info(f"Successfully calculated VPH for {len(result)} records")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in DuckDB VPH calculation: {e}")
-        # Fallback to original pandas method
-        return get_vph(counts_df, interval, mainline_only)
-
-def get_daily_avg_duckdb(data_source: Union[pd.DataFrame, Dict[str, Any]], 
-                        variable: str, 
-                        weight_col: str = 'ones', 
-                        peak_only: bool = False,
-                        am_peak_hours: List[int] = None,
-                        pm_peak_hours: List[int] = None) -> pd.DataFrame:
-    """
-    Calculate daily averages using DuckDB for faster processing
     
-    Args:
-        data_source: DataFrame or dict with S3 info {'bucket': str, 'pattern': str}
-        variable: Variable to average
-        weight_col: Weight column for weighted average
-        peak_only: If True, only use peak hours
-        am_peak_hours: List of AM peak hours
-        pm_peak_hours: List of PM peak hours
-    
-    Returns:
-        DataFrame with daily averages
-    """
-    try:
-        if am_peak_hours is None:
-            am_peak_hours = [6, 7, 8, 9]
-        if pm_peak_hours is None:
-            pm_peak_hours = [16, 17, 18, 19]
-        
-        conn = duckdb.connect()
-        
-        # Handle different data sources
-        if isinstance(data_source, dict):
-            # Read from S3 pattern
-            bucket = data_source['bucket']
-            pattern = data_source['pattern']
-            conn.execute("SET s3_region='us-east-1';")
-            s3_pattern = f"s3://{bucket}/{pattern}"
-            
-            # Create view from S3 data
-            conn.execute(f"CREATE VIEW source_data AS SELECT * FROM read_parquet('{s3_pattern}')")
-        else:
-            # Use DataFrame
-            conn.register('source_data', data_source)
-        
-        # Build peak hours filter
-        peak_filter = ""
-        if peak_only:
-            peak_hours = am_peak_hours + pm_peak_hours
-            peak_hours_str = ",".join(map(str, peak_hours))
-            peak_filter = f"AND EXTRACT(hour FROM Date_Hour) IN ({peak_hours_str})"
-        
-        # Build weight column
-        weight_calc = "1" if weight_col == 'ones' else weight_col
-        
-        # SQL query for daily averages
-        query = f"""
-        WITH daily_data AS (
-            SELECT 
-                SignalID,
-                Date_Hour::date as Date,
-                {variable},
-                {weight_calc} as weight
-            FROM source_data
-            WHERE {variable} IS NOT NULL
-            {peak_filter}
-        ),
-        daily_averages AS (
-            SELECT 
-                SignalID,
-                Date,
-                SUM({variable} * weight) / SUM(weight) as {variable},
-                SUM(weight) as {weight_col}
-            FROM daily_data
-            GROUP BY SignalID, Date
-        )
-        SELECT 
-            SignalID,
-            Date,
-            {variable},
-            {weight_col},
-            ({variable} - LAG({variable}) OVER (PARTITION BY SignalID ORDER BY Date)) / 
-            LAG({variable}) OVER (PARTITION BY SignalID ORDER BY Date) as delta
-        FROM daily_averages
-        ORDER BY SignalID, Date
-        """
-        
-        result = conn.execute(query).df()
-        conn.close()
-        
-        logger.info(f"Successfully calculated daily averages for {len(result)} records")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in DuckDB daily average calculation: {e}")
-        # Fallback to original pandas method
-        if isinstance(data_source, pd.DataFrame):
-            return get_daily_avg(data_source, variable, weight_col, peak_only, am_peak_hours, pm_peak_hours)
-        else:
-            return pd.DataFrame()
-
-def get_period_avg_duckdb(data_source: Union[pd.DataFrame, Dict[str, Any]], 
-                         variable: str, 
-                         period_col: str, 
-                         weight_col: str = 'ones') -> pd.DataFrame:
-    """
-    Calculate period averages using DuckDB with weighted averages
-    
-    Args:
-        data_source: DataFrame or S3 source info
-        variable: Variable to average
-        period_col: Period column name
-        weight_col: Weight column
-    
-    Returns:
-        DataFrame with period averages
-    """
-    try:
-        conn = duckdb.connect()
-        
-        # Handle data source
-        if isinstance(data_source, dict):
-            bucket = data_source['bucket']
-            pattern = data_source['pattern']
-            conn.execute("SET s3_region='us-east-1';")
-            s3_pattern = f"s3://{bucket}/{pattern}"
-            conn.execute(f"CREATE VIEW source_data AS SELECT * FROM read_parquet('{s3_pattern}')")
-        else:
-            conn.register('source_data', data_source)
-        
-        # Build weight calculation
-        weight_calc = "1" if weight_col == 'ones' else weight_col
-        
-        # SQL query for period averages with delta calculation
-        query = f"""
-        WITH period_averages AS (
-            SELECT 
-                SignalID,
-                {period_col},
-                SUM({variable} * {weight_calc}) / SUM({weight_calc}) as {variable},
-                SUM({weight_calc}) as {weight_col}
-            FROM source_data
-            WHERE {variable} IS NOT NULL 
-            AND {weight_calc} IS NOT NULL
-            GROUP BY SignalID, {period_col}
-        )
-        SELECT 
-            SignalID,
-            {period_col},
-            {variable},
-            {weight_col},
-            ({variable} - LAG({variable}) OVER (PARTITION BY SignalID ORDER BY {period_col})) / 
-            LAG({variable}) OVER (PARTITION BY SignalID ORDER BY {period_col}) as delta
-        FROM period_averages
-        ORDER BY SignalID, {period_col}
-        """
-        
-        result = conn.execute(query).df()
-        conn.close()
-        
-        logger.info(f"Successfully calculated period averages for {len(result)} records")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in DuckDB period average calculation: {e}")
-        # Fallback to original method
-        if isinstance(data_source, pd.DataFrame):
-            return get_period_avg(data_source, variable, period_col, weight_col)
-        else:
-            return pd.DataFrame()
-
-def aggregate_from_s3_pattern_duckdb(bucket: str, 
-                                    pattern: str,
-                                    aggregation_config: Dict[str, Any]) -> pd.DataFrame:
-    """
-    Perform complex aggregations directly from S3 using DuckDB
-    
-    Args:
-        bucket: S3 bucket name
-        pattern: S3 pattern for files
-        aggregation_config: Configuration for aggregation
-            {
-                'group_by': ['SignalID', 'Date'],
-                'aggregations': {
-                    'vol': ['sum', 'avg', 'count'],
-                    'delay': ['avg', 'max']
-                },
-                'filters': 'CallPhase IN (2, 6)',
-                'order_by': ['SignalID', 'Date']
-            }
-    
-    Returns:
-        DataFrame with aggregated results
-    """
-    try:
-        conn = duckdb.connect()
-        conn.execute("SET s3_region='us-east-1';")
-        
-        s3_pattern = f"s3://{bucket}/{pattern}"
-        
-        # Build aggregation clauses
-        agg_clauses = []
-        for column, functions in aggregation_config.get('aggregations', {}).items():
-            for func in functions:
-                if func == 'avg':
-                    agg_clauses.append(f"AVG({column}) as {column}_{func}")
-                elif func == 'sum':
-                    agg_clauses.append(f"SUM({column}) as {column}_{func}")
-                elif func == 'count':
-                    agg_clauses.append(f"COUNT({column}) as {column}_{func}")
-                elif func == 'max':
-                    agg_clauses.append(f"MAX({column}) as {column}_{func}")
-                elif func == 'min':
-                    agg_clauses.append(f"MIN({column}) as {column}_{func}")
-                elif func == 'std':
-                    agg_clauses.append(f"STDDEV({column}) as {column}_{func}")
-        
-        # Build GROUP BY clause
-        group_by_cols = aggregation_config.get('group_by', [])
-        group_by_clause = ", ".join(group_by_cols)
-        
-        # Build WHERE clause
-        where_clause = ""
-        if aggregation_config.get('filters'):
-            where_clause = f"WHERE {aggregation_config['filters']}"
-        
-        # Build ORDER BY clause
-        order_by_clause = ""
-        if aggregation_config.get('order_by'):
-            order_by_clause = f"ORDER BY {', '.join(aggregation_config['order_by'])}"
-        
-        # Construct full query
-        select_cols = group_by_cols + agg_clauses
-        query = f"""
-        SELECT {', '.join(select_cols)}
-        FROM read_parquet('{s3_pattern}')
-        {where_clause}
-        GROUP BY {group_by_clause}
-        {order_by_clause}
-        """
-        
-        result = conn.execute(query).df()
-        conn.close()
-        
-        logger.info(f"Successfully aggregated {len(result)} records from S3 pattern")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error in S3 pattern aggregation: {e}")
+    if counts_df.empty:
         return pd.DataFrame()
-
-# Enhanced existing functions with DuckDB option
-def get_vph(counts_df: pd.DataFrame, 
-           interval: str = "1 hour", 
-           mainline_only: bool = True,
-           use_duckdb: bool = True) -> pd.DataFrame:
-    """
-    Enhanced get_vph with DuckDB option
-    """
-    if use_duckdb and len(counts_df) > 10000:  # Use DuckDB for large datasets
-        return get_vph_duckdb_optimized(counts_df, interval, mainline_only)
     
+    df = counts_df.copy()
+    
+    # Filter to mainline phases if requested
+    if mainline_only and 'CallPhase' in df.columns:
+        df = df[df['CallPhase'].isin([2, 6])]
+    
+    # Determine timeperiod column
+    time_cols = ['Timeperiod', 'Date_Hour', 'Hour']
+    time_col = None
+    for col in time_cols:
+        if col in df.columns:
+            time_col = col
+            break
+    
+    if time_col is None:
+        raise ValueError("No valid time column found in DataFrame")
+    
+    # Rename to standard name if needed
+    if time_col != 'Timeperiod':
+        df = df.rename(columns={time_col: 'Timeperiod'})
+    
+    # Floor to specified interval
+    df['Timeperiod'] = pd.to_datetime(df['Timeperiod'])
+    if interval == "15 min":
+        df['Timeperiod'] = df['Timeperiod'].dt.floor('15T')
+    elif interval == "1 hour":
+        df['Timeperiod'] = df['Timeperiod'].dt.floor('H')
     else:
-        if counts_df.empty:
-            return pd.DataFrame()
-        
-        df = counts_df.copy()
-        
-        # Filter to mainline phases if requested
-        if mainline_only and 'CallPhase' in df.columns:
-            df = df[df['CallPhase'].isin([2, 6])]
+        # Parse custom interval
+        df['Timeperiod'] = df['Timeperiod'].dt.floor(interval)
     
-        # Determine timeperiod column
-        time_cols = ['Timeperiod', 'Date_Hour', 'Hour']
-        time_col = None
-        for col in time_cols:
-            if col in df.columns:
-                time_col = col
-                break
-        
-        if time_col is None:
-            raise ValueError("No valid time column found in DataFrame")
-        
-        # Rename to standard name if needed
-        if time_col != 'Timeperiod':
-            df = df.rename(columns={time_col: 'Timeperiod'})
-        
-        # Floor to specified interval
-        df['Timeperiod'] = pd.to_datetime(df['Timeperiod'])
-        if interval == "15 min":
-            df['Timeperiod'] = df['Timeperiod'].dt.floor('15T')
-        elif interval == "1 hour":
-            df['Timeperiod'] = df['Timeperiod'].dt.floor('H')
-        else:
-            # Parse custom interval
-            df['Timeperiod'] = df['Timeperiod'].dt.floor(interval)
-        
-        # Add date and week information
-        df['Date'] = df['Timeperiod'].dt.date
-        df['DOW'] = df['Timeperiod'].dt.dayofweek  # Monday=0, Sunday=6
-        df['Week'] = df['Timeperiod'].dt.isocalendar().week
-        
-        # Aggregate volumes
-        result = df.groupby(['SignalID', 'Week', 'DOW', 'Timeperiod'])['vol'].sum().reset_index()
-        result = result.rename(columns={'vol': 'vph'})
-        
-        # If interval is 1 hour, rename Timeperiod to Hour
-        if interval == "1 hour":
-            result = result.rename(columns={'Timeperiod': 'Hour'})
+    # Add date and week information
+    df['Date'] = df['Timeperiod'].dt.date
+    df['DOW'] = df['Timeperiod'].dt.dayofweek  # Monday=0, Sunday=6
+    df['Week'] = df['Timeperiod'].dt.isocalendar().week
     
-        return result
+    # Aggregate volumes
+    result = df.groupby(['SignalID', 'Week', 'DOW', 'Timeperiod'])['vol'].sum().reset_index()
+    result = result.rename(columns={'vol': 'vph'})
+    
+    # If interval is 1 hour, rename Timeperiod to Hour
+    if interval == "1 hour":
+        result = result.rename(columns={'Timeperiod': 'Hour'})
+    
+    return result
 
 def get_avg_by_hr(df: pd.DataFrame, 
                  variable: str, 

@@ -15,77 +15,23 @@ from datetime import datetime
 import traceback
 import gc
 from pathlib import Path
-import duckdb
-import pyarrow as pa
-import pyarrow.parquet as pq
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class DuckDBManager:
-    """Manages DuckDB connections and operations for improved performance"""
-    
-    def __init__(self, memory_limit='4GB', threads=None):
-        self.conn = duckdb.connect(':memory:')
-        
-        # Configure DuckDB for optimal performance
-        self.conn.execute(f"SET memory_limit = '{memory_limit}'")
-        if threads:
-            self.conn.execute(f"SET threads = {threads}")
-        self.conn.execute("SET enable_progress_bar = true")
-        self.conn.execute("SET enable_optimizer = true")
-        
-        logger.info(f"DuckDB initialized with memory_limit={memory_limit}")
-    
-    def register_dataframe(self, df, table_name):
-        """Register a pandas DataFrame as a DuckDB table"""
-        if not df.empty:
-            self.conn.register(table_name, df)
-    
-    def execute_query(self, query):
-        """Execute a query and return results as pandas DataFrame"""
-        return self.conn.execute(query).df()
-    
-    def close(self):
-        self.conn.close()
-
-# Initialize global DuckDB instance
-db = DuckDBManager()
-
-# Replace the load_rds_data function
 def load_rds_data(filename):
-    """Load RDS file data with DuckDB optimization"""
+    """Load RDS file data (assuming converted to pickle format)"""
     try:
-        pkl_filename = Path(filename).with_suffix('.pkl')
-        parquet_filename = Path(filename).with_suffix('.parquet')
-        file_path = Path('data_output') / pkl_filename.name
-        parquet_path = Path('data_output') / parquet_filename.name
+        pkl_filename = Path(filename).with_suffix('.pkl')  # change .rds to .pkl
+        file_path = Path('data_output') / pkl_filename.name  # only use filename, not full path
 
-        # Try to load from parquet first (fastest)
-        if parquet_path.exists():
-            query = f"SELECT * FROM read_parquet('{parquet_path}')"
-            return db.execute_query(query)
-        
-        # Load from pickle and cache as parquet
-        elif file_path.exists():
+        if file_path.exists():
             with open(file_path, 'rb') as f:
-                data = pickle.load(f)
-                
-            # Convert to parquet for faster future loads
-            if isinstance(data, pd.DataFrame) and not data.empty:
-                try:
-                    data.to_parquet(parquet_path, index=False)
-                    logger.debug(f"Cached {parquet_filename} for faster future loads")
-                except Exception as e:
-                    logger.warning(f"Could not cache parquet file: {e}")
-                    
-            return data
+                return pickle.load(f)
         else:
             logger.warning(f"File not found: {file_path.resolve()}")
             return pd.DataFrame()
-            
     except Exception as e:
         logger.error(f"Error loading {filename}: {e}")
         return pd.DataFrame()
@@ -124,72 +70,6 @@ def get_quarterly(monthly_data, metric_col, weight_col=None, operation="sum"):
     except Exception as e:
         logger.error(f"Error in get_quarterly: {e}")
         return pd.DataFrame()
-
-def get_quarterly_optimized(monthly_data, metric_col, weight_col=None, operation="sum"):
-    """Convert monthly data to quarterly data using DuckDB for performance"""
-    try:
-        if monthly_data.empty:
-            return pd.DataFrame()
-        
-        # Use DuckDB for large datasets
-        if len(monthly_data) > 10000:
-            table_name = f"monthly_data_{abs(hash(str(monthly_data.columns.tolist())))}"
-            db.register_dataframe(monthly_data, table_name)
-            
-            group_cols = ['Zone_Group', 'Corridor']
-            group_cols = [col for col in group_cols if col in monthly_data.columns]
-            group_str = ', '.join(group_cols)
-            
-            if operation == "sum":
-                query = f"""
-                    SELECT {group_str}, 
-                           DATE_TRUNC('quarter', Month) as Quarter,
-                           SUM({metric_col}) as {metric_col}
-                    FROM {table_name}
-                    WHERE {metric_col} IS NOT NULL
-                    GROUP BY {group_str}, DATE_TRUNC('quarter', Month)
-                    ORDER BY Quarter
-                """
-            elif operation == "latest":
-                query = f"""
-                    SELECT {group_str}, 
-                           DATE_TRUNC('quarter', Month) as Quarter,
-                           LAST({metric_col} ORDER BY Month) as {metric_col}
-                    FROM {table_name}
-                    WHERE {metric_col} IS NOT NULL
-                    GROUP BY {group_str}, DATE_TRUNC('quarter', Month)
-                    ORDER BY Quarter
-                """
-            else:  # mean
-                if weight_col and weight_col in monthly_data.columns:
-                    query = f"""
-                        SELECT {group_str}, 
-                               DATE_TRUNC('quarter', Month) as Quarter,
-                               SUM({metric_col} * {weight_col}) / SUM({weight_col}) as {metric_col}
-                        FROM {table_name}
-                        WHERE {metric_col} IS NOT NULL AND {weight_col} IS NOT NULL
-                        GROUP BY {group_str}, DATE_TRUNC('quarter', Month)
-                        ORDER BY Quarter
-                    """
-                else:
-                    query = f"""
-                        SELECT {group_str}, 
-                               DATE_TRUNC('quarter', Month) as Quarter,
-                               AVG({metric_col}) as {metric_col}
-                        FROM {table_name}
-                        WHERE {metric_col} IS NOT NULL
-                        GROUP BY {group_str}, DATE_TRUNC('quarter', Month)
-                        ORDER BY Quarter
-                    """
-            
-            return db.execute_query(query)
-        else:
-            # Use original pandas method for smaller datasets
-            return get_quarterly(monthly_data, metric_col, weight_col, operation)
-        
-    except Exception as e:
-        logger.error(f"Error in get_quarterly_optimized: {e}")
-        return get_quarterly(monthly_data, metric_col, weight_col, operation)
 
 def get_corridor_summary_data(cor_data):
     """Generate corridor summary data"""
@@ -234,60 +114,10 @@ def sigify(signal_data, corridor_data, config_data, identifier='SignalID'):
         logger.error(f"Error in sigify: {e}")
         return pd.DataFrame()
 
-def sigify_optimized(signal_data, corridor_data, config_data, identifier='SignalID'):
-    """Convert signal-level data to corridor-level using DuckDB joins"""
-    try:
-        if signal_data.empty or config_data.empty:
-            return pd.DataFrame()
-        
-        # Use DuckDB for large datasets
-        if len(signal_data) > 5000:
-            db.register_dataframe(signal_data, 'signal_data')
-            db.register_dataframe(config_data, 'config_data')
-            
-            if identifier in signal_data.columns:
-                query = f"""
-                    SELECT s.*, c.Zone_Group, c.Corridor, c.Description
-                    FROM signal_data s
-                    LEFT JOIN config_data c ON s.{identifier} = c.{identifier}
-                """
-                return db.execute_query(query)
-            else:
-                return signal_data
-        else:
-            # Use original pandas method for smaller datasets
-            return sigify(signal_data, corridor_data, config_data, identifier)
-            
-    except Exception as e:
-        logger.error(f"Error in sigify_optimized: {e}")
-        return sigify(signal_data, corridor_data, config_data, identifier)
-
-def load_data_parallel(file_list, max_workers=4):
-    """Load multiple RDS files in parallel for improved performance"""
-    data_dict = {}
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_file = {
-            executor.submit(load_rds_data, filename): filename 
-            for filename in file_list
-        }
-        
-        for future in as_completed(future_to_file):
-            filename = future_to_file[future]
-            try:
-                data = future.result()
-                key = Path(filename).stem
-                data_dict[key] = data
-            except Exception as e:
-                logger.error(f"Failed to load {filename}: {e}")
-                data_dict[Path(filename).stem] = pd.DataFrame()
-    
-    return data_dict
-
 def main():
-    """Main processing function with DuckDB optimizations"""
+    """Main processing function - equivalent to the R script"""
     
-    print(f"{datetime.now()} Package for Monthly Report [27 of 29 (mark1)] - DuckDB Optimized")
+    print(f"{datetime.now()} Package for Monthly Report [27 of 29 (mark1)]")
     
     try:
         # Initialize data structures
@@ -295,49 +125,61 @@ def main():
         sub = {'dy': {}, 'wk': {}, 'mo': {}, 'qu': {}}
         sig = {'dy': {}, 'wk': {}, 'mo': {}, 'qu': {}}
         
-        # Load configuration data in parallel
-        config_files = ["corridors.rds", "cam_config.rds"]
-        config_data = load_data_parallel(config_files)
-        corridors = config_data.get('corridors', pd.DataFrame())
-        cam_config = config_data.get('cam_config', pd.DataFrame())
+        # Load configuration data
+        corridors = load_rds_data("corridors.rds")  # Assuming config file
+        cam_config = load_rds_data("cam_config.rds")  # Camera configuration
         
-        print("Building corridor (cor) data structure with DuckDB optimization...")
+        print("Building corridor (cor) data structure...")
         
-        # Load daily data in parallel
-        daily_files = [
-            "cor_avg_daily_detector_uptime.rds",
-            "cor_daily_comm_uptime.rds", 
-            "cor_daily_pa_uptime.rds",
-            "cor_daily_cctv_uptime.rds"
-        ]
-        daily_data = load_data_parallel(daily_files)
+        # ======= COR DAILY DATA =======
+        cor['dy']['du'] = load_rds_data("cor_avg_daily_detector_uptime.rds")
+        cor['dy']['cu'] = load_rds_data("cor_daily_comm_uptime.rds")
+        cor['dy']['pau'] = load_rds_data("cor_daily_pa_uptime.rds")
+        cor['dy']['cctv'] = load_rds_data("cor_daily_cctv_uptime.rds")
         
-        cor['dy']['du'] = daily_data.get('cor_avg_daily_detector_uptime', pd.DataFrame())
-        cor['dy']['cu'] = daily_data.get('cor_daily_comm_uptime', pd.DataFrame())
-        cor['dy']['pau'] = daily_data.get('cor_daily_pa_uptime', pd.DataFrame())
-        cor['dy']['cctv'] = daily_data.get('cor_daily_cctv_uptime', pd.DataFrame())
-
-        # Load weekly data in parallel
-        weekly_files = [
-            "cor_weekly_vpd.rds",
-            "cor_weekly_papd.rds",
-            "cor_weekly_pd_by_day.rds",
-            "cor_weekly_throughput.rds",
-            "cor_weekly_detector_uptime.rds",
-            "cor_weekly_comm_uptime.rds",
-            "cor_weekly_pa_uptime.rds",
-            "cor_weekly_cctv_uptime.rds"
-        ]
-        weekly_data = load_data_parallel(weekly_files)
+        # Task data - extract specific columns
+        tasks_all = load_rds_data("tasks_all.rds")
+        if isinstance(tasks_all, dict) and 'cor_daily' in tasks_all:
+            tasks_daily = tasks_all['cor_daily']
+            
+            cor['dy']['ttyp'] = load_rds_data("tasks_by_type.rds").get('cor_daily', pd.DataFrame())
+            cor['dy']['tsub'] = load_rds_data("tasks_by_subtype.rds").get('cor_daily', pd.DataFrame())
+            cor['dy']['tpri'] = load_rds_data("tasks_by_priority.rds").get('cor_daily', pd.DataFrame())
+            cor['dy']['tsou'] = load_rds_data("tasks_by_source.rds").get('cor_daily', pd.DataFrame())
+            cor['dy']['tasks'] = tasks_daily
+            
+            # Extract specific metrics from tasks
+            if not tasks_daily.empty:
+                cor['dy']['reported'] = tasks_daily[['Zone_Group', 'Corridor', 'Date', 'Reported']].copy()
+                cor['dy']['reported']['delta'] = np.nan
+                
+                cor['dy']['resolved'] = tasks_daily[['Zone_Group', 'Corridor', 'Date', 'Resolved']].copy()
+                cor['dy']['resolved']['delta'] = np.nan
+                
+                cor['dy']['outstanding'] = tasks_daily[['Zone_Group', 'Corridor', 'Date', 'Outstanding']].copy()
+                cor['dy']['outstanding']['delta'] = np.nan
         
-        cor['wk']['vpd'] = weekly_data.get('cor_weekly_vpd', pd.DataFrame())
-        cor['wk']['papd'] = weekly_data.get('cor_weekly_papd', pd.DataFrame())
-        cor['wk']['pd'] = weekly_data.get('cor_weekly_pd_by_day', pd.DataFrame())
-        cor['wk']['tp'] = weekly_data.get('cor_weekly_throughput', pd.DataFrame())
-        cor['wk']['du'] = weekly_data.get('cor_weekly_detector_uptime', pd.DataFrame())
-        cor['wk']['cu'] = weekly_data.get('cor_weekly_comm_uptime', pd.DataFrame())
-        cor['wk']['pau'] = weekly_data.get('cor_weekly_pa_uptime', pd.DataFrame())
-        cor['wk']['cctv'] = weekly_data.get('cor_weekly_cctv_uptime', pd.DataFrame())
+        # ======= COR WEEKLY DATA =======
+        cor['wk']['vpd'] = load_rds_data("cor_weekly_vpd.rds")
+        
+        # Peak hour data
+        weekly_vph_peak = load_rds_data("cor_weekly_vph_peak.rds")
+        if isinstance(weekly_vph_peak, dict):
+            cor['wk']['vphpa'] = weekly_vph_peak.get('am', pd.DataFrame())
+            cor['wk']['vphpp'] = weekly_vph_peak.get('pm', pd.DataFrame())
+        
+        cor['wk']['papd'] = load_rds_data("cor_weekly_papd.rds")
+        cor['wk']['pd'] = load_rds_data("cor_weekly_pd_by_day.rds")
+        cor['wk']['tp'] = load_rds_data("cor_weekly_throughput.rds")
+        cor['wk']['aogd'] = load_rds_data("cor_weekly_aog_by_day.rds")
+        cor['wk']['prd'] = load_rds_data("cor_weekly_pr_by_day.rds")
+        cor['wk']['qsd'] = load_rds_data("cor_wqs.rds")
+        cor['wk']['sfd'] = load_rds_data("cor_wsf.rds")
+        cor['wk']['sfo'] = load_rds_data("cor_wsfo.rds")
+        cor['wk']['du'] = load_rds_data("cor_weekly_detector_uptime.rds")
+        cor['wk']['cu'] = load_rds_data("cor_weekly_comm_uptime.rds")
+        cor['wk']['pau'] = load_rds_data("cor_weekly_pa_uptime.rds")
+        cor['wk']['cctv'] = load_rds_data("cor_weekly_cctv_uptime.rds")
         
         # ======= COR MONTHLY DATA =======
         cor['mo']['vpd'] = load_rds_data("cor_monthly_vpd.rds")
@@ -664,7 +506,6 @@ def main():
     
     finally:
         # Cleanup
-        db.close()
         gc.collect()
 
 def calculate_health_metrics(cor, sub, sig):
@@ -1175,14 +1016,6 @@ def process_final_performance_summary(dates, config_data):
         logger.error(f"Error in final performance summary: {e}")
         logger.error(traceback.format_exc())
 
-def cleanup_duckdb():
-    """Clean up DuckDB resources"""
-    try:
-        db.close()
-        logger.info("DuckDB connection closed")
-    except:
-        pass
-
 if __name__ == "__main__":
     """Main execution block"""
     
@@ -1250,7 +1083,6 @@ if __name__ == "__main__":
         # Ensure cleanup always runs
         try:
             cleanup_temporary_files()
-            cleanup_duckdb()
         except:
             pass
 
