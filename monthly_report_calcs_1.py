@@ -1,6 +1,7 @@
 """
 Monthly Report Calculations - Part 1
 Converted from Monthly_Report_Calcs_1.R
+Refactored to use Athena cloud-native processing for better performance
 """
 
 import os
@@ -10,13 +11,14 @@ import numpy as np
 from datetime import datetime, timedelta
 import logging
 import subprocess
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-import multiprocessing
+import boto3
+import awswrangler as wr
 
 # Import custom modules
 from monthly_report_calcs_init import main as init_main
 from monthly_report_functions import *
-from counts import *
+from athena_processing import *
+from counts import get_counts2  # Only need the raw counts function
 from s3_parquet_io import *
 
 # Setup logging
@@ -73,41 +75,15 @@ def run_async_scripts(conf: dict):
     
     return processes
 
-def process_single_date_counts(date_str, bucket, conf_athena):
+def process_counts(conf: dict, start_date: str, end_date: str):
     """
-    Process counts for a single date - module level function for multiprocessing
-    
-    Args:
-        date_str: Date string to process
-        bucket: S3 bucket name
-        conf_athena: Athena configuration
-    
-    Returns:
-        Result of processing or None if failed
-    """
-    try:
-        return keep_trying(
-            get_counts2,
-            n_tries=2,
-            date_=date_str,
-            bucket=bucket,
-            conf_athena=conf_athena,
-            uptime=True,
-            counts=True
-        )
-    except Exception as e:
-        logger.error(f"Error processing counts for {date_str}: {e}")
-        return None
-
-def process_counts(conf: dict, start_date: str, end_date: str, usable_cores: int):
-    """
-    Process counts data for the date range
+    Process raw counts data for the date range
+    This extracts raw counts from source and stores them in S3
     
     Args:
         conf: Configuration dictionary
         start_date: Start date string
         end_date: End date string
-        usable_cores: Number of cores for parallel processing
     """
     
     logger.info("Starting counts processing [4 of 11]")
@@ -121,39 +97,24 @@ def process_counts(conf: dict, start_date: str, end_date: str, usable_cores: int
         date_range = pd.date_range(start=start_date, end=end_date, freq='D')
         date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
         
-        if len(date_strings) == 1:
-            # Single date processing
-            get_counts2(
-                date_strings[0],
-                bucket=conf['bucket'],
-                conf_athena=conf['athena'],
-                uptime=True,
-                counts=True
-            )
-        else:
-            # Parallel processing for multiple dates
-            # Use ProcessPoolExecutor for CPU-intensive work
-            with ProcessPoolExecutor(max_workers=usable_cores) as executor:
-                futures = {
-                    executor.submit(
-                        process_single_date_counts, 
-                        date_str, 
-                        conf['bucket'], 
-                        conf['athena']
-                    ): date_str 
-                    for date_str in date_strings
-                }
-                
-                for future in as_completed(futures):
-                    date_str = futures[future]
-                    try:
-                        result = future.result()
-                        if result is not None:
-                            logger.info(f"Completed counts processing for {date_str}")
-                        else:
-                            logger.warning(f"Failed counts processing for {date_str}")
-                    except Exception as e:
-                        logger.error(f"Exception in counts processing for {date_str}: {e}")
+        logger.info(f"Processing counts for {len(date_strings)} dates")
+        
+        # Process each date to extract raw counts
+        for date_str in date_strings:
+            try:
+                logger.info(f"Processing raw counts for: {date_str}")
+                get_counts2(
+                    date_str,
+                    bucket=conf['bucket'],
+                    conf_athena=conf['athena'],
+                    uptime=True,
+                    counts=True
+                )
+                logger.info(f"Completed raw counts for: {date_str}")
+            except Exception as e:
+                logger.error(f"Error processing counts for {date_str}: {e}")
+                # Continue with other dates even if one fails
+                continue
         
         logger.info("---------------------- Finished counts ---------------------------")
         
@@ -161,19 +122,20 @@ def process_counts(conf: dict, start_date: str, end_date: str, usable_cores: int
         logger.error(f"Error in counts processing: {e}")
         raise
 
-def get_counts_based_measures(month_abbrs: list, conf: dict, end_date: str, usable_cores: int):
+def get_counts_based_measures(month_abbrs: list, conf: dict, end_date: str):
     """
-    Process counts-based measures for each month
+    Process counts-based measures for each month using Athena cloud processing
+    All heavy computation happens in Athena SQL engine
     
     Args:
         month_abbrs: List of month abbreviations (YYYY-MM)
         conf: Configuration dictionary
         end_date: End date string
-        usable_cores: Number of cores for parallel processing
     """
     
     logger.info("Starting monthly counts-based measures [5 of 11]")
     logger.info("Starting counts-based measures [6 of 11]")
+    logger.info("Using Athena cloud-native processing - no local data movement")
     
     if not conf['run'].get('counts_based_measures', True):
         logger.info("Counts-based measures processing disabled in configuration")
@@ -192,11 +154,11 @@ def get_counts_based_measures(month_abbrs: list, conf: dict, end_date: str, usab
             date_range = pd.date_range(start=start_day, end=end_day, freq='D')
             date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
             
-            # Process 1-hour counts
-            process_hourly_counts(yyyy_mm, date_strings, conf, usable_cores)
+            # Process 1-hour counts (Athena cloud processing)
+            process_hourly_counts_athena(yyyy_mm, date_strings, conf)
             
-            # Process 15-minute counts
-            process_15min_counts(yyyy_mm, date_strings, conf, usable_cores)
+            # Process 15-minute counts (Athena cloud processing)
+            process_15min_counts_athena(yyyy_mm, date_strings, conf)
             
             logger.info(f"Completed processing for month: {yyyy_mm}")
             
@@ -210,331 +172,96 @@ def get_counts_based_measures(month_abbrs: list, conf: dict, end_date: str, usab
     
     logger.info("--- Finished counts-based measures ---")
 
-def process_hourly_counts(yyyy_mm: str, date_range: list, conf: dict, usable_cores: int):
+def process_hourly_counts_athena(yyyy_mm: str, date_range: list, conf: dict):
     """
-    Process 1-hour counts for a month
+    Process 1-hour counts using Athena cloud processing
+    All computation happens in Athena SQL - no local data download
     
     Args:
         yyyy_mm: Month abbreviation (YYYY-MM)
         date_range: List of date strings
         conf: Configuration dictionary
-        usable_cores: Number of cores for parallel processing
     """
     
     try:
-        logger.info("Processing 1-hour adjusted counts")
+        logger.info(f"Processing 1-hour counts in Athena for {yyyy_mm}")
+        logger.info(f"Date range: {date_range[0]} to {date_range[-1]}")
         
-        # Prepare database for adjusted counts
-        prep_db_for_adjusted_counts_arrow("filtered_counts_1hr", conf, date_range)
-        get_adjusted_counts_arrow("filtered_counts_1hr", "adjusted_counts_1hr", conf)
+        # Step 1: Create adjusted counts in Athena (SQL processing)
+        logger.info("Step 1/4: Creating adjusted counts in Athena...")
+        create_adjusted_counts_athena(date_range, conf, interval='1hr')
         
-        # Open datasets
-        fc_ds = keep_trying(
-            lambda: open_arrow_dataset("filtered_counts_1hr/"),
-            n_tries=3,
-            timeout=60
-        )
-        ac_ds = keep_trying(
-            lambda: open_arrow_dataset("adjusted_counts_1hr/"),
-            n_tries=3,
-            timeout=60
-        )
+        # Step 2: Calculate VPD (Vehicles Per Day) in Athena
+        logger.info("Step 2/4: Calculating VPD in Athena...")
+        calculate_vpd_athena(date_range, conf)
         
-        # Upload adjusted counts to S3
+        # Step 3: Calculate VPH (Vehicles Per Hour) in Athena
+        logger.info("Step 3/4: Calculating VPH in Athena...")
+        calculate_vph_athena(date_range, conf)
+        
+        # Step 4: Get signals list and write details (small metadata operation)
+        logger.info("Step 4/4: Writing signal details...")
+        signals_list = get_signals_list_athena(date_range, conf)
+        
         for date_str in date_range:
-            upload_adjusted_counts_1hr(ac_ds, date_str, conf)
-        
-        # Write signal details
-        signals_list = get_signals_from_dataset(ac_ds, date_range)
-        for date_str in date_range:
-            write_signal_details(date_str, conf, signals_list)
-        
-        # Process VPD and VPH in parallel
-        def process_date_metrics(date_str: str):
-            """Process metrics for a single date"""
             try:
-                logger.info(f"Processing metrics for: {date_str}")
-                
-                # Read adjusted counts
-                adjusted_counts_1hr = read_adjusted_counts_for_date(ac_ds, date_str)
-                
-                if adjusted_counts_1hr is not None and len(adjusted_counts_1hr) > 0:
-                    # Prepare data
-                    adjusted_counts_1hr = prepare_counts_data(adjusted_counts_1hr)
-                    
-                    # Calculate VPD (Vehicles Per Day)
-                    logger.info(f"Calculating VPD for {date_str}")
-                    vpd = get_vpd(adjusted_counts_1hr)
-                    s3_upload_parquet_date_split(
-                        vpd,
-                        bucket=conf['bucket'],
-                        prefix="vpd",
-                        table_name="vehicles_pd",
-                        conf_athena=conf['athena']
-                    )
-                    
-                    # Calculate VPH (Vehicles Per Hour)
-                    logger.info(f"Calculating VPH for {date_str}")
-                    vph = get_vph(adjusted_counts_1hr, interval="1 hour")
-                    s3_upload_parquet_date_split(
-                        vph,
-                        bucket=conf['bucket'],
-                        prefix="vph",
-                        table_name="vehicles_ph",
-                        conf_athena=conf['athena']
-                    )
-                    
-                    logger.info(f"Completed metrics for {date_str}")
-                else:
-                    logger.warning(f"No adjusted counts data for {date_str}")
-                    
+                write_signal_details(date_str, conf, signals_list)
             except Exception as e:
-                logger.error(f"Error processing metrics for {date_str}: {e}")
+                logger.warning(f"Could not write signal details for {date_str}: {e}")
         
-        # Process dates in parallel
-        with ThreadPoolExecutor(max_workers=usable_cores) as executor:
-            futures = [
-                executor.submit(process_date_metrics, date_str) 
-                for date_str in date_range
-            ]
-            
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f"Error in parallel processing: {e}")
+        logger.info(f"Completed hourly counts processing for {yyyy_mm}")
         
-        # Cleanup temporary directories
-        cleanup_temp_directories("filtered_counts_1hr", "adjusted_counts_1hr")
+        # Log quality stats
+        try:
+            stats = get_data_quality_stats_athena(date_range, conf)
+            if not stats.empty:
+                logger.info(f"Data quality stats:\n{stats.to_string()}")
+        except Exception as e:
+            logger.warning(f"Could not retrieve quality stats: {e}")
         
     except Exception as e:
         import traceback
         logger.error(f"Error processing hourly counts: {e}")
-        print(traceback.format_exc())
+        logger.error(traceback.format_exc())
         raise
 
-def process_15min_counts(yyyy_mm: str, date_range: list, conf: dict, usable_cores: int):
+def process_15min_counts_athena(yyyy_mm: str, date_range: list, conf: dict):
     """
-    Process 15-minute counts for a month
+    Process 15-minute counts using Athena cloud processing
+    All computation happens in Athena SQL - no local data download
     
     Args:
         yyyy_mm: Month abbreviation (YYYY-MM)
         date_range: List of date strings
         conf: Configuration dictionary
-        usable_cores: Number of cores for parallel processing
     """
     
     try:
-        logger.info("Processing 15-minute counts and throughput")
-        logger.info("Processing 15-minute adjusted counts")
+        logger.info(f"Processing 15-minute counts in Athena for {yyyy_mm}")
+        logger.info(f"Date range: {date_range[0]} to {date_range[-1]}")
         
-        # Prepare database for adjusted counts
-        prep_db_for_adjusted_counts_arrow("filtered_counts_15min", conf, date_range)
-        get_adjusted_counts_arrow("filtered_counts_15min", "adjusted_counts_15min", conf)
+        # Step 1: Create adjusted counts in Athena (SQL processing)
+        logger.info("Step 1/3: Creating adjusted 15-min counts in Athena...")
+        create_adjusted_counts_athena(date_range, conf, interval='15min')
         
-        # Open datasets
-        fc_ds = keep_trying(
-            lambda: open_arrow_dataset("filtered_counts_15min/"),
-            n_tries=3,
-            timeout=60
-        )
-        ac_ds = keep_trying(
-            lambda: open_arrow_dataset("adjusted_counts_15min/"),
-            n_tries=3,
-            timeout=60
-        )
+        # Step 2: Calculate throughput in Athena
+        logger.info("Step 2/3: Calculating throughput in Athena...")
+        calculate_throughput_athena(date_range, conf)
         
-        # Process each date
-        for date_str in date_range:
-            try:
-                # Read adjusted counts
-                adjusted_counts_15min = read_adjusted_counts_for_date(ac_ds, date_str)
-                
-                if adjusted_counts_15min is None or len(adjusted_counts_15min) == 0:
-                    # Create empty DataFrame with correct structure
-                    adjusted_counts_15min = create_empty_counts_dataframe()
-                
-                # Upload adjusted counts
-                s3_upload_parquet_date_split(
-                    adjusted_counts_15min,
-                    bucket=conf['bucket'],
-                    prefix="adjusted_counts_15min",
-                    table_name="adjusted_counts_15min",
-                    conf_athena=conf['athena']
-                )
-                
-                # Calculate throughput
-                throughput = get_thruput(adjusted_counts_15min)
-                s3_upload_parquet_date_split(
-                    throughput,
-                    bucket=conf['bucket'],
-                    prefix="tp",
-                    table_name="throughput",
-                    conf_athena=conf['athena']
-                )
-                
-                # Calculate vehicles per 15-minute period
-                logger.info(f"Calculating VP15 for {date_str}")
-                vp15 = get_vph(adjusted_counts_15min, interval="15 min")
-                s3_upload_parquet_date_split(
-                    vp15,
-                    bucket=conf['bucket'],
-                    prefix="vp15",
-                    table_name="vehicles_15min",
-                    conf_athena=conf['athena']
-                )
-                
-                logger.info(f"Completed 15-min processing for {date_str}")
-                
-            except Exception as e:
-                logger.error(f"Error processing 15-min counts for {date_str}: {e}")
+        # Step 3: Calculate VP15 (Vehicles Per 15 Minutes) in Athena
+        logger.info("Step 3/3: Calculating VP15 in Athena...")
+        calculate_vp15_athena(date_range, conf)
         
-        # Cleanup temporary directories
-        cleanup_temp_directories("filtered_counts_15min", "adjusted_counts_15min")
+        logger.info(f"Completed 15-min counts processing for {yyyy_mm}")
         
     except Exception as e:
+        import traceback
         logger.error(f"Error processing 15-minute counts: {e}")
+        logger.error(traceback.format_exc())
         raise
 
-def upload_adjusted_counts_1hr(ac_ds, date_str: str, conf: dict):
-    """
-    Upload 1-hour adjusted counts for a specific date
-    
-    Args:
-        ac_ds: Arrow dataset
-        date_str: Date string
-        conf: Configuration dictionary
-    """
-    
-    try:
-        adjusted_counts_1hr = read_adjusted_counts_for_date(ac_ds, date_str)
-        
-        if adjusted_counts_1hr is None or len(adjusted_counts_1hr) == 0:
-            adjusted_counts_1hr = create_empty_counts_dataframe()
-        
-        s3_upload_parquet_date_split(
-            adjusted_counts_1hr,
-            bucket=conf['bucket'],
-            prefix="adjusted_counts_1hr",
-            table_name="adjusted_counts_1hr",
-            conf_athena=conf['athena']
-        )
-        
-    except Exception as e:
-        logger.error(f"Error uploading adjusted counts for {date_str}: {e}")
-
-def read_adjusted_counts_for_date(ac_ds, date_str: str) -> pd.DataFrame:
-    """
-    Read adjusted counts for a specific date from Arrow dataset
-    
-    Args:
-        ac_ds: Arrow dataset
-        date_str: Date string
-    
-    Returns:
-        DataFrame with adjusted counts
-    """
-    
-    try:
-        if hasattr(ac_ds, 'to_table') and len(ac_ds.to_table()) == 0:
-            return None
-        
-        # Filter and collect data
-        filtered_data = ac_ds.filter(
-            ac_ds.schema.field('date') == date_str
-        ).select(['SignalID', 'CallPhase', 'Detector', 'Timeperiod', 'vol'])
-        
-        return filtered_data.to_pandas()
-        
-    except Exception as e:
-        logger.error(f"Error reading adjusted counts for {date_str}: {e}")
-        return None
-
-def prepare_counts_data(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare counts data with proper data types
-    
-    Args:
-        df: Raw counts DataFrame
-    
-    Returns:
-        Prepared DataFrame
-    """
-    
-    try:
-        df = df.copy()
-        
-        # Convert data types
-        df['Date'] = pd.to_datetime(df.get('Date', df['Timeperiod'])).dt.date
-        df['SignalID'] = df['SignalID'].astype(str)
-        df['CallPhase'] = df['CallPhase'].astype(str)
-        df['Detector'] = df['Detector'].astype(str)
-        
-        return df
-        
-    except Exception as e:
-        logger.error(f"Error preparing counts data: {e}")
-        return df
-
-def create_empty_counts_dataframe() -> pd.DataFrame:
-    """
-    Create empty counts DataFrame with correct structure
-    
-    Returns:
-        Empty DataFrame with proper columns and types
-    """
-    
-    return pd.DataFrame({
-        'SignalID': pd.Series([], dtype=str),
-        'CallPhase': pd.Series([], dtype=int),
-        'Detector': pd.Series([], dtype=int),
-        'Timeperiod': pd.Series([], dtype='datetime64[ns]'),
-        'vol': pd.Series([], dtype=int)
-    })
-
-def get_signals_from_dataset(ac_ds, date_range: list) -> list:
-    """
-    Get list of signals from dataset
-    
-    Args:
-        ac_ds: Arrow dataset
-        date_range: List of date strings
-    
-    Returns:
-        List of signal IDs
-    """
-    
-    try:
-        # Read a sample to get signal IDs
-        if hasattr(ac_ds, 'to_table') and len(ac_ds.to_table()) > 0:
-            sample_data = ac_ds.select(['SignalID']).limit(10000).to_pandas()
-            signals_list = sample_data['SignalID'].unique().tolist()
-        else:
-            signals_list = []
-        
-        return signals_list
-        
-    except Exception as e:
-        logger.error(f"Error getting signals from dataset: {e}")
-        return []
-
-def open_arrow_dataset(path: str):
-    """
-    Open Arrow dataset with error handling
-    
-    Args:
-        path: Path to dataset
-    
-    Returns:
-        Arrow dataset
-    """
-    
-    try:
-        import pyarrow.dataset as ds
-        return ds.dataset(path)
-    except Exception as e:
-        logger.error(f"Error opening Arrow dataset {path}: {e}")
-        raise
+# Note: PyArrow-based functions removed - now using Athena cloud processing
+# All data processing happens in Athena SQL engine for better performance
 
 def monitor_async_processes(processes: list):
     """
@@ -574,26 +301,31 @@ def monitor_async_processes(processes: list):
 def cleanup_and_finalize(conf: dict):
     """
     Cleanup resources and finalize processing
+    No local temp files to clean up - everything processed in Athena
     
     Args:
         conf: Configuration dictionary
     """
     
     try:
-        # Close database connections
+        # Close database connections if any
         close_all_connections()
         
-        # Cleanup temporary files
-        temp_dirs = [
-            "filtered_counts_1hr",
-            "adjusted_counts_1hr", 
-            "filtered_counts_15min",
-            "adjusted_counts_15min"
-        ]
-        cleanup_temp_directories(*temp_dirs)
-        
         # Monitor system resources
-        monitor_system_resources()
+        try:
+            monitor_system_resources()
+        except Exception as e:
+            logger.warning(f"Could not monitor system resources: {e}")
+        
+        # Verify Athena tables were created
+        try:
+            table_status = verify_athena_tables_exist(conf)
+            logger.info("Athena table status:")
+            for table, exists in table_status.items():
+                status = "✓ EXISTS" if exists else "✗ MISSING"
+                logger.info(f"  {table}: {status}")
+        except Exception as e:
+            logger.warning(f"Could not verify Athena tables: {e}")
         
         logger.info("Cleanup and finalization completed")
         
@@ -601,10 +333,14 @@ def cleanup_and_finalize(conf: dict):
         logger.error(f"Error in cleanup: {e}")
 
 def main():
-    """Main function for Monthly Report Calculations Part 1"""
+    """
+    Main function for Monthly Report Calculations Part 1
+    Uses Athena cloud-native processing for optimal performance
+    """
     
     start_time = datetime.now()
     logger.info(f"Starting Monthly Report Calculations Part 1 at {start_time}")
+    logger.info("Using Athena cloud-native processing - all computation in AWS")
     
     try:
         # Initialize
@@ -614,16 +350,19 @@ def main():
         end_date = init_results['end_date']
         month_abbrs = init_results['month_abbrs']
         signals_list = init_results['signals_list']
-        usable_cores = init_results['usable_cores']
+        
+        # Verify AWS credentials are configured
+        if not conf.get('AWS_ACCESS_KEY_ID') or not conf.get('AWS_SECRET_ACCESS_KEY'):
+            logger.warning("AWS credentials not found in config - will use environment credentials")
         
         # Start async scripts
         async_processes = run_async_scripts(conf)
         
-        # Process counts
-        process_counts(conf, start_date, end_date, usable_cores)
+        # Process raw counts (extract from source)
+        process_counts(conf, start_date, end_date)
         
-        # Process counts-based measures
-        # get_counts_based_measures(month_abbrs, conf, end_date, usable_cores)
+        # Process counts-based measures (Athena cloud processing)
+        get_counts_based_measures(month_abbrs, conf, end_date)
         
         # Monitor async processes
         logger.info("Checking status of async processes...")
@@ -637,46 +376,148 @@ def main():
         duration = end_time - start_time
         
         # Generate summary
-        summary = generate_processing_summary(
-            start_time, 
-            end_time,
-            [start_date, end_date],  # dates processed
-            []  # errors - would be populated if tracking errors
-        )
+        try:
+            summary = generate_processing_summary(
+                start_time, 
+                end_time,
+                [start_date, end_date],  # dates processed
+                []  # errors - would be populated if tracking errors
+            )
+            logger.info(summary)
+        except Exception as e:
+            logger.warning(f"Could not generate summary: {e}")
         
-        logger.info(summary)
         logger.info("Monthly Report Calculations Part 1 completed successfully")
+        logger.info(f"Total processing time: {duration}")
+        
+        # Log all output paths
+        log_output_paths(conf, start_date, end_date)
         
         # Create completion checkpoint
-        create_checkpoint_file(
-            'calcs_part1_complete',
-            {
-                'timestamp': end_time.isoformat(),
-                'duration_seconds': duration.total_seconds(),
-                'start_date': start_date,
-                'end_date': end_date,
-                'month_abbrs': month_abbrs,
-                'signals_count': len(signals_list)
-            },
-            conf['bucket']
-        )
+        try:
+            create_checkpoint_file(
+                'calcs_part1_complete',
+                {
+                    'timestamp': end_time.isoformat(),
+                    'duration_seconds': duration.total_seconds(),
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'month_abbrs': month_abbrs,
+                    'signals_count': len(signals_list),
+                    'processing_method': 'athena_cloud_native'
+                },
+                conf['bucket']
+            )
+        except Exception as e:
+            logger.warning(f"Could not create checkpoint: {e}")
         
         return True
         
     except Exception as e:
         end_time = datetime.now()
         logger.error(f"Monthly Report Calculations Part 1 failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         
         # Send error notification if configured
-        if 'notifications' in conf:
-            send_notification(
-                f"Monthly Report Calculations Part 1 failed: {e}",
-                "error",
-                conf['notifications'].get('email'),
-                conf['notifications'].get('slack')
-            )
+        try:
+            if 'notifications' in conf:
+                send_notification(
+                    f"Monthly Report Calculations Part 1 failed: {e}",
+                    "error",
+                    conf['notifications'].get('email'),
+                    conf['notifications'].get('slack')
+                )
+        except Exception as notify_error:
+            logger.error(f"Could not send notification: {notify_error}")
         
         return False
+
+def log_output_paths(conf: dict, start_date: str, end_date: str):
+    """
+    Log all output paths where data was written
+    
+    Args:
+        conf: Configuration dictionary
+        start_date: Start date string
+        end_date: End date string
+    """
+    
+    bucket = conf['bucket']
+    
+    logger.info("=" * 80)
+    logger.info("OUTPUT DATA LOCATIONS")
+    logger.info("=" * 80)
+    
+    # Show date range info first
+    logger.info("\n📅 DATE RANGE PROCESSED:")
+    logger.info(f"  • Start Date: {start_date}")
+    logger.info(f"  • End Date:   {end_date}")
+    
+    # Generate example dates
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    if len(date_range) == 1:
+        date_examples = f"date={start_date}"
+    elif len(date_range) <= 3:
+        date_examples = ", ".join([f"date={d.strftime('%Y-%m-%d')}" for d in date_range])
+    else:
+        first_date = date_range[0].strftime('%Y-%m-%d')
+        last_date = date_range[-1].strftime('%Y-%m-%d')
+        date_examples = f"date={first_date}, ..., date={last_date}"
+    
+    logger.info(f"  • Data partitions: {date_examples}")
+    logger.info(f"  • Total days: {len(date_range)}")
+    
+    # Raw counts outputs
+    logger.info("\n📊 RAW COUNTS DATA:")
+    logger.info(f"  (Note: {{YYYY-MM-DD}} = actual dates like {start_date})")
+    logger.info(f"  • Hourly Counts:        s3://{bucket}/counts_1hr/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • 15-Min Counts:        s3://{bucket}/counts_15min/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • Detector Uptime:      s3://{bucket}/detector_uptime/date={{YYYY-MM-DD}}/")
+    
+    # Show actual example path
+    logger.info(f"\n  ✓ Actual path example:")
+    logger.info(f"    s3://{bucket}/counts_1hr/date={start_date}/")
+    
+    # Adjusted counts outputs
+    logger.info("\n📈 ADJUSTED COUNTS DATA:")
+    logger.info(f"  • Adjusted 1hr:         s3://{bucket}/adjusted_counts_1hr/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • Adjusted 15min:       s3://{bucket}/adjusted_counts_15min/date={{YYYY-MM-DD}}/")
+    
+    # Metrics outputs
+    logger.info("\n📉 CALCULATED METRICS:")
+    logger.info(f"  • VPD (Vehicles/Day):   s3://{bucket}/vpd/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • VPH (Vehicles/Hour):  s3://{bucket}/vph/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • VP15 (Vehicles/15m):  s3://{bucket}/vp15/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • Throughput:           s3://{bucket}/tp/date={{YYYY-MM-DD}}/")
+    
+    # Metadata outputs
+    logger.info("\n📋 METADATA:")
+    logger.info(f"  • Signal Details:       s3://{bucket}/signal_details/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • Checkpoint:           s3://{bucket}/checkpoints/calcs_part1_complete.json")
+    
+    # Athena tables
+    database = conf['athena']['database']
+    logger.info("\n🗄️  ATHENA TABLES UPDATED:")
+    logger.info(f"  • {database}.counts_1hr")
+    logger.info(f"  • {database}.counts_15min")
+    logger.info(f"  • {database}.detector_uptime")
+    logger.info(f"  • {database}.adjusted_counts_1hr")
+    logger.info(f"  • {database}.adjusted_counts_15min")
+    logger.info(f"  • {database}.vehicles_pd")
+    logger.info(f"  • {database}.vehicles_ph")
+    logger.info(f"  • {database}.vehicles_15min")
+    logger.info(f"  • {database}.throughput")
+    
+    # S3 Console links
+    logger.info("\n🌐 AWS S3 CONSOLE:")
+    region = conf['athena'].get('region', 'us-east-1')
+    logger.info(f"  • https://s3.console.aws.amazon.com/s3/buckets/{bucket}?region={region}&tab=objects")
+    
+    logger.info("\n🔍 AWS ATHENA CONSOLE:")
+    logger.info(f"  • https://console.aws.amazon.com/athena/home?region={region}#/query-editor")
+    
+    logger.info("=" * 80)
 
 def close_all_connections():
     """Close all database connections"""
