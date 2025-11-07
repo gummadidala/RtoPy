@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import logging
 import yaml
 import boto3
+import awswrangler as wr
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import multiprocessing
 from functools import partial
@@ -90,20 +91,79 @@ def main():
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')
     date_strings = [date.strftime('%Y-%m-%d') for date in date_range]
     
-    # Create partial function with bucket parameter
-    get_signalids_with_bucket = partial(get_signalids_from_s3, bucket=conf['bucket'])
+    # Extract signals using Athena query (more reliable than S3 read)
+    logger.info(f"Extracting signal IDs from counts data for {len(date_strings)} dates...")
+    logger.info(f"Dates: {date_strings[0]} to {date_strings[-1] if len(date_strings) > 1 else date_strings[0]}")
+    logger.info(f"Using Athena database: {conf['athena']['database']}")
     
-    # Process dates in parallel (equivalent to mclapply)
-    with ProcessPoolExecutor(max_workers=usable_cores) as executor:
-        results = list(executor.map(get_signalids_with_bucket, date_strings))
+    # Query all dates at once from Athena (faster and more reliable)
+    try:
+        date_list = "', '".join(date_strings)
+        query = f"""
+        SELECT DISTINCT signalid, date
+        FROM {conf['athena']['database']}.counts_1hr
+        WHERE date IN ('{date_list}')
+        """
+        
+        session = boto3.Session(
+            aws_access_key_id=conf.get('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=conf.get('AWS_SECRET_ACCESS_KEY'),
+            region_name=conf['athena'].get('region', 'us-east-1')
+        )
+        
+        logger.info("Querying Athena for signals...")
+        df = wr.athena.read_sql_query(
+            sql=query,
+            database=conf['athena']['database'],
+            s3_output=conf['athena']['staging_dir'],
+            boto3_session=session,
+            ctas_approach=False
+        )
+        
+        logger.info(f"Athena returned {len(df)} signal-date combinations")
+        
+        if not df.empty and 'signalid' in df.columns:
+            signals_list = df['signalid'].dropna().unique().tolist()
+            signals_list = [str(s) for s in signals_list]  # Convert to strings
+            
+            # Log signals by date
+            for date_str in date_strings:
+                date_signals = df[df['date'] == date_str]['signalid'].unique()
+                logger.info(f"Date {date_str}: found {len(date_signals)} signals")
+        else:
+            logger.error("Athena query returned no data")
+            signals_list = []
     
-    # Flatten and get unique signals (equivalent to unlist() %>% unique())
-    signals_list = []
-    for result in results:
-        if result:
-            signals_list.extend(result)
+    except Exception as e:
+        logger.error(f"Athena signal extraction failed: {e}")
+        logger.info("Falling back to S3 read method...")
+        
+        # Fallback to original method
+        get_signalids_with_bucket = partial(get_signalids_from_s3, bucket=conf['bucket'])
+        
+        with ThreadPoolExecutor(max_workers=min(usable_cores, len(date_strings))) as executor:
+            results = list(executor.map(get_signalids_with_bucket, date_strings))
+        
+        # Flatten and get unique signals from S3 fallback results
+        signals_list = []
+        for i, result in enumerate(results):
+            if result:
+                logger.info(f"Date {date_strings[i]}: found {len(result)} signals")
+                signals_list.extend(result)
+            else:
+                logger.warning(f"Date {date_strings[i]}: no signals found")
+        
+        signals_list = list(set(signals_list))  # unique()
     
-    signals_list = list(set(signals_list))  # unique()
+    # Log final result
+    logger.info(f"Total unique signals extracted: {len(signals_list)}")
+    
+    if len(signals_list) == 0:
+        logger.error("No signals found in any date! This may indicate:")
+        logger.error(f"  1. No data exists in s3://{conf['bucket']}/mark/counts_1hr/")
+        logger.error(f"  2. Athena table {conf['athena']['database']}.counts_1hr is empty")
+        logger.error("  3. AWS credentials issue preventing data access")
+        logger.error("  Please check Part 1 completed successfully and created counts data")
     
     # R: get_latest_det_config(conf) %>% s3write_using(qsave, bucket = conf$bucket, object = "ATSPM_Det_Config_Good_Latest.qs")
     det_config = get_latest_det_config(conf)

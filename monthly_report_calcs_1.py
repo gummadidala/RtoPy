@@ -13,6 +13,8 @@ import logging
 import subprocess
 import boto3
 import awswrangler as wr
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from functools import partial
 
 # Import custom modules
 from monthly_report_calcs_init import main as init_main
@@ -20,6 +22,7 @@ from monthly_report_functions import *
 from athena_processing import *
 from counts import get_counts2  # Only need the raw counts function
 from s3_parquet_io import *
+from utilities import keep_trying
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -75,15 +78,48 @@ def run_async_scripts(conf: dict):
     
     return processes
 
-def process_counts(conf: dict, start_date: str, end_date: str):
+def process_single_date_counts(date_str: str, bucket: str, conf_athena: dict):
     """
-    Process raw counts data for the date range
+    Process counts for a single date with retry logic
+    Module-level function for multiprocessing
+    
+    Args:
+        date_str: Date string to process
+        bucket: S3 bucket name
+        conf_athena: Athena configuration
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Use retry logic matching R's keep_trying(n_tries=2)
+        result = keep_trying(
+            get_counts2,
+            n_tries=2,
+            date_=date_str,
+            bucket=bucket,
+            conf_athena=conf_athena,
+            uptime=True,
+            counts=True
+        )
+        logger.info(f"Completed raw counts for: {date_str}")
+        return True
+    except Exception as e:
+        logger.error(f"Error processing counts for {date_str}: {e}")
+        return False
+
+
+def process_counts(conf: dict, start_date: str, end_date: str, usable_cores: int = None):
+    """
+    Process raw counts data for the date range with parallel processing and retry logic
     This extracts raw counts from source and stores them in S3
+    Matches R's foreach %dopar% with keep_trying(n_tries=2)
     
     Args:
         conf: Configuration dictionary
         start_date: Start date string
         end_date: End date string
+        usable_cores: Number of cores for parallel processing (optional)
     """
     
     logger.info("Starting counts processing [4 of 11]")
@@ -99,22 +135,55 @@ def process_counts(conf: dict, start_date: str, end_date: str):
         
         logger.info(f"Processing counts for {len(date_strings)} dates")
         
-        # Process each date to extract raw counts
-        for date_str in date_strings:
-            try:
-                logger.info(f"Processing raw counts for: {date_str}")
-                get_counts2(
-                    date_str,
-                    bucket=conf['bucket'],
-                    conf_athena=conf['athena'],
-                    uptime=True,
-                    counts=True
-                )
-                logger.info(f"Completed raw counts for: {date_str}")
-            except Exception as e:
-                logger.error(f"Error processing counts for {date_str}: {e}")
-                # Continue with other dates even if one fails
-                continue
+        if len(date_strings) == 1:
+            # Single date - process directly (matching R logic)
+            logger.info(f"Processing single date: {date_strings[0]}")
+            keep_trying(
+                get_counts2,
+                n_tries=2,
+                date_=date_strings[0],
+                bucket=conf['bucket'],
+                conf_athena=conf['athena'],
+                uptime=True,
+                counts=True
+            )
+        else:
+            # Multiple dates - parallel processing (matching R's foreach %dopar%)
+            if usable_cores is None:
+                usable_cores = min(len(date_strings), os.cpu_count() or 4)
+            
+            logger.info(f"Using parallel processing with {usable_cores} workers")
+            
+            with ProcessPoolExecutor(max_workers=usable_cores) as executor:
+                # Create futures for all dates
+                futures = {
+                    executor.submit(
+                        process_single_date_counts,
+                        date_str,
+                        conf['bucket'],
+                        conf['athena']
+                    ): date_str
+                    for date_str in date_strings
+                }
+                
+                # Track results
+                success_count = 0
+                error_count = 0
+                
+                for future in as_completed(futures):
+                    date_str = futures[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            success_count += 1
+                        else:
+                            error_count += 1
+                            logger.warning(f"Failed to process {date_str}")
+                    except Exception as e:
+                        error_count += 1
+                        logger.error(f"Exception processing {date_str}: {e}")
+                
+                logger.info(f"Counts processing completed: {success_count} success, {error_count} errors")
         
         logger.info("---------------------- Finished counts ---------------------------")
         
@@ -174,8 +243,9 @@ def get_counts_based_measures(month_abbrs: list, conf: dict, end_date: str):
 
 def process_hourly_counts_athena(yyyy_mm: str, date_range: list, conf: dict):
     """
-    Process 1-hour counts using Athena cloud processing
+    Process 1-hour counts using Athena cloud processing with retry logic
     All computation happens in Athena SQL - no local data download
+    Faster and more robust than R's local Arrow processing
     
     Args:
         yyyy_mm: Month abbreviation (YYYY-MM)
@@ -185,23 +255,52 @@ def process_hourly_counts_athena(yyyy_mm: str, date_range: list, conf: dict):
     
     try:
         logger.info(f"Processing 1-hour counts in Athena for {yyyy_mm}")
-        logger.info(f"Date range: {date_range[0]} to {date_range[-1]}")
+        logger.info(f"Date range: {date_range[0]} to {date_range[-1]} ({len(date_range)} days)")
         
-        # Step 1: Create adjusted counts in Athena (SQL processing)
+        # Step 1: Create adjusted counts in Athena (SQL processing) with retry
         logger.info("Step 1/4: Creating adjusted counts in Athena...")
-        create_adjusted_counts_athena(date_range, conf, interval='1hr')
+        keep_trying(
+            create_adjusted_counts_athena,
+            n_tries=3,
+            timeout=300,
+            date_range=date_range,
+            conf=conf,
+            interval='1hr'
+        )
         
-        # Step 2: Calculate VPD (Vehicles Per Day) in Athena
+        # Step 2: Calculate VPD (Vehicles Per Day) in Athena with retry
         logger.info("Step 2/4: Calculating VPD in Athena...")
-        calculate_vpd_athena(date_range, conf)
+        keep_trying(
+            calculate_vpd_athena,
+            n_tries=3,
+            timeout=180,
+            date_range=date_range,
+            conf=conf
+        )
         
-        # Step 3: Calculate VPH (Vehicles Per Hour) in Athena
+        # Step 3: Calculate VPH (Vehicles Per Hour) in Athena with retry
         logger.info("Step 3/4: Calculating VPH in Athena...")
-        calculate_vph_athena(date_range, conf)
+        keep_trying(
+            calculate_vph_athena,
+            n_tries=3,
+            timeout=180,
+            date_range=date_range,
+            conf=conf
+        )
         
         # Step 4: Get signals list and write details (small metadata operation)
         logger.info("Step 4/4: Writing signal details...")
-        signals_list = get_signals_list_athena(date_range, conf)
+        try:
+            signals_list = keep_trying(
+                get_signals_list_athena,
+                n_tries=3,
+                timeout=60,
+                date_range=date_range,
+                conf=conf
+            )
+        except Exception as e:
+            logger.warning(f"Could not get signals list from Athena: {e}")
+            signals_list = []
         
         for date_str in date_range:
             try:
@@ -227,8 +326,9 @@ def process_hourly_counts_athena(yyyy_mm: str, date_range: list, conf: dict):
 
 def process_15min_counts_athena(yyyy_mm: str, date_range: list, conf: dict):
     """
-    Process 15-minute counts using Athena cloud processing
+    Process 15-minute counts using Athena cloud processing with retry logic
     All computation happens in Athena SQL - no local data download
+    Faster and more robust than R's local Arrow processing
     
     Args:
         yyyy_mm: Month abbreviation (YYYY-MM)
@@ -238,19 +338,38 @@ def process_15min_counts_athena(yyyy_mm: str, date_range: list, conf: dict):
     
     try:
         logger.info(f"Processing 15-minute counts in Athena for {yyyy_mm}")
-        logger.info(f"Date range: {date_range[0]} to {date_range[-1]}")
+        logger.info(f"Date range: {date_range[0]} to {date_range[-1]} ({len(date_range)} days)")
         
-        # Step 1: Create adjusted counts in Athena (SQL processing)
+        # Step 1: Create adjusted counts in Athena (SQL processing) with retry
         logger.info("Step 1/3: Creating adjusted 15-min counts in Athena...")
-        create_adjusted_counts_athena(date_range, conf, interval='15min')
+        keep_trying(
+            create_adjusted_counts_athena,
+            n_tries=3,
+            timeout=300,
+            date_range=date_range,
+            conf=conf,
+            interval='15min'
+        )
         
-        # Step 2: Calculate throughput in Athena
+        # Step 2: Calculate throughput in Athena with retry
         logger.info("Step 2/3: Calculating throughput in Athena...")
-        calculate_throughput_athena(date_range, conf)
+        keep_trying(
+            calculate_throughput_athena,
+            n_tries=3,
+            timeout=180,
+            date_range=date_range,
+            conf=conf
+        )
         
-        # Step 3: Calculate VP15 (Vehicles Per 15 Minutes) in Athena
+        # Step 3: Calculate VP15 (Vehicles Per 15 Minutes) in Athena with retry
         logger.info("Step 3/3: Calculating VP15 in Athena...")
-        calculate_vp15_athena(date_range, conf)
+        keep_trying(
+            calculate_vp15_athena,
+            n_tries=3,
+            timeout=180,
+            date_range=date_range,
+            conf=conf
+        )
         
         logger.info(f"Completed 15-min counts processing for {yyyy_mm}")
         
@@ -350,6 +469,9 @@ def main():
         end_date = init_results['end_date']
         month_abbrs = init_results['month_abbrs']
         signals_list = init_results['signals_list']
+        usable_cores = init_results['usable_cores']
+        
+        logger.info(f"Configuration loaded - using {usable_cores} cores for parallel processing")
         
         # Verify AWS credentials are configured
         if not conf.get('AWS_ACCESS_KEY_ID') or not conf.get('AWS_SECRET_ACCESS_KEY'):
@@ -358,10 +480,10 @@ def main():
         # Start async scripts
         async_processes = run_async_scripts(conf)
         
-        # Process raw counts (extract from source)
-        process_counts(conf, start_date, end_date)
+        # Process raw counts (extract from source) - with parallel processing and retry logic
+        process_counts(conf, start_date, end_date, usable_cores)
         
-        # Process counts-based measures (Athena cloud processing)
+        # Process counts-based measures (Athena cloud processing - faster than R!)
         get_counts_based_measures(month_abbrs, conf, end_date)
         
         # Monitor async processes
@@ -471,13 +593,13 @@ def log_output_paths(conf: dict, start_date: str, end_date: str):
     # Raw counts outputs
     logger.info("\n📊 RAW COUNTS DATA:")
     logger.info(f"  (Note: {{YYYY-MM-DD}} = actual dates like {start_date})")
-    logger.info(f"  • Hourly Counts:        s3://{bucket}/counts_1hr/date={{YYYY-MM-DD}}/")
-    logger.info(f"  • 15-Min Counts:        s3://{bucket}/counts_15min/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • Hourly Counts:        s3://{bucket}/mark/counts_1hr/date={{YYYY-MM-DD}}/")
+    logger.info(f"  • 15-Min Counts:        s3://{bucket}/mark/counts_15min/date={{YYYY-MM-DD}}/")
     logger.info(f"  • Detector Uptime:      s3://{bucket}/detector_uptime/date={{YYYY-MM-DD}}/")
     
     # Show actual example path
     logger.info(f"\n  ✓ Actual path example:")
-    logger.info(f"    s3://{bucket}/counts_1hr/date={start_date}/")
+    logger.info(f"    s3://{bucket}/mark/counts_1hr/date={start_date}/")
     
     # Adjusted counts outputs
     logger.info("\n📈 ADJUSTED COUNTS DATA:")

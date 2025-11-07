@@ -854,10 +854,55 @@ def smooth_outliers(df, monthly_avg):
     return df
 
 def get_signalids_from_s3(date_, bucket='gdot-spm', prefix='mark/counts_1hr'):
-    """Get list of signal IDs that have data for a given date"""
+    """Get list of signal IDs that have data for a given date
+    
+    Now uses Athena query for more reliable signal extraction (faster and more robust)
+    Falls back to S3 read if Athena fails
+    """
     
     date_str = date_.strftime('%Y-%m-%d') if hasattr(date_, 'strftime') else str(date_)
     
+    # Try Athena first (more reliable, uses database credentials)
+    try:
+        import os
+        if 'ATHENA_DATABASE' in os.environ or USE_ATHENA_OPTIMIZATION:
+            database = os.environ.get('ATHENA_DATABASE', 'gdot_spm_sbox')
+            staging_dir = os.environ.get('ATHENA_STAGING', 's3://gdot-tmc-spm-athena-sandbox')
+            
+            logger.info(f"Attempting Athena signal extraction for {date_str}")
+            logger.info(f"Database: {database}, Staging: {staging_dir}")
+            
+            query = f"""
+            SELECT DISTINCT signalid
+            FROM {database}.counts_1hr
+            WHERE date = '{date_str}'
+            """
+            
+            session = boto3.Session()  # Uses environment credentials
+            df = wr.athena.read_sql_query(
+                sql=query,
+                database=database,
+                s3_output=staging_dir,
+                boto3_session=session,
+                ctas_approach=False
+            )
+            
+            logger.info(f"Athena query returned {len(df)} rows for {date_str}")
+            
+            if not df.empty and 'signalid' in df.columns:
+                signals = df['signalid'].dropna().unique().tolist()
+                if signals:
+                    logger.info(f"✓ Found {len(signals)} signals for {date_str} via Athena")
+                    return signals
+                else:
+                    logger.warning(f"Athena returned data but no valid signals for {date_str}")
+            else:
+                logger.warning(f"Athena query returned empty result for {date_str}")
+    except Exception as e:
+        logger.warning(f"Athena signal extraction failed for {date_str}: {e}")
+        logger.warning("Falling back to S3 read method...")
+    
+    # Fallback to S3 read
     try:
         s3_path = f"s3://{bucket}/{prefix}/date={date_str}/"
         
@@ -865,12 +910,14 @@ def get_signalids_from_s3(date_, bucket='gdot-spm', prefix='mark/counts_1hr'):
         df = wr.s3.read_parquet(path=s3_path)
         
         if not df.empty and 'SignalID' in df.columns:
-            return df['SignalID'].unique().tolist()
+            signals = df['SignalID'].unique().tolist()
+            logger.info(f"Found {len(signals)} signals for {date_str} via S3")
+            return signals
         else:
             return []
             
     except Exception as e:
-        print(f"Error getting signal IDs for {date_str}: {e}")
+        logger.warning(f"Error getting signal IDs for {date_str}: {e}")
         return []
 
 def write_signal_details(date_str, conf, signals_list):
