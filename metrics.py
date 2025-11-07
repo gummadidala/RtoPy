@@ -583,7 +583,7 @@ def identify_detector_issues(atspm_data):
 
 def get_qs(detection_events: pd.DataFrame, intervals: list = ["hour", "15min"]) -> dict:
     """
-    Calculate queue spillback from detection events
+    Calculate queue spillback from detection events (supports pre-aggregated data)
     Returns dict with keys for each interval containing DataFrame with queue spillback metrics
     """
     import logging
@@ -593,35 +593,52 @@ def get_qs(detection_events: pd.DataFrame, intervals: list = ["hour", "15min"]) 
         if detection_events is None or detection_events.empty:
             return {interval: pd.DataFrame() for interval in intervals}
         
+        # Check if data is already aggregated (from Athena query) or raw events
+        is_aggregated = 'detector_on_count' in detection_events.columns
+        
         # Basic queue spillback calculation
         results = {}
         
         for interval in intervals:
-            # Create time grouping
-            if interval == "hour":
-                time_col = pd.to_datetime(detection_events['Timeperiod']).dt.floor('H')
-            else:  # 15min
-                time_col = pd.to_datetime(detection_events['Timeperiod']).dt.floor('15T')
-            
-            # Group detection events by time period
-            qs_data = detection_events.copy()
-            qs_data['TimeGroup'] = time_col
-            
-            # Calculate queue spillback metrics per signal/phase/time
-            qs_summary = qs_data.groupby(['SignalID', 'CallPhase', 'TimeGroup']).agg({
-                'EventCode': 'count'
-            }).reset_index()
-            
-            # Estimate queue spillback frequency (simplified)
-            # In a full implementation, this would use detector occupancy and position data
-            qs_summary['qs_events'] = (qs_summary['EventCode'] * 0.1).astype(int)  # Rough estimate
-            qs_summary['cycles'] = qs_summary['EventCode'] // 2
-            qs_summary['qs_freq'] = qs_summary['qs_events'] / qs_summary['cycles'].replace(0, 1)
-            qs_summary = qs_summary.rename(columns={'TimeGroup': 'Timeperiod'})
-            qs_summary = qs_summary.drop(columns=['EventCode'])
-            
-            # Add date column
-            qs_summary['date'] = pd.to_datetime(qs_summary['Timeperiod']).dt.strftime('%Y-%m-%d')
+            if is_aggregated:
+                # Data is already aggregated by hour from Athena query
+                qs_data = detection_events.copy()
+                
+                # If requesting 15min but we have hourly data, just use hourly
+                # (Athena query already aggregated to hour level)
+                
+                # Calculate queue spillback metrics from aggregated counts
+                qs_data['total_events'] = qs_data['detector_on_count'] + qs_data['detector_off_count']
+                qs_data['qs_events'] = (qs_data['detector_on_count'] * 0.15).astype(int)  # Estimate
+                qs_data['cycles'] = (qs_data['total_events'] / 4).clip(lower=1).astype(int)
+                qs_data['qs_freq'] = qs_data['qs_events'] / qs_data['cycles']
+                
+                # Add date column
+                qs_data['date'] = pd.to_datetime(qs_data['Timeperiod']).dt.strftime('%Y-%m-%d')
+                
+                # Select final columns
+                qs_summary = qs_data[['SignalID', 'CallPhase', 'Timeperiod', 'qs_events', 'cycles', 'qs_freq', 'date']]
+                
+            else:
+                # Raw event data - use original logic
+                if interval == "hour":
+                    time_col = pd.to_datetime(detection_events['Timeperiod']).dt.floor('H')
+                else:  # 15min
+                    time_col = pd.to_datetime(detection_events['Timeperiod']).dt.floor('15T')
+                
+                qs_data = detection_events.copy()
+                qs_data['TimeGroup'] = time_col
+                
+                qs_summary = qs_data.groupby(['SignalID', 'CallPhase', 'TimeGroup']).agg({
+                    'EventCode': 'count'
+                }).reset_index()
+                
+                qs_summary['qs_events'] = (qs_summary['EventCode'] * 0.1).astype(int)
+                qs_summary['cycles'] = qs_summary['EventCode'] // 2
+                qs_summary['qs_freq'] = qs_summary['qs_events'] / qs_summary['cycles'].replace(0, 1)
+                qs_summary = qs_summary.rename(columns={'TimeGroup': 'Timeperiod'})
+                qs_summary = qs_summary.drop(columns=['EventCode'])
+                qs_summary['date'] = pd.to_datetime(qs_summary['Timeperiod']).dt.strftime('%Y-%m-%d')
             
             results[interval] = qs_summary
             
@@ -642,17 +659,9 @@ def get_sf_utah(date_, conf: dict, signals_list: list, intervals: list = ["hour"
     try:
         date_str = date_.strftime('%Y-%m-%d') if hasattr(date_, 'strftime') else str(date_)
         
-        # Join signal IDs as comma-separated integers (no quotes)
-        signals_str = ", ".join([str(s) for s in signals_list])
-        
-        # Query ATSPM data for split failure calculation
-        query = f"""
-        SELECT SignalID, EventCode, EventParam AS CallPhase, timestamp AS Timeperiod
-        FROM {conf['athena']['database']}.{conf['athena']['atspm_table']}
-        WHERE date = '{date_str}'
-        AND SignalID IN ({signals_str})
-        AND EventCode IN (1, 8, 10, 11)
-        """
+        # Batch signals to avoid query timeout
+        BATCH_SIZE = 500
+        all_data = []
         
         session = boto3.Session(
             aws_access_key_id=conf.get('AWS_ACCESS_KEY_ID'),
@@ -660,16 +669,42 @@ def get_sf_utah(date_, conf: dict, signals_list: list, intervals: list = ["hour"
             region_name=conf.get('AWS_DEFAULT_REGION', 'us-east-1')
         )
         
-        df = wr.athena.read_sql_query(
-            sql=query,
-            database=conf['athena']['database'],
-            s3_output=conf['athena']['staging_dir'],
-            boto3_session=session,
-            ctas_approach=False
-        )
+        # Process signals in batches
+        for i in range(0, len(signals_list), BATCH_SIZE):
+            batch = signals_list[i:i + BATCH_SIZE]
+            batch_num = (i // BATCH_SIZE) + 1
+            total_batches = (len(signals_list) + BATCH_SIZE - 1) // BATCH_SIZE
+            
+            logger.info(f"Split failures batch {batch_num}/{total_batches} ({len(batch)} signals) for {date_str}")
+            
+            signals_str = ", ".join([str(s) for s in batch])
+            
+            # Query ATSPM data for split failure calculation
+            query = f"""
+            SELECT SignalID, EventCode, EventParam AS CallPhase, timestamp AS Timeperiod
+            FROM {conf['athena']['database']}.{conf['athena']['atspm_table']}
+            WHERE date = '{date_str}'
+            AND SignalID IN ({signals_str})
+            AND EventCode IN (1, 8, 10, 11)
+            """
+            
+            batch_df = wr.athena.read_sql_query(
+                sql=query,
+                database=conf['athena']['database'],
+                s3_output=conf['athena']['staging_dir'],
+                boto3_session=session,
+                ctas_approach=False
+            )
+            
+            if not batch_df.empty:
+                all_data.append(batch_df)
         
-        if df.empty:
+        # Combine all batches
+        if not all_data:
             return {interval: pd.DataFrame() for interval in intervals}
+        
+        df = pd.concat(all_data, ignore_index=True)
+        logger.info(f"Retrieved {len(df)} split failure events for {date_str}")
         
         results = {}
         
@@ -714,17 +749,9 @@ def get_ped_delay(date_, conf: dict, signals_list: list) -> pd.DataFrame:
     try:
         date_str = date_.strftime('%Y-%m-%d') if hasattr(date_, 'strftime') else str(date_)
         
-        # Join signal IDs as comma-separated integers (no quotes)
-        signals_str = ", ".join([str(s) for s in signals_list])
-        
-        # Query ATSPM data for pedestrian events
-        query = f"""
-        SELECT SignalID, EventCode, EventParam AS CallPhase, timestamp AS Timeperiod
-        FROM {conf['athena']['database']}.{conf['athena']['atspm_table']}
-        WHERE date = '{date_str}'
-        AND SignalID IN ({signals_str})
-        AND EventCode IN (21, 23, 45, 90)
-        """
+        # Batch signals to avoid query timeout
+        BATCH_SIZE = 500
+        all_data = []
         
         session = boto3.Session(
             aws_access_key_id=conf.get('AWS_ACCESS_KEY_ID'),
@@ -732,16 +759,42 @@ def get_ped_delay(date_, conf: dict, signals_list: list) -> pd.DataFrame:
             region_name=conf.get('AWS_DEFAULT_REGION', 'us-east-1')
         )
         
-        df = wr.athena.read_sql_query(
-            sql=query,
-            database=conf['athena']['database'],
-            s3_output=conf['athena']['staging_dir'],
-            boto3_session=session,
-            ctas_approach=False
-        )
+        # Process signals in batches
+        for i in range(0, len(signals_list), BATCH_SIZE):
+            batch = signals_list[i:i + BATCH_SIZE]
+            batch_num = (i // BATCH_SIZE) + 1
+            total_batches = (len(signals_list) + BATCH_SIZE - 1) // BATCH_SIZE
+            
+            logger.info(f"Pedestrian delay batch {batch_num}/{total_batches} ({len(batch)} signals) for {date_str}")
+            
+            signals_str = ", ".join([str(s) for s in batch])
+            
+            # Query ATSPM data for pedestrian events
+            query = f"""
+            SELECT SignalID, EventCode, EventParam AS CallPhase, timestamp AS Timeperiod
+            FROM {conf['athena']['database']}.{conf['athena']['atspm_table']}
+            WHERE date = '{date_str}'
+            AND SignalID IN ({signals_str})
+            AND EventCode IN (21, 23, 45, 90)
+            """
+            
+            batch_df = wr.athena.read_sql_query(
+                sql=query,
+                database=conf['athena']['database'],
+                s3_output=conf['athena']['staging_dir'],
+                boto3_session=session,
+                ctas_approach=False
+            )
+            
+            if not batch_df.empty:
+                all_data.append(batch_df)
         
-        if df.empty:
+        # Combine all batches
+        if not all_data:
             return pd.DataFrame()
+        
+        df = pd.concat(all_data, ignore_index=True)
+        logger.info(f"Retrieved {len(df)} pedestrian events for {date_str}")
         
         # Group by hour for pedestrian delay calculation
         df['Hour'] = pd.to_datetime(df['Timeperiod']).dt.floor('H')

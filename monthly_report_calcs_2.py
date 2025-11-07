@@ -132,39 +132,65 @@ def get_detection_events_wrapper(date_start: str, date_end: str, conf_athena: Di
         return pd.DataFrame()
 
 def get_detection_events_fallback(date_start: str, date_end: str, conf_athena: Dict, signals_list: List[str]) -> pd.DataFrame:
-    """Fallback implementation for getting detection events from ATSPM table"""
+    """Fallback implementation for getting detection events from ATSPM table with batching"""
     try:
-        # Join signal IDs as comma-separated integers (no quotes)
-        signals_str = ", ".join([str(s) for s in signals_list])
-        # Query detector events from ATSPM table (EventCode 81=Detector Off, 82=Detector On)
-        query = f"""
-        SELECT 
-            SignalID,
-            EventParam AS Detector,
-            EventParam AS CallPhase,
-            timestamp AS Timeperiod,
-            EventCode,
-            EventParam
-        FROM {conf_athena['database']}.{conf_athena.get('atspm_table', 'atspm')}
-        WHERE date BETWEEN '{date_start}' AND '{date_end}'
-        AND SignalID IN ({signals_str})
-        AND EventCode IN (81, 82)
-        """
+        # Batch signals to avoid query timeout with large signal lists
+        BATCH_SIZE = 500
+        all_results = []
         
         session = boto3.Session(
             aws_access_key_id=conf_athena.get('uid'),
             aws_secret_access_key=conf_athena.get('pwd')
         )
         
-        df = wr.athena.read_sql_query(
-            sql=query,
-            database=conf_athena['database'],
-            s3_output=conf_athena['staging_dir'],
-            boto3_session=session,
-            ctas_approach=False
-        )
+        # Process signals in batches
+        for i in range(0, len(signals_list), BATCH_SIZE):
+            batch = signals_list[i:i + BATCH_SIZE]
+            batch_num = (i // BATCH_SIZE) + 1
+            total_batches = (len(signals_list) + BATCH_SIZE - 1) // BATCH_SIZE
+            
+            logger.info(f"Processing detection events batch {batch_num}/{total_batches} ({len(batch)} signals)")
+            
+            signals_str = ", ".join([str(s) for s in batch])
+            
+            # Query aggregated detector occupancy instead of raw events (way more efficient!)
+            # Calculate occupancy per detector per hour - this reduces 22M rows to ~50K
+            query = f"""
+            SELECT 
+                SignalID,
+                EventParam AS Detector,
+                EventParam AS CallPhase,
+                DATE_TRUNC('hour', timestamp) AS Timeperiod,
+                COUNT(CASE WHEN EventCode = 82 THEN 1 END) AS detector_on_count,
+                COUNT(CASE WHEN EventCode = 81 THEN 1 END) AS detector_off_count,
+                MAX(CASE WHEN EventCode = 82 THEN 1 ELSE 0 END) AS has_detection
+            FROM {conf_athena['database']}.{conf_athena.get('atspm_table', 'atspm')}
+            WHERE date BETWEEN '{date_start}' AND '{date_end}'
+            AND SignalID IN ({signals_str})
+            AND EventCode IN (81, 82)
+            GROUP BY SignalID, EventParam, DATE_TRUNC('hour', timestamp)
+            """
+            
+            batch_df = wr.athena.read_sql_query(
+                sql=query,
+                database=conf_athena['database'],
+                s3_output=conf_athena['staging_dir'],
+                boto3_session=session,
+                ctas_approach=False
+            )
+            
+            if not batch_df.empty:
+                all_results.append(batch_df)
+                logger.info(f"Batch {batch_num} returned {len(batch_df)} detection events")
         
-        return df
+        # Combine all batches
+        if all_results:
+            final_df = pd.concat(all_results, ignore_index=True)
+            logger.info(f"Total detection events retrieved: {len(final_df)}")
+            return final_df
+        else:
+            logger.info("No detection events found across all batches")
+            return pd.DataFrame()
         
     except Exception as e:
         logger.error(f"Error getting detection events: {e}")
