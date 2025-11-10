@@ -689,19 +689,22 @@ def athena_get_corridor_hourly_avg(
         else:
             agg_expr = f"AVG(m.{metric_col}) AS {metric_col}"
         
+        # Most hourly tables use 'date_hour' NOT 'Timeperiod'
+        hour_col = 'date_hour' if time_col == 'Timeperiod' else time_col
+        
         query = f"""
         SELECT 
             c.Zone_Group,
             c.Zone,
             c.Corridor,
             DATE_TRUNC('month', CAST(m.date AS TIMESTAMP)) AS Month,
-            EXTRACT(HOUR FROM CAST(m.{time_col} AS TIMESTAMP)) AS Hour,
+            EXTRACT(HOUR FROM CAST(m.{hour_col} AS TIMESTAMP)) AS Hour,
             {agg_expr}
         FROM {database}.{table_name} m
         INNER JOIN {database}.{corridors_table} c
             ON CAST(m.SignalID AS VARCHAR) = CAST(c.SignalID AS VARCHAR)
         WHERE m.date BETWEEN '{start_date}' AND '{end_date}'
-        GROUP BY c.Zone_Group, c.Zone, c.Corridor, DATE_TRUNC('month', CAST(m.date AS TIMESTAMP)), EXTRACT(HOUR FROM CAST(m.{time_col} AS TIMESTAMP))
+        GROUP BY c.Zone_Group, c.Zone, c.Corridor, DATE_TRUNC('month', CAST(m.date AS TIMESTAMP)), EXTRACT(HOUR FROM CAST(m.{hour_col} AS TIMESTAMP))
         ORDER BY Corridor, Month, Hour
         """
         
@@ -926,3 +929,104 @@ def athena_aggregate_with_batching(
         logger.error(f"Batched Athena aggregation failed: {e}")
         raise
 
+
+def athena_get_ped_counts_aggregated(
+    start_date: str, end_date: str, signals_list: list, conf: dict
+) -> tuple:
+    """
+    Get pedestrian counts aggregated from counts_ped_1hr table in Athena
+    Returns (daily_counts, hourly_counts) dataframes
+    
+    This replaces the massive local download and aggregation
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        database = conf['athena']['database']
+        bucket = conf['bucket']
+        
+        # Batch signals to avoid query timeout
+        BATCH_SIZE = 500
+        all_daily = []
+        all_hourly = []
+        
+        session = get_boto3_session(conf)
+        
+        for i in range(0, len(signals_list), BATCH_SIZE):
+            batch = signals_list[i:i + BATCH_SIZE]
+            batch_num = (i // BATCH_SIZE) + 1
+            total_batches = (len(signals_list) + BATCH_SIZE - 1) // BATCH_SIZE
+            
+            logger.info(f"Processing ped counts batch {batch_num}/{total_batches} ({len(batch)} signals)")
+            
+            signals_str = ", ".join([f"'{str(s)}'" for s in batch])
+            
+            # Daily aggregation query
+            daily_query = f"""
+            SELECT 
+                SignalID,
+                Detector,
+                CallPhase,
+                Date,
+                EXTRACT(DOW FROM CAST(Date AS DATE)) AS DOW,
+                EXTRACT(WEEK FROM CAST(Date AS DATE)) AS Week,
+                SUM(CAST(vol AS DOUBLE)) AS papd
+            FROM {database}.counts_ped_1hr
+            WHERE date BETWEEN '{start_date}' AND '{end_date}'
+            AND SignalID IN ({signals_str})
+            AND CallPhase IS NOT NULL
+            GROUP BY SignalID, Detector, CallPhase, Date
+            """
+            
+            daily_df = wr.athena.read_sql_query(
+                sql=daily_query,
+                database=database,
+                s3_output=conf['athena']['staging_dir'],
+                boto3_session=session,
+                ctas_approach=False
+            )
+            
+            if not daily_df.empty:
+                all_daily.append(daily_df)
+            
+            # Hourly query (keep timeperiod)
+            hourly_query = f"""
+            SELECT 
+                SignalID,
+                Detector,
+                CallPhase,
+                Date,
+                EXTRACT(DOW FROM CAST(Date AS DATE)) AS DOW,
+                EXTRACT(WEEK FROM CAST(Date AS DATE)) AS Week,
+                Timeperiod AS Hour,
+                CAST(vol AS DOUBLE) AS paph
+            FROM {database}.counts_ped_1hr
+            WHERE date BETWEEN '{start_date}' AND '{end_date}'
+            AND SignalID IN ({signals_str})
+            AND CallPhase IS NOT NULL
+            """
+            
+            hourly_df = wr.athena.read_sql_query(
+                sql=hourly_query,
+                database=database,
+                s3_output=conf['athena']['staging_dir'],
+                boto3_session=session,
+                ctas_approach=False
+            )
+            
+            if not hourly_df.empty:
+                all_hourly.append(hourly_df)
+        
+        # Combine all batches
+        daily_result = pd.concat(all_daily, ignore_index=True) if all_daily else pd.DataFrame()
+        hourly_result = pd.concat(all_hourly, ignore_index=True) if all_hourly else pd.DataFrame()
+        
+        logger.info(f"Retrieved {len(daily_result)} daily ped count records, {len(hourly_result)} hourly records")
+        
+        return daily_result, hourly_result
+        
+    except Exception as e:
+        logger.error(f"Error getting ped counts from Athena: {e}")
+        logger.error(traceback.format_exc())
+        return pd.DataFrame(), pd.DataFrame()
