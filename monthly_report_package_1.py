@@ -34,6 +34,54 @@ from database_functions import execute_athena_query
 from configs import get_ped_config_factory, get_corridors
 from aggregations import get_hourly
 
+# Import Athena optimization helpers
+try:
+    # Force reload to get latest fixes (especially type cast fixes)
+    import importlib
+    if 'package_athena_helpers' in sys.modules:
+        print("🔄 Reloading package_athena_helpers to get latest fixes...")
+        importlib.reload(sys.modules['package_athena_helpers'])
+        print("✅ RELOADED package_athena_helpers - TYPE MISMATCH FIX ACTIVE!")
+    
+    from package_athena_helpers import (
+        athena_get_corridor_weekly_avg,
+        athena_get_corridor_monthly_avg,
+        athena_get_corridor_hourly_avg,
+        athena_get_bad_detectors,
+        athena_get_bad_ped_detectors,
+        athena_aggregate_with_batching,
+        USE_ATHENA_AGGREGATION
+    )
+    
+    # Force reload again after import to ensure we have the absolute latest version
+    import package_athena_helpers
+    importlib.reload(package_athena_helpers)
+    print("✅ DOUBLE-RELOADED package_athena_helpers - FIXED VERSION GUARANTEED!")
+    
+    logger.info("Loaded Athena optimization helpers (FIXED VERSION)")
+except ImportError:
+    logger.warning("Athena helpers not available, using local processing")
+    USE_ATHENA_AGGREGATION = False
+
+try:
+    from utilities import keep_trying
+except ImportError:
+    logger.warning("keep_trying not available")
+    def keep_trying(func, n_tries=3, timeout=None, **kwargs):
+        for attempt in range(n_tries):
+            try:
+                return func(**kwargs)
+            except Exception as e:
+                if attempt == n_tries - 1:
+                    raise
+                logger.warning(f"Attempt {attempt + 1} failed: {e}")
+        return None
+
+try:
+    import awswrangler as wr
+except ImportError:
+    logger.warning("awswrangler not available")
+
 # Try to import additional modules
 try:
     import boto3
@@ -206,6 +254,11 @@ def load_yaml_configuration() -> Dict[str, Any]:
         conf['athena']['uid'] = aws_conf['AWS_ACCESS_KEY_ID']
         conf['athena']['pwd'] = aws_conf['AWS_SECRET_ACCESS_KEY']
         
+        # Add AWS credentials to main conf for Athena helpers
+        conf['AWS_ACCESS_KEY_ID'] = aws_conf['AWS_ACCESS_KEY_ID']
+        conf['AWS_SECRET_ACCESS_KEY'] = aws_conf['AWS_SECRET_ACCESS_KEY']
+        conf['AWS_DEFAULT_REGION'] = aws_conf['AWS_DEFAULT_REGION']
+        
         return conf, aws_conf
     
     except FileNotFoundError as e:
@@ -218,11 +271,17 @@ def load_yaml_configuration() -> Dict[str, Any]:
 # Global configuration (would typically be loaded from config file)
 class Config:
     def __init__(self):
-        conf, aws_conf = load_yaml_configuration()
-        self.bucket = conf.get('bucket', '')
-        self.athena = conf.get('athena', {})
-        self.calcs_start_date = conf.get('calcs_start_date', 'auto')
-        self.report_end_date = conf.get('report_end_date', 'yesterday')
+        conf_dict, aws_conf = load_yaml_configuration()
+        self.bucket = conf_dict.get('bucket', '')
+        self.athena = conf_dict.get('athena', {})
+        self.calcs_start_date = conf_dict.get('calcs_start_date', 'auto')
+        self.report_end_date = conf_dict.get('report_end_date', 'yesterday')
+        # Store full config dict for Athena helpers
+        self._conf_dict = conf_dict
+    
+    def to_dict(self):
+        """Return full configuration as dictionary for Athena helpers"""
+        return self._conf_dict
 
 # Initialize configuration
 conf = Config()
@@ -376,95 +435,82 @@ def load_data(filename):
         return pd.DataFrame()
 
 def process_detector_uptime(dates, config_data):
-    """Process vehicle detector uptime [1 of 29] - Memory optimized"""
+    """Process vehicle detector uptime [1 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Vehicle Detector Uptime [1 of 29 (mark1)]")
     log_memory_usage("Start detector uptime")
     
     try:
-        def callback(x):
-            result = get_avg_daily_detector_uptime(x)
-            del x
-            gc.collect()
-            return result
+        logger.info("Using Athena optimization for detector uptime")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        avg_daily_detector_uptime = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="detector_uptime_pd",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list'],
-            callback=callback
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Get corridor weekly with Athena (combines read + join + aggregate in one query!)
+        cor_weekly_detector_uptime = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='detector_uptime_pd',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
         )
+        save_data(cor_weekly_detector_uptime, "cor_weekly_detector_uptime.pkl")
         
-        if not avg_daily_detector_uptime.empty:
-            log_memory_usage("After reading detector uptime data")
-            avg_daily_detector_uptime['SignalID'] = avg_daily_detector_uptime['SignalID'].astype('category')
-            
-            # Process corridor metrics
-            cor_avg_daily_detector_uptime = get_cor_avg_daily_detector_uptime(
-                avg_daily_detector_uptime, config_data['corridors']
-            )
-            save_data(cor_avg_daily_detector_uptime, "cor_avg_daily_detector_uptime.pkl")
-            del cor_avg_daily_detector_uptime
-            gc.collect()
-            
-            sub_avg_daily_detector_uptime = get_cor_avg_daily_detector_uptime(
-                avg_daily_detector_uptime, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_avg_daily_detector_uptime, "sub_avg_daily_detector_uptime.pkl")
-            del sub_avg_daily_detector_uptime
-            gc.collect()
-            
-            # Weekly metrics
-            weekly_detector_uptime = get_weekly_detector_uptime(avg_daily_detector_uptime)
-            save_data(weekly_detector_uptime, "weekly_detector_uptime.pkl")
-            log_memory_usage("After weekly detector uptime")
-            
-            cor_weekly_detector_uptime = get_cor_weekly_detector_uptime(
-                weekly_detector_uptime, config_data['corridors']
-            )
-            save_data(cor_weekly_detector_uptime, "cor_weekly_detector_uptime.pkl")
-            del cor_weekly_detector_uptime
-            gc.collect()
-            
-            sub_weekly_detector_uptime = get_cor_weekly_detector_uptime(
-                weekly_detector_uptime, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_detector_uptime, "sub_weekly_detector_uptime.pkl")
-            del sub_weekly_detector_uptime
-            del weekly_detector_uptime
-            gc.collect()
-            
-            # Monthly metrics
-            monthly_detector_uptime = get_monthly_detector_uptime(avg_daily_detector_uptime)
-            save_data(monthly_detector_uptime, "monthly_detector_uptime.pkl")
-            
-            cor_monthly_detector_uptime = get_cor_monthly_detector_uptime(
-                avg_daily_detector_uptime, config_data['corridors']
-            )
-            save_data(cor_monthly_detector_uptime, "cor_monthly_detector_uptime.pkl")
-            del cor_monthly_detector_uptime
-            gc.collect()
-            
-            sub_monthly_detector_uptime = get_cor_monthly_detector_uptime(
-                avg_daily_detector_uptime, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_detector_uptime, "sub_monthly_detector_uptime.pkl")
-            del sub_monthly_detector_uptime
-            del monthly_detector_uptime
-            gc.collect()
-            
-            save_data(avg_daily_detector_uptime, "avg_daily_detector_uptime.pkl")
-            del avg_daily_detector_uptime
-            gc.collect()
-            
-            log_memory_usage("End detector uptime")
-            logger.info("Detector uptime processing completed successfully")
+        # Subcorridor weekly
+        sub_weekly_detector_uptime = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='detector_uptime_pd',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_detector_uptime, "sub_weekly_detector_uptime.pkl")
+        
+        # Corridor monthly
+        cor_monthly_detector_uptime = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='detector_uptime_pd',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_detector_uptime, "cor_monthly_detector_uptime.pkl")
+        
+        # Subcorridor monthly
+        sub_monthly_detector_uptime = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='detector_uptime_pd',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_detector_uptime, "sub_monthly_detector_uptime.pkl")
+        
+        logger.info("Detector uptime Athena optimization completed successfully")
+        log_memory_usage("End detector uptime (Athena)")
             
     except Exception as e:
         logger.error(f"Error in detector uptime processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_ped_pushbutton_uptime(dates, config_data):
     """Process pedestrian pushbutton uptime [2 of 29] - Extreme memory optimization"""
@@ -1083,145 +1129,72 @@ def process_ped_pushbutton_uptime_ultra_conservative(dates, config_data):
         log_memory_usage("Ultra-conservative cleanup complete")
 
 def process_watchdog_alerts(dates, config_data):
-    """Process watchdog alerts [3 of 29] - Memory optimized"""
+    """Process watchdog alerts [3 of 29] - Athena optimized"""
     logger.info(f"{datetime.now()} Watchdog alerts [3 of 29 (mark1)]")
     log_memory_usage("Start watchdog alerts")
     
     try:
-        # Process bad vehicle detectors
-        bad_det = s3_read_parquet_parallel(
-            table_name="bad_detectors",
-            start_date=date.today() - timedelta(days=90),
-            end_date=date.today() - timedelta(days=1),
-            bucket=conf.bucket
+        # Process bad vehicle detectors using Athena
+        logger.info("Using Athena optimization for watchdog alerts")
+        from package_athena_helpers import athena_get_bad_detectors, athena_get_bad_ped_detectors
+        
+        conf_dict = conf.to_dict()
+        start_date = (date.today() - timedelta(days=90)).strftime('%Y-%m-%d')
+        end_date = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        bad_det = keep_trying(
+            athena_get_bad_detectors,
+            n_tries=3,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
         )
         
         if not bad_det.empty:
-            log_memory_usage("After reading bad detectors")
+            # Athena already returned with corridor info and Name!
+            # Just need to add missing columns
+            if 'CallPhase' not in bad_det.columns:
+                bad_det['CallPhase'] = 'Unknown'
+            if 'ApproachDesc' not in bad_det.columns:
+                bad_det['ApproachDesc'] = 'Unknown'
+                
+            # Ensure proper column order
+            required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector',
+                           'Date', 'Alert', 'Name', 'ApproachDesc']
+            for col in required_cols:
+                if col not in bad_det.columns:
+                    bad_det[col] = 'Unknown' if col not in ['CallPhase', 'Detector'] else 0
             
-            bad_det = clean_signal_ids(bad_det)
-            bad_det['Detector'] = bad_det['Detector'].astype('category')
-            
-            # Get detector configuration
-            det_config_list = []
-            unique_dates = sorted(bad_det['Date'].unique())
-            
-            for date_val in unique_dates[:10]:  # Limit to recent dates
-                try:
-                    get_det_config = get_det_config_factory(conf.bucket, 'atspm_det_config_good')
-                    config = get_det_config(date_val)
-                    
-                    if not config.empty:
-                        config['Date'] = date_val
-                        det_config_list.append(config)
-                except Exception as e:
-                    logger.warning(f"Error loading detector config for {date_val}: {e}")
-            
-            # Process detector data if config available
-            if det_config_list:
-                det_config = pd.concat(det_config_list, ignore_index=True)
-                det_config = clean_signal_ids(det_config)
-                
-                # Add 'Unknown' to categories BEFORE converting to categorical
-                if 'CallPhase' in det_config.columns:
-                    det_config['CallPhase'] = det_config['CallPhase'].astype(str)
-                    det_config['CallPhase'] = det_config['CallPhase'].fillna('Unknown')
-                    det_config['CallPhase'] = pd.Categorical(det_config['CallPhase'])
-                
-                if 'Detector' in det_config.columns:
-                    det_config['Detector'] = det_config['Detector'].astype(str)
-                    det_config['Detector'] = det_config['Detector'].fillna('Unknown')
-                    det_config['Detector'] = pd.Categorical(det_config['Detector'])
-                
-                # Ensure required columns exist in det_config
-                if 'LaneType' not in det_config.columns:
-                    det_config['LaneType'] = 'Unknown'
-                if 'MovementType' not in det_config.columns:
-                    det_config['MovementType'] = 'Unknown'
-                
-                bad_det = bad_det.merge(
-                    det_config[['SignalID', 'Detector', 'Date', 'CallPhase', 'LaneType', 'MovementType']],
-                    on=['SignalID', 'Detector', 'Date'],
-                    how='left'
-                )
-                del det_config, det_config_list
-                gc.collect()
-                
-                # Handle categorical columns properly
-                for col in ['CallPhase', 'LaneType', 'MovementType']:
-                    if col not in bad_det.columns:
-                        bad_det[col] = 'Unknown'
-                    else:
-                        # Convert categorical to string, fill NaN, then back to categorical
-                        if bad_det[col].dtype.name == 'category':
-                            # Add 'Unknown' to categories first
-                            bad_det[col] = bad_det[col].cat.add_categories(['Unknown'])
-                            bad_det[col] = bad_det[col].fillna('Unknown')
-                        else:
-                            bad_det[col] = bad_det[col].fillna('Unknown')
-                
-                # FIX: Ensure SignalID data types match before merge
-                # Convert both SignalID columns to the same type (string)
-                bad_det['SignalID'] = bad_det['SignalID'].astype(str)
-                config_data['corridors']['SignalID'] = config_data['corridors']['SignalID'].astype(str)
-                
-                bad_det = bad_det.merge(
-                    config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
-                    on='SignalID',
-                    how='left'
-                ).dropna(subset=['Corridor'])
-                
-                bad_det = bad_det.assign(
-                    Alert='Bad Vehicle Detection',
-                    Name=lambda x: x['Name'].fillna('Unknown').str.replace('@', '-', regex=False),
-                    ApproachDesc=lambda x: x['LaneType'].fillna('Unknown').astype(str)
-                )[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 'Detector',
-                   'Date', 'Alert', 'Name', 'ApproachDesc']]
-                
-                save_data(bad_det, "watchdog_bad_detectors.pkl")
-            del bad_det
-            gc.collect()
+            bad_det = bad_det[required_cols]
+            save_data(bad_det, "watchdog_bad_detectors.pkl")
+            logger.info(f"Saved {len(bad_det)} bad detector records")
         
-        # Process bad pedestrian detectors
+        # Process bad pedestrian detectors using Athena
         try:
-            bad_ped = s3_read_parquet_parallel(
-                table_name="bad_ped_detectors",
-                start_date=date.today() - timedelta(days=90),
-                end_date=date.today() - timedelta(days=1),
-                bucket=conf.bucket
+            bad_ped = keep_trying(
+                athena_get_bad_ped_detectors,
+                n_tries=3,
+                start_date=start_date,
+                end_date=end_date,
+                corridors_df=config_data['corridors'],
+                conf=conf_dict
             )
             
             if not bad_ped.empty:
-                bad_ped = clean_signal_ids(bad_ped)
+                # Athena already returned with corridor info and Name!
+                # Ensure proper column format
+                required_cols = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'Detector', 'Date', 'Name', 'Alert']
+                for col in required_cols:
+                    if col not in bad_ped.columns:
+                        if col == 'Alert':
+                            bad_ped[col] = 'Bad Ped Detection'
+                        else:
+                            bad_ped[col] = 'Unknown'
                 
-                # Handle categorical Detector column properly
-                if 'Detector' in bad_ped.columns:
-                    bad_ped['Detector'] = bad_ped['Detector'].astype(str)
-                    bad_ped['Detector'] = bad_ped['Detector'].fillna('Unknown')
-                    bad_ped['Detector'] = pd.Categorical(bad_ped['Detector'])
-                
-                # FIX: Ensure SignalID data types match before merge
-                bad_ped['SignalID'] = bad_ped['SignalID'].astype(str)
-                # config_data['corridors']['SignalID'] is already converted above
-                
-                bad_ped = bad_ped.merge(
-                    config_data['corridors'][['SignalID', 'Zone_Group', 'Zone', 'Corridor', 'Name']],
-                    on='SignalID',
-                    how='left'
-                ).dropna(subset=['Corridor'])
-                
-                if 'Name' not in bad_ped.columns:
-                    bad_ped['Name'] = 'Unknown'
-                else:
-                    bad_ped['Name'] = bad_ped['Name'].fillna('Unknown')
-                
-                bad_ped = bad_ped[['Zone_Group', 'Zone', 'Corridor', 'SignalID', 'Detector', 'Date', 'Name']].assign(
-                    Alert='Bad Ped Detection'
-                )
-                
+                bad_ped = bad_ped[required_cols]
                 save_data(bad_ped, "watchdog_bad_ped_pushbuttons.pkl")
-                del bad_ped
-                gc.collect()
+                logger.info(f"Saved {len(bad_ped)} bad ped detector records")
         except Exception as e:
             logger.warning(f"No bad pedestrian detectors data found: {e}")
         
@@ -1420,858 +1393,915 @@ def process_hourly_ped_activations(dates, config_data):
         gc.collect()
 
 def process_pedestrian_delay(dates, config_data):
-    """Process pedestrian delay [6 of 29] - Memory optimized"""
+    """Process pedestrian delay [6 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Pedestrian Delay [6 of 29 (mark1)]")
     log_memory_usage("Start pedestrian delay")
     
     try:
-        def callback(x):
-            if "Avg.Max.Ped.Delay" in x.columns:
-                x = x.rename(columns={"Avg.Max.Ped.Delay": "pd"})
-                x['CallPhase'] = 0
-            x = calculate_time_periods(x)
-            return x
+        logger.info("Using Athena optimization for pedestrian delay")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        ped_delay = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="ped_delay",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list'],
-            callback=callback
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly PD
+        cor_weekly_pd_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='ped_delay',
+            metric_col='pd',
+            weight_col='Events',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
         )
+        save_data(cor_weekly_pd_by_day, "cor_weekly_pd_by_day.pkl")
         
-        if not ped_delay.empty:
-            log_memory_usage("After reading ped delay data")
-            
-            ped_delay = clean_signal_ids(ped_delay)
-            ped_delay['CallPhase'] = ped_delay['CallPhase'].astype('category')
-            ped_delay['Events'] = ped_delay.get('Events', 1).fillna(1)
-            
-            daily_pd = get_daily_avg(ped_delay, "pd", "Events")
-            weekly_pd_by_day = get_weekly_avg_by_day(ped_delay, "pd", "Events", peak_only=False)
-            monthly_pd_by_day = get_monthly_avg_by_day(ped_delay, "pd", "Events", peak_only=False)
-            del ped_delay
-            gc.collect()
-            
-            save_data(weekly_pd_by_day, "weekly_pd_by_day.pkl")
-            save_data(monthly_pd_by_day, "monthly_pd_by_day.pkl")
-            
-            cor_weekly_pd_by_day = get_cor_weekly_avg_by_day(
-                weekly_pd_by_day, config_data['corridors'], "pd", "Events"
-            )
-            save_data(cor_weekly_pd_by_day, "cor_weekly_pd_by_day.pkl")
-            del weekly_pd_by_day, cor_weekly_pd_by_day
-            gc.collect()
-            
-            cor_monthly_pd_by_day = get_cor_monthly_avg_by_day(
-                monthly_pd_by_day, config_data['corridors'], "pd", "Events"
-            )
-            save_data(cor_monthly_pd_by_day, "cor_monthly_pd_by_day.pkl")
-            del cor_monthly_pd_by_day
-            gc.collect()
-            
-            # Load data again for subcorridor processing
-            weekly_pd_by_day = load_data("weekly_pd_by_day.pkl")
-            sub_weekly_pd_by_day = get_cor_weekly_avg_by_day(
-                weekly_pd_by_day, config_data['subcorridors'], "pd", "Events"
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_pd_by_day, "sub_weekly_pd_by_day.pkl")
-            del weekly_pd_by_day, sub_weekly_pd_by_day
-            gc.collect()
-            
-            sub_monthly_pd_by_day = get_cor_monthly_avg_by_day(
-                monthly_pd_by_day, config_data['subcorridors'], "pd", "Events"
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_pd_by_day, "sub_monthly_pd_by_day.pkl")
-            del monthly_pd_by_day, sub_monthly_pd_by_day
-            gc.collect()
-            
-            log_memory_usage("End pedestrian delay")
-            logger.info("Pedestrian delay processing completed successfully")
+        # Subcorridor weekly PD
+        sub_weekly_pd_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='ped_delay',
+            metric_col='pd',
+            weight_col='Events',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_pd_by_day, "sub_weekly_pd_by_day.pkl")
+        
+        # Corridor monthly PD
+        cor_monthly_pd_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='ped_delay',
+            metric_col='pd',
+            weight_col='Events',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_pd_by_day, "cor_monthly_pd_by_day.pkl")
+        
+        # Subcorridor monthly PD
+        sub_monthly_pd_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='ped_delay',
+            metric_col='pd',
+            weight_col='Events',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_pd_by_day, "sub_monthly_pd_by_day.pkl")
+        
+        logger.info("Pedestrian delay Athena optimization completed")
+        log_memory_usage("End pedestrian delay (Athena)")
         
     except Exception as e:
         logger.error(f"Error in pedestrian delay processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_communications_uptime(dates, config_data):
-    """Process communications uptime [7 of 29] - Memory optimized"""
+    """Process communications uptime [7 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Communication Uptime [7 of 29 (mark1)]")
     log_memory_usage("Start communications uptime")
     
     try:
-        cu = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="comm_uptime",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list']
-        )
+        logger.info("Using Athena optimization for communications uptime")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        if not cu.empty:
-            log_memory_usage("After reading comm uptime data")
-            
-            cu = clean_signal_ids(cu)
-            cu['CallPhase'] = cu['CallPhase'].astype('category')
-            cu = ensure_datetime_column(cu, 'Date')
-            
-            daily_comm_uptime = get_daily_avg(cu, "uptime", peak_only=False)
-            save_data(daily_comm_uptime, "daily_comm_uptime.pkl")
-            
-            weekly_comm_uptime = get_weekly_avg_by_day(cu, "uptime", peak_only=False)
-            save_data(weekly_comm_uptime, "weekly_comm_uptime.pkl")
-            
-            monthly_comm_uptime = get_monthly_avg_by_day(cu, "uptime", peak_only=False)
-            save_data(monthly_comm_uptime, "monthly_comm_uptime.pkl")
-            del cu
-            gc.collect()
-            
-            # Process corridor metrics
-            cor_daily_comm_uptime = get_cor_weekly_avg_by_day(
-                daily_comm_uptime, config_data['corridors'], "uptime"
-            )
-            save_data(cor_daily_comm_uptime, "cor_daily_comm_uptime.pkl")
-            del daily_comm_uptime, cor_daily_comm_uptime
-            gc.collect()
-            
-            cor_weekly_comm_uptime = get_cor_weekly_avg_by_day(
-                weekly_comm_uptime, config_data['corridors'], "uptime"
-            )
-            save_data(cor_weekly_comm_uptime, "cor_weekly_comm_uptime.pkl")
-            del weekly_comm_uptime, cor_weekly_comm_uptime
-            gc.collect()
-            
-            cor_monthly_comm_uptime = get_cor_monthly_avg_by_day(
-                monthly_comm_uptime, config_data['corridors'], "uptime"
-            )
-            save_data(cor_monthly_comm_uptime, "cor_monthly_comm_uptime.pkl")
-            del cor_monthly_comm_uptime
-            gc.collect()
-            
-            # Process subcorridor metrics
-            daily_comm_uptime = load_data("daily_comm_uptime.pkl")
-            sub_daily_comm_uptime = get_cor_weekly_avg_by_day(
-                daily_comm_uptime, config_data['subcorridors'], "uptime"
-            ).dropna(subset=['Corridor'])
-            save_data(sub_daily_comm_uptime, "sub_daily_comm_uptime.pkl")
-            del daily_comm_uptime, sub_daily_comm_uptime
-            gc.collect()
-            
-            weekly_comm_uptime = load_data("weekly_comm_uptime.pkl")
-            sub_weekly_comm_uptime = get_cor_weekly_avg_by_day(
-                weekly_comm_uptime, config_data['subcorridors'], "uptime"
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_comm_uptime, "sub_weekly_comm_uptime.pkl")
-            del weekly_comm_uptime, sub_weekly_comm_uptime
-            gc.collect()
-            
-            sub_monthly_comm_uptime = get_cor_monthly_avg_by_day(
-                monthly_comm_uptime, config_data['subcorridors'], "uptime"
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_comm_uptime, "sub_monthly_comm_uptime.pkl")
-            del monthly_comm_uptime, sub_monthly_comm_uptime
-            gc.collect()
-            
-            log_memory_usage("End communications uptime")
-            logger.info("Communications uptime processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly
+        cor_weekly_comm_uptime = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='comm_uptime',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_weekly_comm_uptime, "cor_weekly_comm_uptime.pkl")
+        
+        # Subcorridor weekly
+        sub_weekly_comm_uptime = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='comm_uptime',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_comm_uptime, "sub_weekly_comm_uptime.pkl")
+        
+        # Corridor monthly
+        cor_monthly_comm_uptime = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='comm_uptime',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_comm_uptime, "cor_monthly_comm_uptime.pkl")
+        
+        # Subcorridor monthly
+        sub_monthly_comm_uptime = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='comm_uptime',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_comm_uptime, "sub_monthly_comm_uptime.pkl")
+        
+        logger.info("Communications uptime Athena optimization completed")
+        log_memory_usage("End communications uptime (Athena)")
         
     except Exception as e:
         logger.error(f"Error in communications uptime processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_daily_volumes(dates, config_data):
-    """Process daily volumes [8 of 29] - Memory optimized"""
+    """Process daily volumes [8 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Daily Volumes [8 of 29 (mark1)]")
     log_memory_usage("Start daily volumes")
     
     try:
-        vpd = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="vehicles_pd",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list']
-        )
+        logger.info("Using Athena optimization for daily volumes (VPD)")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        if not vpd.empty:
-            log_memory_usage("After reading daily volumes data")
-            
-            vpd = clean_signal_ids(vpd)
-            vpd['CallPhase'] = vpd['CallPhase'].astype('category')
-            vpd = ensure_datetime_column(vpd, 'Date')
-            
-            weekly_vpd = get_weekly_vpd(vpd)
-            save_data(weekly_vpd, "weekly_vpd.pkl")
-            
-            monthly_vpd = get_monthly_vpd(vpd)
-            save_data(monthly_vpd, "monthly_vpd.pkl")
-            del vpd
-            gc.collect()
-            
-            # Corridor processing
-            cor_weekly_vpd = get_cor_weekly_vpd(weekly_vpd, config_data['corridors'])
-            save_data(cor_weekly_vpd, "cor_weekly_vpd.pkl")
-            del weekly_vpd, cor_weekly_vpd
-            gc.collect()
-            
-            cor_monthly_vpd = get_cor_monthly_vpd(monthly_vpd, config_data['corridors'])
-            save_data(cor_monthly_vpd, "cor_monthly_vpd.pkl")
-            del cor_monthly_vpd
-            gc.collect()
-            
-            # Subcorridor processing
-            weekly_vpd = load_data("weekly_vpd.pkl")
-            sub_weekly_vpd = get_cor_weekly_vpd(
-                weekly_vpd, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_vpd, "sub_weekly_vpd.pkl")
-            del weekly_vpd, sub_weekly_vpd
-            gc.collect()
-            
-            sub_monthly_vpd = get_cor_monthly_vpd(
-                monthly_vpd, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_vpd, "sub_monthly_vpd.pkl")
-            del monthly_vpd, sub_monthly_vpd
-            gc.collect()
-            
-            log_memory_usage("End daily volumes")
-            logger.info("Daily volumes processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly VPD (Athena does: read + join + group by in cloud!)
+        cor_weekly_vpd = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='vehicles_pd',
+            metric_col='vpd',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_weekly_vpd, "cor_weekly_vpd.pkl")
+        
+        # Subcorridor weekly VPD
+        sub_weekly_vpd = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='vehicles_pd',
+            metric_col='vpd',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_vpd, "sub_weekly_vpd.pkl")
+        
+        # Corridor monthly VPD
+        cor_monthly_vpd = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='vehicles_pd',
+            metric_col='vpd',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_vpd, "cor_monthly_vpd.pkl")
+        
+        # Subcorridor monthly VPD
+        sub_monthly_vpd = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='vehicles_pd',
+            metric_col='vpd',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_vpd, "sub_monthly_vpd.pkl")
+        
+        logger.info("Daily volumes (VPD) Athena optimization completed successfully")
+        log_memory_usage("End daily volumes (Athena)")
         
     except Exception as e:
         logger.error(f"Error in daily volumes processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_hourly_volumes(dates, config_data):
-    """Process hourly volumes [9 of 29] - Memory optimized"""
+    """Process hourly volumes [9 of 29] - Athena optimized"""
     logger.info(f"{datetime.now()} Hourly Volumes [9 of 29 (mark1)]")
     log_memory_usage("Start hourly volumes")
     
     try:
-        vph = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="vehicles_ph",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list']
-        )
+        logger.info("Using Athena optimization for hourly volumes (VPH)")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        if not vph.empty:
-            log_memory_usage("After reading hourly volumes data")
-            
-            vph = clean_signal_ids(vph)
-            vph['CallPhase'] = 2
-            vph = ensure_datetime_column(vph, 'Date')
-            vph = ensure_timeperiod_column(vph)
-            
-            weekly_vph = get_weekly_vph(vph)
-            save_data(weekly_vph, "weekly_vph.pkl")
-            
-            monthly_vph = get_monthly_vph(vph)
-            save_data(monthly_vph, "monthly_vph.pkl")
-            del vph
-            gc.collect()
-            
-            # Peak calculations
-            if not weekly_vph.empty:
-                weekly_vph_peak = get_weekly_vph_peak(weekly_vph)
-                save_data(weekly_vph_peak, "weekly_vph_peak.pkl")
-                del weekly_vph_peak
-                gc.collect()
-            
-            if not monthly_vph.empty:
-                monthly_vph_peak = get_monthly_vph_peak(monthly_vph)
-                save_data(monthly_vph_peak, "monthly_vph_peak.pkl")
-                del monthly_vph_peak
-                gc.collect()
-            
-            # Corridor processing
-            cor_weekly_vph = get_cor_weekly_vph(weekly_vph, config_data['corridors'])
-            save_data(cor_weekly_vph, "cor_weekly_vph.pkl")
-            
-            if not cor_weekly_vph.empty:
-                cor_weekly_vph_peak = get_cor_weekly_vph_peak(cor_weekly_vph)
-                save_data(cor_weekly_vph_peak, "cor_weekly_vph_peak.pkl")
-                del cor_weekly_vph_peak
-                gc.collect()
-            
-            del weekly_vph, cor_weekly_vph
-            gc.collect()
-            
-            cor_monthly_vph = get_cor_monthly_vph(monthly_vph, config_data['corridors'])
-            save_data(cor_monthly_vph, "cor_monthly_vph.pkl")
-            
-            if not cor_monthly_vph.empty:
-                cor_monthly_vph_peak = get_cor_monthly_vph_peak(cor_monthly_vph)
-                save_data(cor_monthly_vph_peak, "cor_monthly_vph_peak.pkl")
-                del cor_monthly_vph_peak
-                gc.collect()
-            
-            del cor_monthly_vph
-            gc.collect()
-            
-            # Subcorridor processing
-            weekly_vph = load_data("weekly_vph.pkl")
-            sub_weekly_vph = get_cor_weekly_vph(
-                weekly_vph, config_data['subcorridors']
-            )
-            if not sub_weekly_vph.empty and 'Corridor' in sub_weekly_vph.columns:
-                sub_weekly_vph = sub_weekly_vph.dropna(subset=['Corridor'])
-                save_data(sub_weekly_vph, "sub_weekly_vph.pkl")
-                
-                sub_weekly_vph_peak = get_cor_weekly_vph_peak(sub_weekly_vph)
-                save_data(sub_weekly_vph_peak, "sub_weekly_vph_peak.pkl")
-                del sub_weekly_vph_peak
-                gc.collect()
-            
-            del weekly_vph, sub_weekly_vph
-            gc.collect()
-            
-            sub_monthly_vph = get_cor_monthly_vph(
-                monthly_vph, config_data['subcorridors']
-            )
-            if not sub_monthly_vph.empty and 'Corridor' in sub_monthly_vph.columns:
-                sub_monthly_vph = sub_monthly_vph.dropna(subset=['Corridor'])
-                save_data(sub_monthly_vph, "sub_monthly_vph.pkl")
-                
-                sub_monthly_vph_peak = get_cor_monthly_vph_peak(sub_monthly_vph)
-                save_data(sub_monthly_vph_peak, "sub_monthly_vph_peak.pkl")
-                del sub_monthly_vph_peak
-                gc.collect()
-            
-            del monthly_vph, sub_monthly_vph
-            gc.collect()
-            
-            log_memory_usage("End hourly volumes")
-            logger.info("Hourly volumes processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly VPH  
+        cor_weekly_vph = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='vehicles_ph',
+            metric_col='vph',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_weekly_vph, "cor_weekly_vph.pkl")
+        
+        # Subcorridor weekly VPH
+        sub_weekly_vph = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='vehicles_ph',
+            metric_col='vph',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_vph, "sub_weekly_vph.pkl")
+        
+        # Corridor monthly VPH
+        cor_monthly_vph = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='vehicles_ph',
+            metric_col='vph',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_vph, "cor_monthly_vph.pkl")
+        
+        # Subcorridor monthly VPH
+        sub_monthly_vph = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='vehicles_ph',
+            metric_col='vph',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_vph, "sub_monthly_vph.pkl")
+        
+        
+        logger.info("hourly_volumes Athena optimization completed")
+        log_memory_usage("End hourly_volumes (Athena)")
         
     except Exception as e:
         logger.error(f"Error in hourly volumes processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_daily_throughput(dates, config_data):
-    """Process daily throughput [10 of 29] - Memory optimized"""
+    """Process daily throughput [10 of 29] - Athena optimized"""
     logger.info(f"{datetime.now()} Daily Throughput [10 of 29 (mark1)]")
     log_memory_usage("Start daily throughput")
     
     try:
-        throughput = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="throughput",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list']
-        )
+        logger.info("Using Athena optimization for daily throughput")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        if not throughput.empty:
-            log_memory_usage("After reading throughput data")
-            
-            throughput = clean_signal_ids(throughput)
-            throughput['CallPhase'] = throughput['CallPhase'].astype(int).astype('category')
-            throughput = ensure_datetime_column(throughput, 'Date')
-            throughput = ensure_throughput_column(throughput)
-            
-            weekly_throughput = get_weekly_thruput(throughput)
-            save_data(weekly_throughput, "weekly_throughput.pkl")
-            
-            monthly_throughput = get_monthly_thruput(throughput)
-            save_data(monthly_throughput, "monthly_throughput.pkl")
-            del throughput
-            gc.collect()
-            
-            # Corridor processing
-            cor_weekly_throughput = get_cor_weekly_thruput(weekly_throughput, config_data['corridors'])
-            save_data(cor_weekly_throughput, "cor_weekly_throughput.pkl")
-            del weekly_throughput, cor_weekly_throughput
-            gc.collect()
-            
-            cor_monthly_throughput = get_cor_monthly_thruput(monthly_throughput, config_data['corridors'])
-            save_data(cor_monthly_throughput, "cor_monthly_throughput.pkl")
-            del cor_monthly_throughput
-            gc.collect()
-            
-            # Subcorridor processing
-            weekly_throughput = load_data("weekly_throughput.pkl")
-            sub_weekly_throughput = safe_dropna_corridor(
-                get_cor_weekly_thruput(weekly_throughput, config_data['subcorridors']),
-                "sub_weekly_throughput"
-            )
-            save_data(sub_weekly_throughput, "sub_weekly_throughput.pkl")
-            del weekly_throughput, sub_weekly_throughput
-            gc.collect()
-            
-            sub_monthly_throughput = safe_dropna_corridor(
-                get_cor_monthly_thruput(monthly_throughput, config_data['subcorridors']),
-                "sub_monthly_throughput"
-            )
-            save_data(sub_monthly_throughput, "sub_monthly_throughput.pkl")
-            del monthly_throughput, sub_monthly_throughput
-            gc.collect()
-            
-            log_memory_usage("End daily throughput")
-            logger.info("Daily throughput processing completed successfully")
-        else:
-            logger.warning("No throughput data found")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly throughput
+        cor_weekly_throughput = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='throughput',
+            metric_col='throughput',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_weekly_throughput, "cor_weekly_throughput.pkl")
+        
+        # Subcorridor weekly throughput
+        sub_weekly_throughput = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='throughput',
+            metric_col='throughput',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_throughput, "sub_weekly_throughput.pkl")
+        
+        # Corridor monthly throughput
+        cor_monthly_throughput = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='throughput',
+            metric_col='throughput',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_throughput, "cor_monthly_throughput.pkl")
+        
+        # Subcorridor monthly throughput
+        sub_monthly_throughput = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='throughput',
+            metric_col='throughput',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_throughput, "sub_monthly_throughput.pkl")
+        
+        logger.info("daily_throughput Athena optimization completed")
+        log_memory_usage("End daily_throughput (Athena)")
         
     except Exception as e:
         logger.error(f"Error in daily throughput processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_arrivals_on_green(dates, config_data):
-    """Process daily arrivals on green [11 of 29] - Memory optimized"""
+    """Process daily arrivals on green [11 of 29] - Athena optimized"""
     logger.info(f"{datetime.now()} Daily AOG [11 of 29 (mark1)]")
     log_memory_usage("Start arrivals on green")
     
     try:
-        aog = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="arrivals_on_green",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list']
-        )
+        logger.info("Using Athena optimization for arrivals on green")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        if not aog.empty:
-            log_memory_usage("After reading AOG data")
-            
-            aog = clean_signal_ids(aog)
-            aog['CallPhase'] = aog['CallPhase'].astype('category')
-            aog = calculate_time_periods(aog, 'Date')
-            
-            daily_aog = get_daily_aog(aog)
-            weekly_aog_by_day = get_weekly_aog_by_day(aog)
-            monthly_aog_by_day = get_monthly_aog_by_day(aog)
-            
-            save_data(weekly_aog_by_day, "weekly_aog_by_day.pkl")
-            save_data(monthly_aog_by_day, "monthly_aog_by_day.pkl")
-            
-            # Corridor processing
-            cor_weekly_aog_by_day = get_cor_weekly_aog_by_day(weekly_aog_by_day, config_data['corridors'])
-            save_data(cor_weekly_aog_by_day, "cor_weekly_aog_by_day.pkl")
-            del weekly_aog_by_day, cor_weekly_aog_by_day
-            gc.collect()
-            
-            cor_monthly_aog_by_day = get_cor_monthly_aog_by_day(monthly_aog_by_day, config_data['corridors'])
-            save_data(cor_monthly_aog_by_day, "cor_monthly_aog_by_day.pkl")
-            del cor_monthly_aog_by_day
-            gc.collect()
-            
-            # Subcorridor processing
-            weekly_aog_by_day = load_data("weekly_aog_by_day.pkl")
-            sub_weekly_aog_by_day = get_cor_weekly_aog_by_day(
-                weekly_aog_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_aog_by_day, "sub_weekly_aog_by_day.pkl")
-            del weekly_aog_by_day, sub_weekly_aog_by_day
-            gc.collect()
-            
-            sub_monthly_aog_by_day = get_cor_monthly_aog_by_day(
-                monthly_aog_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_aog_by_day, "sub_monthly_aog_by_day.pkl")
-            del monthly_aog_by_day, sub_monthly_aog_by_day
-            gc.collect()
-            
-            # Store aog for use in progression ratio calculations
-            save_data(aog, "aog_data.pkl")
-            del aog
-            gc.collect()
-            
-            log_memory_usage("End arrivals on green")
-            logger.info("Daily arrivals on green processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly AOG
+        cor_weekly_aog_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='aog',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_weekly_aog_by_day, "cor_weekly_aog_by_day.pkl")
+        
+        # Subcorridor weekly AOG
+        sub_weekly_aog_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='aog',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_aog_by_day, "sub_weekly_aog_by_day.pkl")
+        
+        # Corridor monthly AOG
+        cor_monthly_aog_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='aog',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_aog_by_day, "cor_monthly_aog_by_day.pkl")
+        
+        # Subcorridor monthly AOG
+        sub_monthly_aog_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='aog',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_aog_by_day, "sub_monthly_aog_by_day.pkl")
+        
+        logger.info("arrivals_on_green Athena optimization completed")
+        log_memory_usage("End arrivals_on_green (Athena)")
         
     except Exception as e:
         logger.error(f"Error in daily arrivals on green processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_hourly_arrivals_on_green(dates, config_data):
-    """Process hourly arrivals on green [12 of 29] - Memory optimized"""
+    """Process hourly arrivals on green [12 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Hourly AOG [12 of 29 (mark1)]")
     log_memory_usage("Start hourly arrivals on green")
     
     try:
-        aog = load_data("aog_data.pkl")
+        logger.info("Using Athena optimization for hourly arrivals on green")
+        from package_athena_helpers import athena_get_corridor_hourly_avg
         
-        if not aog.empty:
-            aog_by_hr = get_aog_by_hr(aog)
-            monthly_aog_by_hr = get_monthly_aog_by_hr(aog_by_hr)
-            save_data(monthly_aog_by_hr, "monthly_aog_by_hr.pkl")
-            del aog, aog_by_hr
-            gc.collect()
-            
-            # Corridor processing
-            cor_monthly_aog_by_hr = get_cor_monthly_aog_by_hr(monthly_aog_by_hr, config_data['corridors'])
-            save_data(cor_monthly_aog_by_hr, "cor_monthly_aog_by_hr.pkl")
-            del cor_monthly_aog_by_hr
-            gc.collect()
-            
-            sub_monthly_aog_by_hr = get_cor_monthly_aog_by_hr(
-                monthly_aog_by_hr, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_aog_by_hr, "sub_monthly_aog_by_hr.pkl")
-            del monthly_aog_by_hr, sub_monthly_aog_by_hr
-            gc.collect()
-            
-            log_memory_usage("End hourly arrivals on green")
-            logger.info("Hourly arrivals on green processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor monthly AOG by hour (aggregates in Athena!)
+        cor_monthly_aog_by_hr = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='aog',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        )
+        save_data(cor_monthly_aog_by_hr, "cor_monthly_aog_by_hr.pkl")
+        
+        # Subcorridor monthly AOG by hour
+        sub_monthly_aog_by_hr = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='aog',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_aog_by_hr, "sub_monthly_aog_by_hr.pkl")
+        
+        logger.info("Hourly arrivals on green Athena optimization completed")
+        log_memory_usage("End hourly arrivals on green (Athena)")
         
     except Exception as e:
         logger.error(f"Error in hourly arrivals on green processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_daily_progression_ratio(dates, config_data):
-    """Process daily progression ratio [13 of 29] - Memory optimized"""
+    """Process daily progression ratio [13 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Daily Progression Ratio [13 of 29 (mark1)]")
     log_memory_usage("Start daily progression ratio")
     
     try:
-        aog = load_data("aog_data.pkl")
+        logger.info("Using Athena optimization for progression ratio")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        if not aog.empty:
-            weekly_pr_by_day = get_weekly_pr_by_day(aog)
-            save_data(weekly_pr_by_day, "weekly_pr_by_day.pkl")
-            
-            monthly_pr_by_day = get_monthly_pr_by_day(aog)
-            save_data(monthly_pr_by_day, "monthly_pr_by_day.pkl")
-            del aog
-            gc.collect()
-            
-            cor_weekly_pr_by_day = get_cor_weekly_pr_by_day(weekly_pr_by_day, config_data['corridors'])
-            save_data(cor_weekly_pr_by_day, "cor_weekly_pr_by_day.pkl")
-            del weekly_pr_by_day, cor_weekly_pr_by_day
-            gc.collect()
-            
-            cor_monthly_pr_by_day = get_cor_monthly_pr_by_day(monthly_pr_by_day, config_data['corridors'])
-            save_data(cor_monthly_pr_by_day, "cor_monthly_pr_by_day.pkl")
-            del cor_monthly_pr_by_day
-            gc.collect()
-            
-            # Subcorridor processing
-            weekly_pr_by_day = load_data("weekly_pr_by_day.pkl")
-            sub_weekly_pr_by_day = get_cor_weekly_pr_by_day(
-                weekly_pr_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_pr_by_day, "sub_weekly_pr_by_day.pkl")
-            del weekly_pr_by_day, sub_weekly_pr_by_day
-            gc.collect()
-            
-            sub_monthly_pr_by_day = get_cor_monthly_pr_by_day(
-                monthly_pr_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_pr_by_day, "sub_monthly_pr_by_day.pkl")
-            del monthly_pr_by_day, sub_monthly_pr_by_day
-            gc.collect()
-            
-            log_memory_usage("End daily progression ratio")
-            logger.info("Daily progression ratio processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly PR
+        cor_weekly_pr_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='pr',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_weekly_pr_by_day, "cor_weekly_pr_by_day.pkl")
+        
+        # Subcorridor weekly PR
+        sub_weekly_pr_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='pr',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_pr_by_day, "sub_weekly_pr_by_day.pkl")
+        
+        # Corridor monthly PR
+        cor_monthly_pr_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='pr',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_pr_by_day, "cor_monthly_pr_by_day.pkl")
+        
+        # Subcorridor monthly PR
+        sub_monthly_pr_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='pr',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_pr_by_day, "sub_monthly_pr_by_day.pkl")
+        
+        logger.info("Daily progression ratio Athena optimization completed")
+        log_memory_usage("End daily progression ratio (Athena)")
         
     except Exception as e:
         logger.error(f"Error in daily progression ratio processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_hourly_progression_ratio(dates, config_data):
-    """Process hourly progression ratio [14 of 29] - Memory optimized"""
+    """Process hourly progression ratio [14 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Hourly Progression Ratio [14 of 29 (mark1)]")
     log_memory_usage("Start hourly progression ratio")
     
     try:
-        aog = load_data("aog_data.pkl")
+        logger.info("Using Athena optimization for hourly progression ratio")
+        from package_athena_helpers import athena_get_corridor_hourly_avg
         
-        if not aog.empty:
-            pr_by_hr = get_pr_by_hr(aog)
-            monthly_pr_by_hr = get_monthly_pr_by_hr(pr_by_hr)
-            save_data(monthly_pr_by_hr, "monthly_pr_by_hr.pkl")
-            del aog, pr_by_hr
-            gc.collect()
-            
-            cor_monthly_pr_by_hr = get_cor_monthly_pr_by_hr(monthly_pr_by_hr, config_data['corridors'])
-            save_data(cor_monthly_pr_by_hr, "cor_monthly_pr_by_hr.pkl")
-            del cor_monthly_pr_by_hr
-            gc.collect()
-            
-            sub_monthly_pr_by_hr = get_cor_monthly_pr_by_hr(
-                monthly_pr_by_hr, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_pr_by_hr, "sub_monthly_pr_by_hr.pkl")
-            del monthly_pr_by_hr, sub_monthly_pr_by_hr
-            gc.collect()
-            
-            log_memory_usage("End hourly progression ratio")
-            logger.info("Hourly progression ratio processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor monthly PR by hour
+        cor_monthly_pr_by_hr = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='pr',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        )
+        save_data(cor_monthly_pr_by_hr, "cor_monthly_pr_by_hr.pkl")
+        
+        # Subcorridor monthly PR by hour
+        sub_monthly_pr_by_hr = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='arrivals_on_green',
+            metric_col='pr',
+            weight_col='vol',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_pr_by_hr, "sub_monthly_pr_by_hr.pkl")
+        
+        logger.info("Hourly progression ratio Athena optimization completed")
+        log_memory_usage("End hourly progression ratio (Athena)")
         
     except Exception as e:
         logger.error(f"Error in hourly progression ratio processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_daily_split_failures(dates, config_data):
-    """Process daily split failures [15 of 29] - Memory optimized"""
+    """Process daily split failures [15 of 29] - Athena optimized"""
     logger.info(f"{datetime.now()} Daily Split Failures [15 of 29 (mark1)]")
     log_memory_usage("Start daily split failures")
     
     try:
-        def filter_callback(x):
-            return x[x['CallPhase'] == 0]
+        logger.info("Using Athena optimization for split failures")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        sf = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="split_failures",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list'],
-            callback=filter_callback
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly SF (peak hours only)
+        cor_weekly_sf_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='split_failures',
+            metric_col='sf_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
         )
+        save_data(cor_weekly_sf_by_day, "cor_wsf.pkl")
         
-        if not sf.empty:
-            log_memory_usage("After reading split failures data")
-            
-            sf = clean_signal_ids(sf)
-            sf['CallPhase'] = sf['CallPhase'].astype('category')
-            sf = ensure_datetime_column(sf, 'Date')
-            
-            # Add hour column for peak/off-peak separation
-            if 'Date_Hour' in sf.columns:
-                sf['Hour'] = pd.to_datetime(sf['Date_Hour']).dt.hour
-            else:
-                sf['Hour'] = 12
-            
-            # Divide into peak/off-peak split failures
-            sfo = sf[~sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
-            sfp = sf[sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
-            
-            # Calculate weekly metrics
-            weekly_sf_by_day = get_weekly_avg_by_day(sfp, "sf_freq", "cycles", peak_only=False)
-            save_data(weekly_sf_by_day, "wsf.pkl")
-            
-            weekly_sfo_by_day = get_weekly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
-            save_data(weekly_sfo_by_day, "wsfo.pkl")
-            del sfp, sfo
-            gc.collect()
-            
-            # Calculate monthly metrics
-            sf = load_data("sf_data.pkl") if 'sf' not in locals() else sf
-            sfp = sf[sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
-            sfo = sf[~sf['Hour'].isin(AM_PEAK_HOURS + PM_PEAK_HOURS)]
-            
-            monthly_sf_by_day = get_monthly_avg_by_day(sfp, "sf_freq", "cycles", peak_only=False)
-            save_data(monthly_sf_by_day, "monthly_sfd.pkl")
-            
-            monthly_sfo_by_day = get_monthly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
-            save_data(monthly_sfo_by_day, "monthly_sfo.pkl")
-            del sfp, sfo
-            gc.collect()
-            
-            # Corridor processing
-            cor_weekly_sf_by_day = get_cor_weekly_sf_by_day(weekly_sf_by_day, config_data['corridors'])
-            save_data(cor_weekly_sf_by_day, "cor_wsf.pkl")
-            del weekly_sf_by_day, cor_weekly_sf_by_day
-            gc.collect()
-            
-            cor_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['corridors'])
-            save_data(cor_weekly_sfo_by_day, "cor_wsfo.pkl")
-            del weekly_sfo_by_day, cor_weekly_sfo_by_day
-            gc.collect()
-            
-            cor_monthly_sf_by_day = get_cor_monthly_sf_by_day(monthly_sf_by_day, config_data['corridors'])
-            save_data(cor_monthly_sf_by_day, "cor_monthly_sfd.pkl")
-            del monthly_sf_by_day, cor_monthly_sf_by_day
-            gc.collect()
-            
-            cor_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['corridors'])
-            save_data(cor_monthly_sfo_by_day, "cor_monthly_sfo.pkl")
-            del monthly_sfo_by_day, cor_monthly_sfo_by_day
-            gc.collect()
-            
-            # Subcorridor processing
-            weekly_sf_by_day = load_data("wsf.pkl")
-            sub_weekly_sf_by_day = get_cor_weekly_sf_by_day(
-                weekly_sf_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_sf_by_day, "sub_wsf.pkl")
-            del weekly_sf_by_day, sub_weekly_sf_by_day
-            gc.collect()
-            
-            weekly_sfo_by_day = load_data("wsfo.pkl")
-            sub_weekly_sfo_by_day = get_cor_weekly_sf_by_day(
-                weekly_sfo_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_weekly_sfo_by_day, "sub_wsfo.pkl")
-            del weekly_sfo_by_day, sub_weekly_sfo_by_day
-            gc.collect()
-            
-            monthly_sf_by_day = load_data("monthly_sfd.pkl")
-            sub_monthly_sf_by_day = get_cor_monthly_sf_by_day(
-                monthly_sf_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_sf_by_day, "sub_monthly_sfd.pkl")
-            del monthly_sf_by_day, sub_monthly_sf_by_day
-            gc.collect()
-            
-            monthly_sfo_by_day = load_data("monthly_sfo.pkl")
-            sub_monthly_sfo_by_day = get_cor_monthly_sf_by_day(
-                monthly_sfo_by_day, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_sfo_by_day, "sub_monthly_sfo.pkl")
-            del monthly_sfo_by_day, sub_monthly_sfo_by_day
-            gc.collect()
-            
-            # Store sf for hourly processing
-            save_data(sf, "sf_data.pkl")
-            del sf
-            gc.collect()
-            
-            log_memory_usage("End daily split failures")
-            logger.info("Daily split failures processing completed successfully")
+        # Subcorridor weekly SF
+        sub_weekly_sf_by_day = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='split_failures',
+            metric_col='sf_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_sf_by_day, "sub_wsf.pkl")
+        
+        # Corridor monthly SF
+        cor_monthly_sf_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='split_failures',
+            metric_col='sf_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_sf_by_day, "cor_monthly_sfd.pkl")
+        
+        # Subcorridor monthly SF
+        sub_monthly_sf_by_day = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='split_failures',
+            metric_col='sf_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_sf_by_day, "sub_monthly_sfd.pkl")
+        
+        logger.info("daily_split_failures Athena optimization completed")
+        log_memory_usage("End daily_split_failures (Athena)")
         
     except Exception as e:
         logger.error(f"Error in daily split failures processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_hourly_split_failures(dates, config_data):
-    """Process hourly split failures [16 of 29] - Memory optimized"""
+    """Process hourly split failures [16 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Hourly Split Failures [16 of 29 (mark1)]")
     log_memory_usage("Start hourly split failures")
     
     try:
-        sf = load_data("sf_data.pkl")
+        logger.info("Using Athena optimization for hourly split failures")
+        from package_athena_helpers import athena_get_corridor_hourly_avg
         
-        if not sf.empty:
-            sfh = get_sf_by_hr(sf)
-            msfh = get_monthly_sf_by_hr(sfh)
-            save_data(msfh, "msfh.pkl")
-            del sf, sfh
-            gc.collect()
-            
-            cor_msfh = get_cor_monthly_sf_by_hr(msfh, config_data['corridors'])
-            save_data(cor_msfh, "cor_msfh.pkl")
-            del cor_msfh
-            gc.collect()
-            
-            sub_msfh = get_cor_monthly_sf_by_hr(
-                msfh, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_msfh, "sub_msfh.pkl")
-            del msfh, sub_msfh
-            gc.collect()
-            
-            log_memory_usage("End hourly split failures")
-            logger.info("Hourly split failures processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor monthly SF by hour
+        cor_msfh = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='split_failures',
+            metric_col='sf_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        )
+        save_data(cor_msfh, "cor_msfh.pkl")
+        
+        # Subcorridor monthly SF by hour
+        sub_msfh = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='split_failures',
+            metric_col='sf_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        ).dropna(subset=['Corridor'])
+        save_data(sub_msfh, "sub_msfh.pkl")
+        
+        logger.info("Hourly split failures Athena optimization completed")
+        log_memory_usage("End hourly split failures (Athena)")
         
     except Exception as e:
         logger.error(f"Error in hourly split failures processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_daily_queue_spillback(dates, config_data):
-    """Process daily queue spillback [17 of 29] - Memory optimized"""
+    """Process daily queue spillback [17 of 29] - Athena optimized"""
     logger.info(f"{datetime.now()} Daily Queue Spillback [17 of 29 (mark1)]")
     log_memory_usage("Start daily queue spillback")
     
     try:
-        qs = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="queue_spillback",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list']
-        )
+        logger.info("Using Athena optimization for queue spillback")
+        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
-        if not qs.empty:
-            log_memory_usage("After reading queue spillback data")
-            
-            qs = clean_signal_ids(qs)
-            qs['CallPhase'] = qs['CallPhase'].astype('category')
-            qs = ensure_datetime_column(qs, 'Date')
-            
-            wqs = get_weekly_qs_by_day(qs)
-            save_data(wqs, "wqs.pkl")
-            
-            monthly_qsd = get_monthly_qs_by_day(qs)
-            save_data(monthly_qsd, "monthly_qsd.pkl")
-            
-            # Store qs for hourly processing
-            save_data(qs, "qs_data.pkl")
-            del qs
-            gc.collect()
-            
-            cor_wqs = get_cor_weekly_qs_by_day(wqs, config_data['corridors'])
-            save_data(cor_wqs, "cor_wqs.pkl")
-            del wqs, cor_wqs
-            gc.collect()
-            
-            cor_monthly_qsd = get_cor_monthly_qs_by_day(monthly_qsd, config_data['corridors'])
-            save_data(cor_monthly_qsd, "cor_monthly_qsd.pkl")
-            del cor_monthly_qsd
-            gc.collect()
-            
-            # Subcorridor processing
-            wqs = load_data("wqs.pkl")
-            sub_wqs = get_cor_weekly_qs_by_day(
-                wqs, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_wqs, "sub_wqs.pkl")
-            del wqs, sub_wqs
-            gc.collect()
-            
-            monthly_qsd = load_data("monthly_qsd.pkl")
-            sub_monthly_qsd = get_cor_monthly_qs_by_day(
-                monthly_qsd, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_monthly_qsd, "sub_monthly_qsd.pkl")
-            del monthly_qsd, sub_monthly_qsd
-            gc.collect()
-            
-            log_memory_usage("End daily queue spillback")
-            logger.info("Daily queue spillback processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor weekly QS
+        cor_weekly_qs = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='queue_spillback',
+            metric_col='qs_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_weekly_qs, "cor_wqs.pkl")
+        
+        # Subcorridor weekly QS
+        sub_weekly_qs = keep_trying(
+            athena_get_corridor_weekly_avg,
+            n_tries=3,
+            table_name='queue_spillback',
+            metric_col='qs_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_weekly_qs, "sub_wqs.pkl")
+        
+        # Corridor monthly QS
+        cor_monthly_qs = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='queue_spillback',
+            metric_col='qs_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_qs, "cor_monthly_qsd.pkl")
+        
+        # Subcorridor monthly QS
+        sub_monthly_qs = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='queue_spillback',
+            metric_col='qs_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_qs, "sub_monthly_qsd.pkl")
+        
+        logger.info("daily_queue_spillback Athena optimization completed")
+        log_memory_usage("End daily_queue_spillback (Athena)")
         
     except Exception as e:
         logger.error(f"Error in daily queue spillback processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_hourly_queue_spillback(dates, config_data):
-    """Process hourly queue spillback [18 of 29] - Memory optimized"""
+    """Process hourly queue spillback [18 of 29] - Athena optimized (no fallback)"""
     logger.info(f"{datetime.now()} Hourly Queue Spillback [18 of 29 (mark1)]")
     log_memory_usage("Start hourly queue spillback")
     
     try:
-        qs = load_data("qs_data.pkl")
+        logger.info("Using Athena optimization for hourly queue spillback")
+        from package_athena_helpers import athena_get_corridor_hourly_avg
         
-        if not qs.empty:
-            qsh = get_qs_by_hr(qs)
-            mqsh = get_monthly_qs_by_hr(qsh)
-            save_data(mqsh, "mqsh.pkl")
-            del qs, qsh
-            gc.collect()
-            
-            cor_mqsh = get_cor_monthly_qs_by_hr(mqsh, config_data['corridors'])
-            save_data(cor_mqsh, "cor_mqsh.pkl")
-            del cor_mqsh
-            gc.collect()
-            
-            sub_mqsh = get_cor_monthly_qs_by_hr(
-                mqsh, config_data['subcorridors']
-            ).dropna(subset=['Corridor'])
-            save_data(sub_mqsh, "sub_mqsh.pkl")
-            del mqsh, sub_mqsh
-            gc.collect()
-            
-            log_memory_usage("End hourly queue spillback")
-            logger.info("Hourly queue spillback processing completed successfully")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor monthly QS by hour
+        cor_mqsh = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='queue_spillback',
+            metric_col='qs_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        )
+        save_data(cor_mqsh, "cor_mqsh.pkl")
+        
+        # Subcorridor monthly QS by hour
+        sub_mqsh = keep_trying(
+            athena_get_corridor_hourly_avg,
+            n_tries=3,
+            table_name='queue_spillback',
+            metric_col='qs_freq',
+            weight_col='cycles',
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict,
+            time_col='Timeperiod'
+        ).dropna(subset=['Corridor'])
+        save_data(sub_mqsh, "sub_mqsh.pkl")
+        
+        logger.info("Hourly queue spillback Athena optimization completed")
+        log_memory_usage("End hourly queue spillback (Athena)")
         
     except Exception as e:
         logger.error(f"Error in hourly queue spillback processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_travel_time_indexes(dates, config_data):
     """Process travel time and buffer time indexes [19 of 29] - Memory optimized"""
@@ -2833,64 +2863,54 @@ def process_user_delay_costs(dates, config_data):
         gc.collect()
 
 def process_flash_events(dates, config_data):
-    """Process flash events [23 of 29] - Memory optimized"""
+    """Process flash events [23 of 29] - Athena optimized"""
     logger.info(f"{datetime.now()} Flash Events [23 of 29 (mark1)]")
     log_memory_usage("Start flash events")
     
     try:
-        fe = s3_read_parquet_parallel(
-            bucket=conf.bucket,
-            table_name="flash_events",
-            start_date=dates['wk_calcs_start_date'],
-            end_date=dates['report_end_date'],
-            signals_list=config_data['signals_list']
-        )
+        logger.info("Using Athena optimization for flash events")
+        from package_athena_helpers import athena_get_corridor_monthly_avg
         
-        if not fe.empty:
-            log_memory_usage("After reading flash events data")
-            
-            fe = clean_signal_ids(fe)
-            fe = ensure_datetime_column(fe, 'Date')
-            
-            # Define flash event column candidates
-            flash_candidates = [
-                'Flash', 'flash_events', 'Flash_Events', 'FlashEvents', 
-                'flash_event', 'Flash_Event', 'events', 'Events',
-                'flash_count', 'Flash_Count'
-            ]
-            fe = ensure_metric_column(fe, 'flash', flash_candidates)
-            
-            # Monthly flash events for bar charts and % change
-            monthly_flash = get_monthly_flashevent(fe)
-            save_data(monthly_flash, "monthly_flash.pkl")
-            del fe
-            gc.collect()
-            
-            if not monthly_flash.empty:
-                # Group into corridors
-                cor_monthly_flash = get_cor_monthly_flash(monthly_flash, config_data['corridors'])
-                save_data(cor_monthly_flash, "cor_monthly_flash.pkl")
-                del cor_monthly_flash
-                gc.collect()
-                
-                # Subcorridors
-                sub_monthly_flash = safe_dropna_corridor(
-                    get_cor_monthly_flash(monthly_flash, config_data['subcorridors']),
-                    "sub_monthly_flash"
-                )
-                save_data(sub_monthly_flash, "sub_monthly_flash.pkl")
-                del monthly_flash, sub_monthly_flash
-                gc.collect()
-            
-            log_memory_usage("End flash events")
-            logger.info("Flash events processing completed successfully")
-        else:
-            logger.warning("No flash events data found")
+        conf_dict = conf.to_dict()
+        start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
+        end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Corridor monthly flash events
+        cor_monthly_flash = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='flash_events',
+            metric_col='flash',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_monthly_flash, "cor_monthly_flash.pkl")
+        
+        # Subcorridor monthly flash events
+        sub_monthly_flash = keep_trying(
+            athena_get_corridor_monthly_avg,
+            n_tries=3,
+            table_name='flash_events',
+            metric_col='flash',
+            weight_col=None,
+            start_date=start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_monthly_flash, "sub_monthly_flash.pkl")
+        
+        logger.info("flash_events Athena optimization completed")
+        log_memory_usage("End flash_events (Athena)")
         
     except Exception as e:
         logger.error(f"Error in flash events processing: {e}")
         logger.error(traceback.format_exc())
         gc.collect()
+        raise
 
 def process_bike_ped_safety_index(dates, config_data):
     """Process bike/ped safety index [24 of 29] - Memory optimized"""
@@ -3439,32 +3459,32 @@ def main():
         
         # Process each section sequentially with memory optimization
         processing_functions = [
-            # (process_detector_uptime, "Vehicle Detector Uptime"),
-            # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
-            # (process_watchdog_alerts, "Watchdog Alerts"),
-            # (process_daily_ped_activations, "Daily Pedestrian Activations"),
-            # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
-            # (process_pedestrian_delay, "Pedestrian Delay"),
-            # (process_communications_uptime, "Communications Uptime"),
-            # (process_daily_volumes, "Daily Volumes"),
+            (process_detector_uptime, "Vehicle Detector Uptime"),
+            (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),
+            (process_watchdog_alerts, "Watchdog Alerts"),
+            (process_daily_ped_activations, "Daily Pedestrian Activations"),
+            (process_hourly_ped_activations, "Hourly Pedestrian Activations"),
+            (process_pedestrian_delay, "Pedestrian Delay"),
+            (process_communications_uptime, "Communications Uptime"),
+            (process_daily_volumes, "Daily Volumes"),
             (process_hourly_volumes, "Hourly Volumes"),
-            # (process_daily_throughput, "Daily Throughput"),
-            # (process_arrivals_on_green, "Arrivals on Green"),
-            # (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
-            # (process_daily_progression_ratio, "Daily Progression Ratio"),
-            # (process_hourly_progression_ratio, "Hourly Progression Ratio"),
-            # (process_daily_split_failures, "Daily Split Failures"),
-            # (process_hourly_split_failures, "Hourly Split Failures"),
-            # (process_daily_queue_spillback, "Daily Queue Spillback"),
-            # (process_hourly_queue_spillback, "Hourly Queue Spillback"),
+            (process_daily_throughput, "Daily Throughput"),
+            (process_arrivals_on_green, "Arrivals on Green"),
+            (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),
+            (process_daily_progression_ratio, "Daily Progression Ratio"),
+            (process_hourly_progression_ratio, "Hourly Progression Ratio"),
+            (process_daily_split_failures, "Daily Split Failures"),
+            (process_hourly_split_failures, "Hourly Split Failures"),
+            (process_daily_queue_spillback, "Daily Queue Spillback"),
+            (process_hourly_queue_spillback, "Hourly Queue Spillback"),
             (process_travel_time_indexes, "Travel Time Indexes"),
-            # (process_cctv_uptime, "CCTV Uptime"),
-            # (process_teams_activities, "TEAMS Activities"),
-            # (process_user_delay_costs, "User Delay Costs"),
-            # (process_flash_events, "Flash Events"),
-            # (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
-            # (process_relative_speed_index, "Relative Speed Index"),
-            # (process_crash_indices, "Crash Indices")
+            (process_cctv_uptime, "CCTV Uptime"),
+            (process_teams_activities, "TEAMS Activities"),
+            (process_user_delay_costs, "User Delay Costs"),
+            (process_flash_events, "Flash Events"),
+            (process_bike_ped_safety_index, "Bike/Ped Safety Index"),
+            (process_relative_speed_index, "Relative Speed Index"),
+            (process_crash_indices, "Crash Indices")
         ]
         
         # Track progress
@@ -3763,6 +3783,3 @@ if __name__ == "__main__":
         logger.error(f"Fatal error: {e}")
         logger.error(traceback.format_exc())
         sys.exit(1)
-
-
-
