@@ -843,18 +843,61 @@ def main():
         logger.info(f"Signal data structure built")
         
         # ======================================================================
-        # LOAD HEALTH METRICS
+        # CALCULATE HEALTH METRICS (matches R: source("Health_Metrics.R"))
         # ======================================================================
-        logger.info("Loading health metrics...")
+        logger.info("Calculating health metrics...")
         
-        # In R, Health_Metrics.R is sourced here. Assuming it creates health score data.
-        # For now, we'll create a placeholder
-        health_metrics = {}
+        try:
+            from health_metrics import process_health_metrics
+            
+            # Process health metrics (matches R Health_Metrics.R)
+            health_results = process_health_metrics(
+                sub_data=sub,
+                sig_data=sig,
+                cam_config=cam_config,
+                corridors=corridors if not corridors.empty else subcorridors
+            )
+            
+            # Add health data to cor/sub/sig structures (matches R behavior)
+            if health_results:
+                # Add to cor structure
+                if 'cor' in health_results and 'mo' in health_results['cor']:
+                    if 'maint' in health_results['cor']['mo']:
+                        cor['mo']['maint'] = health_results['cor']['mo']['maint']
+                    if 'ops' in health_results['cor']['mo']:
+                        cor['mo']['ops'] = health_results['cor']['mo']['ops']
+                    if 'safety' in health_results['cor']['mo']:
+                        cor['mo']['safety'] = health_results['cor']['mo']['safety']
+                    logger.info("Added maintenance/ops/safety health metrics to cor")
+                
+                # Add to sub structure
+                if 'sub' in health_results and 'mo' in health_results['sub']:
+                    if 'maint' in health_results['sub']['mo']:
+                        sub['mo']['maint'] = health_results['sub']['mo']['maint']
+                    if 'ops' in health_results['sub']['mo']:
+                        sub['mo']['ops'] = health_results['sub']['mo']['ops']
+                    if 'safety' in health_results['sub']['mo']:
+                        sub['mo']['safety'] = health_results['sub']['mo']['safety']
+                    logger.info("Added maintenance/ops/safety health metrics to sub")
+                
+                # Add to sig structure  
+                if 'sig' in health_results and 'mo' in health_results['sig']:
+                    if 'maint' in health_results['sig']['mo']:
+                        sig['mo']['maint'] = health_results['sig']['mo']['maint']
+                    if 'ops' in health_results['sig']['mo']:
+                        sig['mo']['ops'] = health_results['sig']['mo']['ops']
+                    if 'safety' in health_results['sig']['mo']:
+                        sig['mo']['safety'] = health_results['sig']['mo']['safety']
+                    logger.info("Added maintenance/ops/safety health metrics to sig")
+                
+                logger.info("Health metrics processing completed successfully")
         
-        # Try to load if health metrics were computed separately
-        health_scores = load_pkl_data("health_scores.pkl")
-        if not health_scores.empty:
-            health_metrics['scores'] = health_scores
+        except ImportError as e:
+            logger.warning(f"Health metrics module not available: {e}")
+            logger.info("Skipping health metrics calculation")
+        except Exception as e:
+            logger.warning(f"Could not calculate health metrics: {e}")
+            logger.warning("Continuing without health metrics")
         
         # ======================================================================
         # SAVE PACKAGED DATA

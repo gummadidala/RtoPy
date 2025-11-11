@@ -28,7 +28,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # Import calculation functions
 from monthly_report_package_1_helper import *
 from s3_parquet_io import s3_read_parquet_parallel, s3read_using
-from teams import get_teams_tasks_from_s3
+from teams import get_teams_tasks_from_s3, tidy_teams_tasks
+from monthly_report_package_1_helper import get_outstanding_tasks_by_param, get_outstanding_tasks_by_day_range
 from configs import get_det_config_factory
 from database_functions import execute_athena_query
 from configs import get_ped_config_factory, get_corridors
@@ -1944,8 +1945,9 @@ def process_hourly_volumes(dates, config_data):
         logger.info("Calculating VPH peak (AM/PM split)...")
         
         # Load AM/PM peak hours from config
-        am_peak_hours = conf.get('AM_PEAK_HOURS', [6, 7, 8, 9])
-        pm_peak_hours = conf.get('PM_PEAK_HOURS', [15, 16, 17, 18, 19])
+        conf_dict = conf.to_dict() if hasattr(conf, 'to_dict') else {'AM_PEAK_HOURS': [6, 7, 8, 9], 'PM_PEAK_HOURS': [15, 16, 17, 18, 19]}
+        am_peak_hours = conf_dict.get('AM_PEAK_HOURS', [6, 7, 8, 9])
+        pm_peak_hours = conf_dict.get('PM_PEAK_HOURS', [15, 16, 17, 18, 19])
         
         # Weekly VPH Peak
         if not cor_weekly_vph.empty and 'Hour' in cor_weekly_vph.columns:
@@ -2491,8 +2493,9 @@ def process_daily_split_failures(dates, config_data):
         
         if not sf_hourly.empty and 'Hour' in sf_hourly.columns:
             # Load peak hours from config
-            am_peak_hours = conf.get('AM_PEAK_HOURS', [6, 7, 8, 9])
-            pm_peak_hours = conf.get('PM_PEAK_HOURS', [15, 16, 17, 18, 19])
+            conf_dict_sf = conf.to_dict() if hasattr(conf, 'to_dict') else {'AM_PEAK_HOURS': [6, 7, 8, 9], 'PM_PEAK_HOURS': [15, 16, 17, 18, 19]}
+            am_peak_hours = conf_dict_sf.get('AM_PEAK_HOURS', [6, 7, 8, 9])
+            pm_peak_hours = conf_dict_sf.get('PM_PEAK_HOURS', [15, 16, 17, 18, 19])
             all_peak_hours = am_peak_hours + pm_peak_hours
             
             # Split into peak (sfp) and off-peak (sfo)
