@@ -1998,59 +1998,8 @@ def process_daily_throughput(dates, config_data):
                 sub_monthly_throughput = sub_monthly_throughput.dropna(subset=['Corridor'])
         save_data(sub_monthly_throughput, "sub_monthly_throughput.pkl")
         
-        logger.info("Throughput Athena aggregation completed")
-        log_memory_usage("End throughput")
-        
-        if throughput.empty:
-            logger.warning("No throughput data found - saving empty dataframes")
-            save_data(pd.DataFrame(), "cor_weekly_throughput.pkl")
-            save_data(pd.DataFrame(), "sub_weekly_throughput.pkl")
-            save_data(pd.DataFrame(), "cor_monthly_throughput.pkl")
-            save_data(pd.DataFrame(), "sub_monthly_throughput.pkl")
-            return
-        
-        throughput = throughput.assign(
-            SignalID=lambda x: pd.Categorical(x['SignalID']),
-            CallPhase=lambda x: pd.Categorical(x['CallPhase'].astype(int))
-        )
-        
-        # Ensure Date is datetime
-        if 'Date' in throughput.columns:
-            throughput['Date'] = pd.to_datetime(throughput['Date'])
-            throughput = throughput.assign(
-                DOW=lambda df: df['Date'].dt.dayofweek,
-                Week=lambda df: df['Date'].dt.isocalendar().week
-            )
-        
-        # Add Date_Hour column for aggregation functions (they expect this)
-        if 'Date_Hour' not in throughput.columns and 'Date' in throughput.columns:
-            throughput['Date_Hour'] = pd.to_datetime(throughput['Date'])
-        
-        # Calculate aggregations (throughput uses "vph" as metric column)
-        # Don't pass weight_col parameter if it's None (causes KeyError in aggregation function)
-        weekly_throughput = get_weekly_avg_by_day(throughput, "vph", peak_only=False)
-        monthly_throughput = get_monthly_avg_by_day(throughput, "vph", peak_only=False)
-        
-        # Corridor aggregations (don't pass weight_col if None)
-        cor_weekly_throughput = get_cor_weekly_avg_by_day(weekly_throughput, config_data['corridors'], "vph")
-        sub_weekly_throughput = get_cor_weekly_avg_by_day(weekly_throughput, config_data['subcorridors'], "vph")
-        if not sub_weekly_throughput.empty and 'Corridor' in sub_weekly_throughput.columns:
-            sub_weekly_throughput = sub_weekly_throughput.dropna(subset=['Corridor'])
-        
-        cor_monthly_throughput = get_cor_monthly_avg_by_day(monthly_throughput, config_data['corridors'], "vph")
-        sub_monthly_throughput = get_cor_monthly_avg_by_day(monthly_throughput, config_data['subcorridors'], "vph")
-        if not sub_monthly_throughput.empty and 'Corridor' in sub_monthly_throughput.columns:
-            sub_monthly_throughput = sub_monthly_throughput.dropna(subset=['Corridor'])
-        
-        # Save results
-        save_data(cor_weekly_throughput, "cor_weekly_throughput.pkl")
-        save_data(sub_weekly_throughput, "sub_weekly_throughput.pkl")
-        save_data(cor_monthly_throughput, "cor_monthly_throughput.pkl")
-        save_data(sub_monthly_throughput, "sub_monthly_throughput.pkl")
-        
         logger.info("Daily throughput processing completed")
         log_memory_usage("End daily throughput")
-        return
         
         # OLD CODE - DISABLED
         # logger.info("Using Athena optimization for daily throughput")
@@ -2783,6 +2732,24 @@ def process_travel_time_indexes(dates, config_data):
             spd_sub = tt_sub[['Zone_Group', 'Zone', 'Corridor', 'Date', 'Hour', 'speed_mph']].copy()
             del tt_sub
             gc.collect()
+            
+            # Prepare columns required by aggregation functions
+            # Must modify each dataframe directly (loop doesn't persist changes)
+            tti_sub['Date'] = pd.to_datetime(tti_sub['Date'])
+            tti_sub['Month'] = tti_sub['Date'].dt.to_period('M').dt.to_timestamp()
+            tti_sub['Timeperiod'] = pd.to_datetime(tti_sub['Hour'])
+            
+            pti_sub['Date'] = pd.to_datetime(pti_sub['Date'])
+            pti_sub['Month'] = pti_sub['Date'].dt.to_period('M').dt.to_timestamp()
+            pti_sub['Timeperiod'] = pd.to_datetime(pti_sub['Hour'])
+            
+            bi_sub['Date'] = pd.to_datetime(bi_sub['Date'])
+            bi_sub['Month'] = bi_sub['Date'].dt.to_period('M').dt.to_timestamp()
+            bi_sub['Timeperiod'] = pd.to_datetime(bi_sub['Hour'])
+            
+            spd_sub['Date'] = pd.to_datetime(spd_sub['Date'])
+            spd_sub['Month'] = spd_sub['Date'].dt.to_period('M').dt.to_timestamp()
+            spd_sub['Timeperiod'] = pd.to_datetime(spd_sub['Hour'])
             
             # Load subcorridor monthly VPH for weighting
             sub_monthly_vph = load_data("sub_monthly_vph.pkl")
@@ -3812,32 +3779,32 @@ def main():
         # Process each section sequentially with memory optimization
         processing_functions = [
             # ENABLE ALL 26 METRICS FOR FINAL PRODUCTION RUN:
-            (process_detector_uptime, "Vehicle Detector Uptime"),  # #1 - ✅ Athena
-            (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),  # #2 - ✅ Athena (FIXED!)
-            (process_watchdog_alerts, "Watchdog Alerts"),  # #3 - ✅ Athena
-            (process_daily_ped_activations, "Daily Pedestrian Activations"),  # #4 - ✅ Works!
-            (process_hourly_ped_activations, "Hourly Pedestrian Activations"),  # #5 - ✅ FIXED!
-            (process_pedestrian_delay, "Pedestrian Delay"),  # #6 - ⏭️ SKIP: aggregations.py bug
-            (process_communications_uptime, "Communications Uptime"),  # #7 - ✅ Athena
-            (process_daily_volumes, "Daily Volumes"),  # #8 - ✅ Athena
-            (process_hourly_volumes, "Hourly Volumes"),  # #9 - ✅ Athena
-            (process_daily_throughput, "Daily Throughput"),  # #10 - ⏭️ SKIP: Athena query hangs
-            (process_arrivals_on_green, "Arrivals on Green"),  # #11 - ✅ Athena
-            (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),  # #12 - ✅ Athena
-            (process_daily_progression_ratio, "Daily Progression Ratio"),  # #13 - ✅ Athena
-            (process_hourly_progression_ratio, "Hourly Progression Ratio"),  # #14 - ✅ Athena
-            (process_daily_split_failures, "Daily Split Failures"),  # #15 - ✅ Athena
-            (process_hourly_split_failures, "Hourly Split Failures"),  # #16 - ✅ Athena
-            (process_daily_queue_spillback, "Daily Queue Spillback"),  # #17 - ✅ Athena
-            (process_hourly_queue_spillback, "Hourly Queue Spillback"),  # #18 - ✅ Athena
+            # (process_detector_uptime, "Vehicle Detector Uptime"),  # #1 - ✅ Athena
+            # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),  # #2 - ✅ Athena (FIXED!)
+            # (process_watchdog_alerts, "Watchdog Alerts"),  # #3 - ✅ Athena
+            # (process_daily_ped_activations, "Daily Pedestrian Activations"),  # #4 - ✅ Works!
+            # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),  # #5 - ✅ FIXED!
+            # (process_pedestrian_delay, "Pedestrian Delay"),  # #6 - ⏭️ SKIP: aggregations.py bug
+            # (process_communications_uptime, "Communications Uptime"),  # #7 - ✅ Athena
+            # (process_daily_volumes, "Daily Volumes"),  # #8 - ✅ Athena
+            # (process_hourly_volumes, "Hourly Volumes"),  # #9 - ✅ Athena
+            # (process_daily_throughput, "Daily Throughput"),  # #10 - ⏭️ SKIP: Athena query hangs
+            # (process_arrivals_on_green, "Arrivals on Green"),  # #11 - ✅ Athena
+            # (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),  # #12 - ✅ Athena
+            # (process_daily_progression_ratio, "Daily Progression Ratio"),  # #13 - ✅ Athena
+            # (process_hourly_progression_ratio, "Hourly Progression Ratio"),  # #14 - ✅ Athena
+            # (process_daily_split_failures, "Daily Split Failures"),  # #15 - ✅ Athena
+            # (process_hourly_split_failures, "Hourly Split Failures"),  # #16 - ✅ Athena
+            # (process_daily_queue_spillback, "Daily Queue Spillback"),  # #17 - ✅ Athena
+            # (process_hourly_queue_spillback, "Hourly Queue Spillback"),  # #18 - ✅ Athena
             (process_travel_time_indexes, "Travel Time Indexes"),  # #19 - ✅ Works
-            (process_cctv_uptime, "CCTV Uptime"),  # #20 - ✅ Works
-            (process_teams_activities, "TEAMS Activities"),  # #21 - ✅ Works
-            (process_user_delay_costs, "User Delay Costs"),  # #22 - ✅ Works
-            (process_flash_events, "Flash Events"),  # #23 - ✅ Works!
-            (process_bike_ped_safety_index, "Bike/Ped Safety Index"),  # #24 - ✅ Works
-            (process_relative_speed_index, "Relative Speed Index"),  # #25 - ✅ Works
-            (process_crash_indices, "Crash Indices"),  # #26 - ✅ Works
+            # (process_cctv_uptime, "CCTV Uptime"),  # #20 - ✅ Works
+            # (process_teams_activities, "TEAMS Activities"),  # #21 - ✅ Works
+            # (process_user_delay_costs, "User Delay Costs"),  # #22 - ✅ Works
+            # (process_flash_events, "Flash Events"),  # #23 - ✅ Works!
+            # (process_bike_ped_safety_index, "Bike/Ped Safety Index"),  # #24 - ✅ Works
+            # (process_relative_speed_index, "Relative Speed Index"),  # #25 - ✅ Works
+            # (process_crash_indices, "Crash Indices"),  # #26 - ✅ Works
         ]
         
         # Track progress

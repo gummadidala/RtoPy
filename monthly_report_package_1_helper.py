@@ -1398,31 +1398,38 @@ def get_cor_monthly_ti_by_hr(df, cor_monthly_vph, all_corridors):
         if df.empty:
             return pd.DataFrame()
         
-        # Merge with volume data for weighting
-        merged = df.merge(
-            cor_monthly_vph[['Zone_Group', 'Zone', 'Corridor', 'Month', 'Timeperiod', 'vph']], 
-            left_on=['Zone_Group', 'Zone', 'Corridor', 'Month', 'Hour'],
-            right_on=['Zone_Group', 'Zone', 'Corridor', 'Month', 'Timeperiod'],
-            how='left'
-        )
-        
         # Get the metric column (tti, pti, bi, or speed_mph)
-        metric_cols = [col for col in df.columns if col not in ['Zone_Group', 'Zone', 'Corridor', 'Month', 'Hour']]
+        metric_cols = [col for col in df.columns if col not in ['Zone_Group', 'Zone', 'Corridor', 'Month', 'Hour', 'Date', 'Timeperiod']]
         if not metric_cols:
             return pd.DataFrame()
         
         metric_col = metric_cols[0]
         
-        # Calculate weighted average
-        merged['weighted_metric'] = merged[metric_col] * merged['vph'].fillna(1)
-        
-        result = merged.groupby(['Zone_Group', 'Zone', 'Corridor', 'Month', 'Hour']).agg({
-            'weighted_metric': 'sum',
-            'vph': 'sum'
-        }).reset_index()
-        
-        result[metric_col] = result['weighted_metric'] / result['vph']
-        result = result.drop(columns=['weighted_metric', 'vph'])
+        # Check if VPH data has Timeperiod column for hourly weighting
+        if not cor_monthly_vph.empty and 'Timeperiod' in cor_monthly_vph.columns:
+            # Merge with volume data for weighting
+            merged = df.merge(
+                cor_monthly_vph[['Zone_Group', 'Zone', 'Corridor', 'Month', 'Timeperiod', 'vph']], 
+                left_on=['Zone_Group', 'Zone', 'Corridor', 'Month', 'Hour'],
+                right_on=['Zone_Group', 'Zone', 'Corridor', 'Month', 'Timeperiod'],
+                how='left'
+            )
+            
+            # Calculate weighted average
+            merged['weighted_metric'] = merged[metric_col] * merged['vph'].fillna(1)
+            
+            result = merged.groupby(['Zone_Group', 'Zone', 'Corridor', 'Month', 'Hour']).agg({
+                'weighted_metric': 'sum',
+                'vph': 'sum'
+            }).reset_index()
+            
+            result[metric_col] = result['weighted_metric'] / result['vph']
+            result = result.drop(columns=['weighted_metric', 'vph'])
+        else:
+            # VPH data doesn't have hourly granularity, just calculate simple averages
+            result = df.groupby(['Zone_Group', 'Zone', 'Corridor', 'Month', 'Hour']).agg({
+                metric_col: 'mean'
+            }).reset_index()
         
         return result
         
