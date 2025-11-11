@@ -310,6 +310,13 @@ def initialize_config():
         config_data.update(dates)
         config_data.update({'conf': conf, 'aws_conf': aws_conf})
         
+        # Save configuration files for Package 2 (matches R behavior)
+        logger.info("Saving configuration files for Package 2...")
+        save_data(config_data['corridors'], "corridors.pkl")
+        save_data(config_data['subcorridors'], "subcorridors.pkl")
+        save_data(config_data['cam_config'], "cam_config.pkl")
+        logger.info("Configuration files saved")
+        
         logger.info("Configuration initialized successfully")
         return config_data
         
@@ -1683,11 +1690,43 @@ def process_communications_uptime(dates, config_data):
     
     try:
         logger.info("Using Athena optimization for communications uptime")
-        from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
+        from package_athena_helpers import athena_get_corridor_daily_avg, athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
         
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Daily start date for daily aggregations
+        daily_start_date = dates['calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['calcs_start_date'], 'strftime') else str(dates['calcs_start_date'])
+        
+        # Corridor daily (new - matches R code)
+        from package_athena_helpers import athena_get_corridor_daily_avg
+        cor_daily_comm_uptime = keep_trying(
+            athena_get_corridor_daily_avg,
+            n_tries=3,
+            table_name='comm_uptime',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=daily_start_date,
+            end_date=end_date,
+            corridors_df=config_data['corridors'],
+            conf=conf_dict
+        )
+        save_data(cor_daily_comm_uptime, "cor_daily_comm_uptime.pkl")
+        
+        # Subcorridor daily
+        sub_daily_comm_uptime = keep_trying(
+            athena_get_corridor_daily_avg,
+            n_tries=3,
+            table_name='comm_uptime',
+            metric_col='uptime',
+            weight_col=None,
+            start_date=daily_start_date,
+            end_date=end_date,
+            corridors_df=config_data['subcorridors'],
+            conf=conf_dict
+        ).dropna(subset=['Corridor'])
+        save_data(sub_daily_comm_uptime, "sub_daily_comm_uptime.pkl")
         
         # Corridor weekly
         cor_weekly_comm_uptime = keep_trying(
@@ -1900,6 +1939,45 @@ def process_hourly_volumes(dates, config_data):
             conf=conf_dict
         ).dropna(subset=['Corridor'])
         save_data(sub_monthly_vph, "sub_monthly_vph.pkl")
+        
+        # Calculate VPH Peak (AM/PM split) - matches R code
+        logger.info("Calculating VPH peak (AM/PM split)...")
+        
+        # Load AM/PM peak hours from config
+        am_peak_hours = conf.get('AM_PEAK_HOURS', [6, 7, 8, 9])
+        pm_peak_hours = conf.get('PM_PEAK_HOURS', [15, 16, 17, 18, 19])
+        
+        # Weekly VPH Peak
+        if not cor_weekly_vph.empty and 'Hour' in cor_weekly_vph.columns:
+            cor_weekly_vph_am = cor_weekly_vph[cor_weekly_vph['Hour'].isin(am_peak_hours)].copy()
+            cor_weekly_vph_pm = cor_weekly_vph[cor_weekly_vph['Hour'].isin(pm_peak_hours)].copy()
+            save_data({'am': cor_weekly_vph_am, 'pm': cor_weekly_vph_pm}, "cor_weekly_vph_peak.pkl")
+        else:
+            save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "cor_weekly_vph_peak.pkl")
+        
+        if not sub_weekly_vph.empty and 'Hour' in sub_weekly_vph.columns:
+            sub_weekly_vph_am = sub_weekly_vph[sub_weekly_vph['Hour'].isin(am_peak_hours)].copy()
+            sub_weekly_vph_pm = sub_weekly_vph[sub_weekly_vph['Hour'].isin(pm_peak_hours)].copy()
+            save_data({'am': sub_weekly_vph_am, 'pm': sub_weekly_vph_pm}, "sub_weekly_vph_peak.pkl")
+        else:
+            save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "sub_weekly_vph_peak.pkl")
+        
+        # Monthly VPH Peak
+        if not cor_monthly_vph.empty and 'Hour' in cor_monthly_vph.columns:
+            cor_monthly_vph_am = cor_monthly_vph[cor_monthly_vph['Hour'].isin(am_peak_hours)].copy()
+            cor_monthly_vph_pm = cor_monthly_vph[cor_monthly_vph['Hour'].isin(pm_peak_hours)].copy()
+            save_data({'am': cor_monthly_vph_am, 'pm': cor_monthly_vph_pm}, "cor_monthly_vph_peak.pkl")
+        else:
+            save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "cor_monthly_vph_peak.pkl")
+        
+        if not sub_monthly_vph.empty and 'Hour' in sub_monthly_vph.columns:
+            sub_monthly_vph_am = sub_monthly_vph[sub_monthly_vph['Hour'].isin(am_peak_hours)].copy()
+            sub_monthly_vph_pm = sub_monthly_vph[sub_monthly_vph['Hour'].isin(pm_peak_hours)].copy()
+            save_data({'am': sub_monthly_vph_am, 'pm': sub_monthly_vph_pm}, "sub_monthly_vph_peak.pkl")
+        else:
+            save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "sub_monthly_vph_peak.pkl")
+        
+        logger.info("VPH peak (AM/PM) files created")
         
         
         logger.info("hourly_volumes Athena optimization completed")
@@ -2398,6 +2476,68 @@ def process_daily_split_failures(dates, config_data):
             conf=conf_dict
         ).dropna(subset=['Corridor'])
         save_data(sub_monthly_sf_by_day, "sub_monthly_sfd.pkl")
+        
+        # Calculate SFO (Split Failure Overflow = Off-Peak) - matches R code
+        logger.info("Calculating split failure overflow (off-peak)...")
+        
+        # Need to get hourly SF data to filter by peak/off-peak
+        # Read from split_failures table with Hour column
+        sf_hourly = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="split_failures",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not sf_hourly.empty and 'Hour' in sf_hourly.columns:
+            # Load peak hours from config
+            am_peak_hours = conf.get('AM_PEAK_HOURS', [6, 7, 8, 9])
+            pm_peak_hours = conf.get('PM_PEAK_HOURS', [15, 16, 17, 18, 19])
+            all_peak_hours = am_peak_hours + pm_peak_hours
+            
+            # Split into peak (sfp) and off-peak (sfo)
+            # Extract hour from Date_Hour or Hour column
+            if 'Date_Hour' in sf_hourly.columns:
+                sf_hourly['hour_val'] = pd.to_datetime(sf_hourly['Date_Hour']).dt.hour
+            elif 'Hour' in sf_hourly.columns:
+                sf_hourly['hour_val'] = sf_hourly['Hour']
+            else:
+                sf_hourly['hour_val'] = 0
+            
+            # SFO = off-peak (NOT in peak hours)
+            sfo = sf_hourly[~sf_hourly['hour_val'].isin(all_peak_hours)].copy()
+            
+            # Calculate aggregations for SFO
+            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+            from monthly_report_package_1_helper import get_cor_weekly_sf_by_day, get_cor_monthly_sf_by_day
+            
+            weekly_sfo_by_day = get_weekly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
+            monthly_sfo_by_day = get_monthly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
+            
+            cor_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['corridors'])
+            cor_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['corridors'])
+            
+            sub_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['subcorridors'])
+            if not sub_weekly_sfo_by_day.empty and 'Corridor' in sub_weekly_sfo_by_day.columns:
+                sub_weekly_sfo_by_day = sub_weekly_sfo_by_day.dropna(subset=['Corridor'])
+            
+            sub_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['subcorridors'])
+            if not sub_monthly_sfo_by_day.empty and 'Corridor' in sub_monthly_sfo_by_day.columns:
+                sub_monthly_sfo_by_day = sub_monthly_sfo_by_day.dropna(subset=['Corridor'])
+            
+            # Save SFO files (matches R addtoRDS calls)
+            save_data(cor_weekly_sfo_by_day, "cor_wsfo.pkl")
+            save_data(cor_monthly_sfo_by_day, "cor_monthly_sfo.pkl")
+            save_data(sub_weekly_sfo_by_day, "sub_wsfo.pkl")
+            save_data(sub_monthly_sfo_by_day, "sub_monthly_sfo.pkl")
+            
+            logger.info("Split failure overflow (SFO) files created")
+        else:
+            logger.warning("No hourly split failure data available for SFO calculation")
+            save_data(pd.DataFrame(), "cor_wsfo.pkl")
+            save_data(pd.DataFrame(), "cor_monthly_sfo.pkl")
+            save_data(pd.DataFrame(), "sub_wsfo.pkl")
+            save_data(pd.DataFrame(), "sub_monthly_sfo.pkl")
         
         logger.info("daily_split_failures Athena optimization completed")
         log_memory_usage("End daily_split_failures (Athena)")

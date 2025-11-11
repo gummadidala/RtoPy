@@ -647,6 +647,90 @@ def athena_get_corridor_monthly_avg(
         raise
 
 
+def athena_get_corridor_daily_avg(
+    table_name: str,
+    metric_col: str,
+    weight_col: Optional[str],
+    start_date: str,
+    end_date: str,
+    corridors_df: pd.DataFrame,
+    conf: dict
+) -> pd.DataFrame:
+    """
+    Get corridor-level daily averages using Athena JOIN
+    
+    Similar to weekly/monthly but aggregates by individual date
+    """
+    try:
+        database = conf['athena']['database']
+        bucket = conf['bucket']
+        
+        # Create temp corridors table
+        corridors_table = f"temp_corridors_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        corridor_mapping = corridors_df[['SignalID', 'Zone_Group', 'Zone', 'Corridor']].drop_duplicates()
+        
+        wr.s3.to_parquet(
+            df=corridor_mapping,
+            path=f"s3://{bucket}/temp/{corridors_table}/",
+            dataset=True,
+            database=database,
+            table=corridors_table,
+            boto3_session=get_boto3_session(conf)
+        )
+        
+        # Aggregate in Athena
+        if weight_col:
+            agg_expr = f"""
+                SUM(m.{metric_col} * m.{weight_col}) / NULLIF(SUM(m.{weight_col}), 0) AS {metric_col},
+                SUM(m.{weight_col}) AS {weight_col}
+            """
+        else:
+            agg_expr = f"AVG(m.{metric_col}) AS {metric_col}"
+        
+        query = f"""
+        SELECT 
+            c.Zone_Group,
+            c.Zone,
+            c.Corridor,
+            CAST(m.date AS DATE) AS Date,
+            {agg_expr}
+        FROM {database}.{table_name} m
+        INNER JOIN {database}.{corridors_table} c
+            ON CAST(m.SignalID AS VARCHAR) = CAST(c.SignalID AS VARCHAR)
+        WHERE m.date BETWEEN '{start_date}' AND '{end_date}'
+        GROUP BY c.Zone_Group, c.Zone, c.Corridor, CAST(m.date AS DATE)
+        ORDER BY Corridor, Date
+        """
+        
+        logger.info(f"Athena: Corridor daily aggregation for {metric_col}")
+        logger.info(f"DEBUG SQL (first 600 chars): {query[:600]}")
+        
+        session = get_boto3_session(conf)
+        
+        df = wr.athena.read_sql_query(
+            sql=query,
+            database=database,
+            s3_output=conf['athena']['staging_dir'],
+            boto3_session=session,
+            ctas_approach=False
+        )
+        
+        # Cleanup temp table
+        try:
+            wr.catalog.delete_table_if_exists(database=database, table=corridors_table, boto3_session=session)
+            wr.s3.delete_objects(path=f"s3://{bucket}/temp/{corridors_table}/", boto3_session=session)
+        except:
+            pass
+        
+        logger.info(f"Retrieved {len(df)} corridor daily records")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Athena corridor daily aggregation failed: {e}")
+        raise
+
+
 def athena_get_corridor_hourly_avg(
     table_name: str,
     metric_col: str,
