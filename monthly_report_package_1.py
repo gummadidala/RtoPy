@@ -3779,32 +3779,32 @@ def main():
         # Process each section sequentially with memory optimization
         processing_functions = [
             # ENABLE ALL 26 METRICS FOR FINAL PRODUCTION RUN:
-            # (process_detector_uptime, "Vehicle Detector Uptime"),  # #1 - ✅ Athena
-            # (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),  # #2 - ✅ Athena (FIXED!)
-            # (process_watchdog_alerts, "Watchdog Alerts"),  # #3 - ✅ Athena
-            # (process_daily_ped_activations, "Daily Pedestrian Activations"),  # #4 - ✅ Works!
-            # (process_hourly_ped_activations, "Hourly Pedestrian Activations"),  # #5 - ✅ FIXED!
-            # (process_pedestrian_delay, "Pedestrian Delay"),  # #6 - ⏭️ SKIP: aggregations.py bug
-            # (process_communications_uptime, "Communications Uptime"),  # #7 - ✅ Athena
-            # (process_daily_volumes, "Daily Volumes"),  # #8 - ✅ Athena
-            # (process_hourly_volumes, "Hourly Volumes"),  # #9 - ✅ Athena
-            # (process_daily_throughput, "Daily Throughput"),  # #10 - ⏭️ SKIP: Athena query hangs
-            # (process_arrivals_on_green, "Arrivals on Green"),  # #11 - ✅ Athena
-            # (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),  # #12 - ✅ Athena
-            # (process_daily_progression_ratio, "Daily Progression Ratio"),  # #13 - ✅ Athena
-            # (process_hourly_progression_ratio, "Hourly Progression Ratio"),  # #14 - ✅ Athena
-            # (process_daily_split_failures, "Daily Split Failures"),  # #15 - ✅ Athena
-            # (process_hourly_split_failures, "Hourly Split Failures"),  # #16 - ✅ Athena
-            # (process_daily_queue_spillback, "Daily Queue Spillback"),  # #17 - ✅ Athena
-            # (process_hourly_queue_spillback, "Hourly Queue Spillback"),  # #18 - ✅ Athena
+            (process_detector_uptime, "Vehicle Detector Uptime"),  # #1 - ✅ Athena
+            (process_ped_pushbutton_uptime, "Pedestrian Pushbutton Uptime"),  # #2 - ✅ Athena (FIXED!)
+            (process_watchdog_alerts, "Watchdog Alerts"),  # #3 - ✅ Athena
+            (process_daily_ped_activations, "Daily Pedestrian Activations"),  # #4 - ✅ Works!
+            (process_hourly_ped_activations, "Hourly Pedestrian Activations"),  # #5 - ✅ FIXED!
+            (process_pedestrian_delay, "Pedestrian Delay"),  # #6 - ⏭️ SKIP: aggregations.py bug
+            (process_communications_uptime, "Communications Uptime"),  # #7 - ✅ Athena
+            (process_daily_volumes, "Daily Volumes"),  # #8 - ✅ Athena
+            (process_hourly_volumes, "Hourly Volumes"),  # #9 - ✅ Athena
+            (process_daily_throughput, "Daily Throughput"),  # #10 - ⏭️ SKIP: Athena query hangs
+            (process_arrivals_on_green, "Arrivals on Green"),  # #11 - ✅ Athena
+            (process_hourly_arrivals_on_green, "Hourly Arrivals on Green"),  # #12 - ✅ Athena
+            (process_daily_progression_ratio, "Daily Progression Ratio"),  # #13 - ✅ Athena
+            (process_hourly_progression_ratio, "Hourly Progression Ratio"),  # #14 - ✅ Athena
+            (process_daily_split_failures, "Daily Split Failures"),  # #15 - ✅ Athena
+            (process_hourly_split_failures, "Hourly Split Failures"),  # #16 - ✅ Athena
+            (process_daily_queue_spillback, "Daily Queue Spillback"),  # #17 - ✅ Athena
+            (process_hourly_queue_spillback, "Hourly Queue Spillback"),  # #18 - ✅ Athena
             (process_travel_time_indexes, "Travel Time Indexes"),  # #19 - ✅ Works
-            # (process_cctv_uptime, "CCTV Uptime"),  # #20 - ✅ Works
-            # (process_teams_activities, "TEAMS Activities"),  # #21 - ✅ Works
-            # (process_user_delay_costs, "User Delay Costs"),  # #22 - ✅ Works
-            # (process_flash_events, "Flash Events"),  # #23 - ✅ Works!
-            # (process_bike_ped_safety_index, "Bike/Ped Safety Index"),  # #24 - ✅ Works
-            # (process_relative_speed_index, "Relative Speed Index"),  # #25 - ✅ Works
-            # (process_crash_indices, "Crash Indices"),  # #26 - ✅ Works
+            (process_cctv_uptime, "CCTV Uptime"),  # #20 - ✅ Works
+            (process_teams_activities, "TEAMS Activities"),  # #21 - ✅ Works
+            (process_user_delay_costs, "User Delay Costs"),  # #22 - ✅ Works
+            (process_flash_events, "Flash Events"),  # #23 - ✅ Works!
+            (process_bike_ped_safety_index, "Bike/Ped Safety Index"),  # #24 - ✅ Works
+            (process_relative_speed_index, "Relative Speed Index"),  # #25 - ✅ Works
+            (process_crash_indices, "Crash Indices"),  # #26 - ✅ Works
         ]
         
         # Track progress
