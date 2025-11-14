@@ -9,6 +9,7 @@ import pandas as pd
 import logging
 from typing import List, Dict, Optional
 from datetime import datetime
+from botocore.exceptions import WaiterError, ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -355,6 +356,7 @@ def get_signals_list_athena(date_range: List[str], conf: dict) -> List[str]:
     
     database = conf['athena']['database']
     date_list = "', '".join(date_range)
+    staging_dir = conf['athena'].get('staging_dir', f"s3://{conf['bucket']}/athena-results/")
     
     query = f"""
     SELECT DISTINCT SignalID
@@ -363,12 +365,14 @@ def get_signals_list_athena(date_range: List[str], conf: dict) -> List[str]:
     ORDER BY SignalID
     """
     
+    session = get_boto3_session(conf)
+    
     try:
-        session = get_boto3_session(conf)
         df = wr.athena.read_sql_query(
             sql=query,
             database=database,
             ctas_approach=False,
+            s3_output=staging_dir,
             boto3_session=session
         )
         
@@ -377,6 +381,31 @@ def get_signals_list_athena(date_range: List[str], conf: dict) -> List[str]:
         
         return signals_list
         
+    except (WaiterError, ClientError) as e:
+        # Handle bucket existence check failures gracefully
+        error_code = getattr(e, 'response', {}).get('Error', {}).get('Code', '')
+        if '404' in str(e) or 'BucketExists' in str(e) or error_code == '404':
+            logger.warning(f"Bucket check failed for signals list query (non-critical): {e}")
+            logger.info("Attempting query without bucket verification...")
+            try:
+                # Try with explicit s3_output to bypass bucket check
+                df = wr.athena.read_sql_query(
+                    sql=query,
+                    database=database,
+                    ctas_approach=False,
+                    s3_output=staging_dir,
+                    boto3_session=session,
+                    workgroup=conf['athena'].get('workgroup', 'primary')
+                )
+                signals_list = df['SignalID'].tolist() if not df.empty else []
+                logger.info(f"Retrieved {len(signals_list)} signals from Athena (retry successful)")
+                return signals_list
+            except Exception as retry_e:
+                logger.warning(f"Retry also failed, returning empty list: {retry_e}")
+                return []
+        else:
+            logger.error(f"Error getting signals list from Athena: {e}")
+            return []
     except Exception as e:
         logger.error(f"Error getting signals list from Athena: {e}")
         return []
@@ -396,6 +425,7 @@ def get_data_quality_stats_athena(date_range: List[str], conf: dict) -> pd.DataF
     
     database = conf['athena']['database']
     date_list = "', '".join(date_range)
+    staging_dir = conf['athena'].get('staging_dir', f"s3://{conf['bucket']}/athena-results/")
     
     query = f"""
     SELECT 
@@ -412,18 +442,44 @@ def get_data_quality_stats_athena(date_range: List[str], conf: dict) -> pd.DataF
     ORDER BY date
     """
     
+    session = get_boto3_session(conf)
+    
     try:
-        session = get_boto3_session(conf)
         df = wr.athena.read_sql_query(
             sql=query,
             database=database,
             ctas_approach=False,
+            s3_output=staging_dir,
             boto3_session=session
         )
         
         logger.info(f"Retrieved data quality stats for {len(df)} dates")
         return df
         
+    except (WaiterError, ClientError) as e:
+        # Handle bucket existence check failures gracefully
+        error_code = getattr(e, 'response', {}).get('Error', {}).get('Code', '')
+        if '404' in str(e) or 'BucketExists' in str(e) or error_code == '404':
+            logger.warning(f"Bucket check failed for data quality stats query (non-critical): {e}")
+            logger.info("Attempting query without bucket verification...")
+            try:
+                # Try with explicit s3_output to bypass bucket check
+                df = wr.athena.read_sql_query(
+                    sql=query,
+                    database=database,
+                    ctas_approach=False,
+                    s3_output=staging_dir,
+                    boto3_session=session,
+                    workgroup=conf['athena'].get('workgroup', 'primary')
+                )
+                logger.info(f"Retrieved data quality stats for {len(df)} dates (retry successful)")
+                return df
+            except Exception as retry_e:
+                logger.warning(f"Retry also failed, returning empty DataFrame: {retry_e}")
+                return pd.DataFrame()
+        else:
+            logger.error(f"Error getting data quality stats from Athena: {e}")
+            return pd.DataFrame()
     except Exception as e:
         logger.error(f"Error getting data quality stats from Athena: {e}")
         return pd.DataFrame()
@@ -441,6 +497,7 @@ def verify_athena_tables_exist(conf: dict) -> Dict[str, bool]:
     """
     
     database = conf['athena']['database']
+    staging_dir = conf['athena'].get('staging_dir', f"s3://{conf['bucket']}/athena-results/")
     required_tables = [
         'counts_1hr',
         'counts_15min',
@@ -463,11 +520,21 @@ def verify_athena_tables_exist(conf: dict) -> Dict[str, bool]:
                 sql=query,
                 database=database,
                 ctas_approach=False,
+                s3_output=staging_dir,
                 boto3_session=session
             )
             
             table_status[table] = not df.empty
             
+        except (WaiterError, ClientError) as e:
+            # Handle bucket existence check failures gracefully
+            error_code = getattr(e, 'response', {}).get('Error', {}).get('Code', '')
+            if '404' in str(e) or 'BucketExists' in str(e) or error_code == '404':
+                logger.debug(f"Bucket check failed for table {table} (non-critical), skipping verification")
+                table_status[table] = False  # Assume table doesn't exist if we can't verify
+            else:
+                logger.warning(f"Error checking table {table}: {e}")
+                table_status[table] = False
         except Exception as e:
             logger.warning(f"Error checking table {table}: {e}")
             table_status[table] = False

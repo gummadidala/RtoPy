@@ -462,6 +462,42 @@ def process_detector_uptime(dates, config_data):
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
         
+        # Read signal-level detector uptime data from S3 (needed for signal-level files)
+        logger.info("Reading signal-level detector uptime data from S3...")
+        du_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="detector_uptime_pd",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not du_data.empty:
+            # Ensure Date column exists
+            if 'Date' in du_data.columns:
+                du_data['Date'] = pd.to_datetime(du_data['Date'])
+            elif 'date' in du_data.columns:
+                du_data['Date'] = pd.to_datetime(du_data['date'])
+                du_data = du_data.rename(columns={'date': 'Date'})
+            
+            # Add DOW and Week columns
+            du_data['DOW'] = du_data['Date'].dt.dayofweek + 1
+            du_data['Week'] = du_data['Date'].dt.isocalendar().week
+            du_data['Year'] = du_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly aggregations
+            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+            weekly_detector_uptime = get_weekly_avg_by_day(du_data, "uptime", None, peak_only=False)
+            monthly_detector_uptime = get_monthly_avg_by_day(du_data, "uptime", None, peak_only=False)
+            
+            # Save signal-level files (needed by Package 2)
+            save_data(weekly_detector_uptime, "weekly_detector_uptime.pkl")
+            save_data(monthly_detector_uptime, "monthly_detector_uptime.pkl")
+            logger.info(f"Saved signal-level detector uptime files: weekly ({len(weekly_detector_uptime)} rows), monthly ({len(monthly_detector_uptime)} rows)")
+        else:
+            logger.warning("No detector uptime data found - creating empty signal-level files")
+            save_data(pd.DataFrame(), "weekly_detector_uptime.pkl")
+            save_data(pd.DataFrame(), "monthly_detector_uptime.pkl")
+        
         # Get corridor weekly with Athena (combines read + join + aggregate in one query!)
         cor_weekly_detector_uptime = keep_trying(
             athena_get_corridor_weekly_avg,
@@ -620,6 +656,14 @@ def process_ped_pushbutton_uptime(dates, config_data):
         # Metric #4 needs papd, Metric #5 needs paph with Hour column
         save_data(papd_final, "pa_uptime.pkl")
         logger.info(f"Saved {len(papd_final)} PAU records with uptime information")
+        
+        # Create signal-level weekly and monthly PA uptime files (needed by Package 2)
+        from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+        weekly_pa_uptime = get_weekly_avg_by_day(papd_final, "uptime", None, peak_only=False)
+        monthly_pa_uptime = get_monthly_avg_by_day(papd_final, "uptime", None, peak_only=False)
+        save_data(weekly_pa_uptime, "weekly_pa_uptime.pkl")
+        save_data(monthly_pa_uptime, "monthly_pa_uptime.pkl")
+        logger.info(f"Saved signal-level PA uptime files: weekly ({len(weekly_pa_uptime)} rows), monthly ({len(monthly_pa_uptime)} rows)")
         
         # Also save paph with Hour column for metric #5
         if not paph.empty:
@@ -1605,6 +1649,46 @@ def process_pedestrian_delay(dates, config_data):
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
         
+        # Read signal-level ped delay data from S3 (needed for signal-level files)
+        logger.info("Reading signal-level pedestrian delay data from S3...")
+        pd_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="ped_delay",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not pd_data.empty:
+            # Ensure Date column exists
+            if 'Date' in pd_data.columns:
+                pd_data['Date'] = pd.to_datetime(pd_data['Date'])
+            elif 'date' in pd_data.columns:
+                pd_data['Date'] = pd.to_datetime(pd_data['date'])
+                pd_data = pd_data.rename(columns={'date': 'Date'})
+            
+            # Rename duration to pd for consistency
+            if 'duration' in pd_data.columns:
+                pd_data = pd_data.rename(columns={'duration': 'pd'})
+            
+            # Add DOW and Week columns
+            pd_data['DOW'] = pd_data['Date'].dt.dayofweek + 1
+            pd_data['Week'] = pd_data['Date'].dt.isocalendar().week
+            pd_data['Year'] = pd_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly aggregations
+            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+            weekly_pd_by_day = get_weekly_avg_by_day(pd_data, "pd", None, peak_only=False)
+            monthly_pd_by_day = get_monthly_avg_by_day(pd_data, "pd", None, peak_only=False)
+            
+            # Save signal-level files (needed by Package 2)
+            save_data(weekly_pd_by_day, "weekly_pd_by_day.pkl")
+            save_data(monthly_pd_by_day, "monthly_pd_by_day.pkl")
+            logger.info(f"Saved signal-level PD files: weekly ({len(weekly_pd_by_day)} rows), monthly ({len(monthly_pd_by_day)} rows)")
+        else:
+            logger.warning("No pedestrian delay data found - creating empty signal-level files")
+            save_data(pd.DataFrame(), "weekly_pd_by_day.pkl")
+            save_data(pd.DataFrame(), "monthly_pd_by_day.pkl")
+        
         # Query ped_delay table using Athena helpers
         # Note: ped_delay has raw events, helpers will aggregate
         
@@ -1699,6 +1783,45 @@ def process_communications_uptime(dates, config_data):
         
         # Daily start date for daily aggregations
         daily_start_date = dates['calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['calcs_start_date'], 'strftime') else str(dates['calcs_start_date'])
+        
+        # Read signal-level comm uptime data from S3 (needed for signal-level files)
+        logger.info("Reading signal-level communications uptime data from S3...")
+        cu_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="comm_uptime",
+            start_date=dates['calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not cu_data.empty:
+            # Ensure Date column exists
+            if 'Date' in cu_data.columns:
+                cu_data['Date'] = pd.to_datetime(cu_data['Date'])
+            elif 'date' in cu_data.columns:
+                cu_data['Date'] = pd.to_datetime(cu_data['date'])
+                cu_data = cu_data.rename(columns={'date': 'Date'})
+            
+            # Add DOW and Week columns
+            cu_data['DOW'] = cu_data['Date'].dt.dayofweek + 1
+            cu_data['Week'] = cu_data['Date'].dt.isocalendar().week
+            cu_data['Year'] = cu_data['Date'].dt.year
+            
+            # Create signal-level daily, weekly, and monthly aggregations
+            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+            daily_comm_uptime = cu_data.groupby(['SignalID', 'Date']).agg({'uptime': 'mean'}).reset_index()
+            weekly_comm_uptime = get_weekly_avg_by_day(cu_data, "uptime", None, peak_only=False)
+            monthly_comm_uptime = get_monthly_avg_by_day(cu_data, "uptime", None, peak_only=False)
+            
+            # Save signal-level files (needed by Package 2)
+            save_data(daily_comm_uptime, "daily_comm_uptime.pkl")
+            save_data(weekly_comm_uptime, "weekly_comm_uptime.pkl")
+            save_data(monthly_comm_uptime, "monthly_comm_uptime.pkl")
+            logger.info(f"Saved signal-level comm uptime files: daily ({len(daily_comm_uptime)} rows), weekly ({len(weekly_comm_uptime)} rows), monthly ({len(monthly_comm_uptime)} rows)")
+        else:
+            logger.warning("No comm uptime data found - creating empty signal-level files")
+            save_data(pd.DataFrame(), "daily_comm_uptime.pkl")
+            save_data(pd.DataFrame(), "weekly_comm_uptime.pkl")
+            save_data(pd.DataFrame(), "monthly_comm_uptime.pkl")
         
         # Corridor daily (new - matches R code)
         from package_athena_helpers import athena_get_corridor_daily_avg
@@ -1863,6 +1986,56 @@ def process_daily_volumes(dates, config_data):
         ).dropna(subset=['Corridor'])
         save_data(sub_monthly_vpd, "sub_monthly_vpd.pkl")
         
+        # Create signal-level weekly and monthly VPD (needed for Package 2 and crash indices)
+        logger.info("Creating signal-level weekly and monthly VPD...")
+        try:
+            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+            
+            # Read signal-level VPD data from S3
+            signal_vpd = s3_read_parquet_parallel(
+                bucket=conf.bucket,
+                table_name="vehicles_pd",
+                start_date=dates['wk_calcs_start_date'],
+                end_date=dates['report_end_date']
+            )
+            
+            if not signal_vpd.empty:
+                # Convert Date to datetime if needed
+                if 'Date' in signal_vpd.columns:
+                    signal_vpd['Date'] = pd.to_datetime(signal_vpd['Date'])
+                elif 'date' in signal_vpd.columns:
+                    signal_vpd['Date'] = pd.to_datetime(signal_vpd['date'])
+                    signal_vpd = signal_vpd.rename(columns={'date': 'Date'})
+                
+                # Add DOW and Week columns for weekly aggregation
+                signal_vpd['DOW'] = signal_vpd['Date'].dt.dayofweek + 1
+                signal_vpd['Week'] = signal_vpd['Date'].dt.isocalendar().week
+                signal_vpd['Year'] = signal_vpd['Date'].dt.year
+                
+                # Create weekly VPD
+                weekly_vpd = get_weekly_avg_by_day(signal_vpd, "vpd", None, peak_only=False)
+                save_data(weekly_vpd, "weekly_vpd.pkl")
+                logger.info(f"Saved weekly_vpd.pkl with {len(weekly_vpd)} records")
+                
+                # Aggregate to monthly by SignalID
+                signal_vpd['Month'] = signal_vpd['Date'].dt.to_period('M').dt.to_timestamp()
+                monthly_vpd = signal_vpd.groupby(['SignalID', 'Month'])['vpd'].mean().reset_index()
+                
+                # Ensure Month is datetime
+                monthly_vpd['Month'] = pd.to_datetime(monthly_vpd['Month'])
+                
+                save_data(monthly_vpd, "monthly_vpd.pkl")
+                logger.info(f"Saved monthly_vpd.pkl with {len(monthly_vpd)} records")
+            else:
+                logger.warning("No signal-level VPD data found - creating empty files")
+                save_data(pd.DataFrame(), "weekly_vpd.pkl")
+                save_data(pd.DataFrame(columns=['SignalID', 'Month', 'vpd']), "monthly_vpd.pkl")
+        except Exception as e:
+            logger.warning(f"Could not create signal-level VPD files: {e}")
+            logger.warning("Package 2 and crash indices may fail without these files")
+            save_data(pd.DataFrame(), "weekly_vpd.pkl")
+            save_data(pd.DataFrame(columns=['SignalID', 'Month', 'vpd']), "monthly_vpd.pkl")
+        
         logger.info("Daily volumes (VPD) Athena optimization completed successfully")
         log_memory_usage("End daily volumes (Athena)")
         
@@ -1949,7 +2122,57 @@ def process_hourly_volumes(dates, config_data):
         am_peak_hours = conf_dict.get('AM_PEAK_HOURS', [6, 7, 8, 9])
         pm_peak_hours = conf_dict.get('PM_PEAK_HOURS', [15, 16, 17, 18, 19])
         
-        # Weekly VPH Peak
+        # Read signal-level VPH data for peak calculation (needed for signal-level files)
+        logger.info("Reading signal-level VPH data for peak calculation...")
+        vph_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="vehicles_ph",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not vph_data.empty:
+            # Ensure Date and Hour columns exist
+            if 'Date' in vph_data.columns:
+                vph_data['Date'] = pd.to_datetime(vph_data['Date'])
+            elif 'date' in vph_data.columns:
+                vph_data['Date'] = pd.to_datetime(vph_data['date'])
+                vph_data = vph_data.rename(columns={'date': 'Date'})
+            
+            if 'Hour' not in vph_data.columns and 'Timeperiod' in vph_data.columns:
+                vph_data['Hour'] = pd.to_datetime(vph_data['Timeperiod']).dt.hour
+            
+            # Add DOW and Week columns for weekly aggregation
+            vph_data['DOW'] = vph_data['Date'].dt.dayofweek + 1
+            vph_data['Week'] = vph_data['Date'].dt.isocalendar().week
+            vph_data['Year'] = vph_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly VPH peak
+            if 'Hour' in vph_data.columns:
+                # Weekly VPH Peak (signal-level)
+                weekly_vph_am = vph_data[vph_data['Hour'].isin(am_peak_hours)].groupby(['SignalID', 'Year', 'Week', 'DOW'])['vph'].mean().reset_index()
+                weekly_vph_pm = vph_data[vph_data['Hour'].isin(pm_peak_hours)].groupby(['SignalID', 'Year', 'Week', 'DOW'])['vph'].mean().reset_index()
+                save_data({'am': weekly_vph_am, 'pm': weekly_vph_pm}, "weekly_vph_peak.pkl")
+                logger.info(f"Saved signal-level weekly VPH peak: AM ({len(weekly_vph_am)} rows), PM ({len(weekly_vph_pm)} rows)")
+                
+                # Monthly VPH Peak (signal-level)
+                vph_data['Month'] = vph_data['Date'].dt.to_period('M').dt.to_timestamp()
+                monthly_vph_am = vph_data[vph_data['Hour'].isin(am_peak_hours)].groupby(['SignalID', 'Month'])['vph'].mean().reset_index()
+                monthly_vph_pm = vph_data[vph_data['Hour'].isin(pm_peak_hours)].groupby(['SignalID', 'Month'])['vph'].mean().reset_index()
+                monthly_vph_am['Month'] = pd.to_datetime(monthly_vph_am['Month'])
+                monthly_vph_pm['Month'] = pd.to_datetime(monthly_vph_pm['Month'])
+                save_data({'am': monthly_vph_am, 'pm': monthly_vph_pm}, "monthly_vph_peak.pkl")
+                logger.info(f"Saved signal-level monthly VPH peak: AM ({len(monthly_vph_am)} rows), PM ({len(monthly_vph_pm)} rows)")
+            else:
+                logger.warning("No Hour column in VPH data - creating empty signal-level VPH peak files")
+                save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "weekly_vph_peak.pkl")
+                save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "monthly_vph_peak.pkl")
+        else:
+            logger.warning("No VPH data found - creating empty signal-level VPH peak files")
+            save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "weekly_vph_peak.pkl")
+            save_data({'am': pd.DataFrame(), 'pm': pd.DataFrame()}, "monthly_vph_peak.pkl")
+        
+        # Weekly VPH Peak (corridor/subcorridor)
         if not cor_weekly_vph.empty and 'Hour' in cor_weekly_vph.columns:
             cor_weekly_vph_am = cor_weekly_vph[cor_weekly_vph['Hour'].isin(am_peak_hours)].copy()
             cor_weekly_vph_pm = cor_weekly_vph[cor_weekly_vph['Hour'].isin(pm_peak_hours)].copy()
@@ -2004,6 +2227,46 @@ def process_daily_throughput(dates, config_data):
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Read signal-level throughput data from S3 (needed for signal-level files)
+        logger.info("Reading signal-level throughput data from S3...")
+        tp_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="throughput",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not tp_data.empty:
+            # Ensure Date column exists
+            if 'Date' in tp_data.columns:
+                tp_data['Date'] = pd.to_datetime(tp_data['Date'])
+            elif 'date' in tp_data.columns:
+                tp_data['Date'] = pd.to_datetime(tp_data['date'])
+                tp_data = tp_data.rename(columns={'date': 'Date'})
+            
+            # Rename throughput_hourly to vph for consistency
+            if 'throughput_hourly' in tp_data.columns:
+                tp_data = tp_data.rename(columns={'throughput_hourly': 'vph'})
+            
+            # Add DOW and Week columns
+            tp_data['DOW'] = tp_data['Date'].dt.dayofweek + 1
+            tp_data['Week'] = tp_data['Date'].dt.isocalendar().week
+            tp_data['Year'] = tp_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly aggregations
+            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+            weekly_throughput = get_weekly_avg_by_day(tp_data, "vph", None, peak_only=False)
+            monthly_throughput = get_monthly_avg_by_day(tp_data, "vph", None, peak_only=False)
+            
+            # Save signal-level files (needed by Package 2)
+            save_data(weekly_throughput, "weekly_throughput.pkl")
+            save_data(monthly_throughput, "monthly_throughput.pkl")
+            logger.info(f"Saved signal-level throughput files: weekly ({len(weekly_throughput)} rows), monthly ({len(monthly_throughput)} rows)")
+        else:
+            logger.warning("No throughput data found - creating empty signal-level files")
+            save_data(pd.DataFrame(), "weekly_throughput.pkl")
+            save_data(pd.DataFrame(), "monthly_throughput.pkl")
         
         # Use throughput table created by calcs_1 (has 'throughput_hourly' column)
         # Corridor weekly throughput
@@ -2158,10 +2421,46 @@ def process_arrivals_on_green(dates, config_data):
     try:
         logger.info("Using Athena optimization for arrivals on green")
         from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
+        from monthly_report_package_1_helper import get_weekly_aog_by_day, get_monthly_aog_by_day
         
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Read signal-level AOG data from S3 (needed for signal-level files)
+        logger.info("Reading signal-level AOG data from S3...")
+        aog_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="arrivals_on_green",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not aog_data.empty:
+            # Ensure Date column exists and is datetime
+            if 'Date' in aog_data.columns:
+                aog_data['Date'] = pd.to_datetime(aog_data['Date'])
+            elif 'date' in aog_data.columns:
+                aog_data['Date'] = pd.to_datetime(aog_data['date'])
+                aog_data = aog_data.rename(columns={'date': 'Date'})
+            
+            # Add DOW and Week columns
+            aog_data['DOW'] = aog_data['Date'].dt.dayofweek + 1
+            aog_data['Week'] = aog_data['Date'].dt.isocalendar().week
+            aog_data['Year'] = aog_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly aggregations
+            weekly_aog_by_day = get_weekly_aog_by_day(aog_data)
+            monthly_aog_by_day = get_monthly_aog_by_day(aog_data)
+            
+            # Save signal-level files (needed by Package 2)
+            save_data(weekly_aog_by_day, "weekly_aog_by_day.pkl")
+            save_data(monthly_aog_by_day, "monthly_aog_by_day.pkl")
+            logger.info(f"Saved signal-level AOG files: weekly ({len(weekly_aog_by_day)} rows), monthly ({len(monthly_aog_by_day)} rows)")
+        else:
+            logger.warning("No AOG data found - creating empty signal-level files")
+            save_data(pd.DataFrame(), "weekly_aog_by_day.pkl")
+            save_data(pd.DataFrame(), "monthly_aog_by_day.pkl")
         
         # Corridor weekly AOG
         cor_weekly_aog_by_day = keep_trying(
@@ -2236,10 +2535,35 @@ def process_hourly_arrivals_on_green(dates, config_data):
     try:
         logger.info("Using Athena optimization for hourly arrivals on green")
         from package_athena_helpers import athena_get_corridor_hourly_avg
+        from monthly_report_package_1_helper import get_monthly_aog_by_hr
         
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Read signal-level AOG data for hourly aggregation
+        logger.info("Reading signal-level AOG data for hourly aggregation...")
+        aog_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="arrivals_on_green",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not aog_data.empty:
+            # Ensure Date/Timeperiod column exists
+            if 'Timeperiod' in aog_data.columns:
+                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Timeperiod'])
+            elif 'Date' in aog_data.columns:
+                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Date'])
+            
+            # Create signal-level monthly AOG by hour
+            monthly_aog_by_hr = get_monthly_aog_by_hr(aog_data)
+            save_data(monthly_aog_by_hr, "monthly_aog_by_hr.pkl")
+            logger.info(f"Saved signal-level monthly AOG by hour: {len(monthly_aog_by_hr)} rows")
+        else:
+            logger.warning("No AOG data found - creating empty monthly_aog_by_hr.pkl")
+            save_data(pd.DataFrame(), "monthly_aog_by_hr.pkl")
         
         # Corridor monthly AOG by hour (aggregates in Athena!)
         cor_monthly_aog_by_hr = keep_trying(
@@ -2288,10 +2612,46 @@ def process_daily_progression_ratio(dates, config_data):
     try:
         logger.info("Using Athena optimization for progression ratio")
         from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
+        from monthly_report_package_1_helper import get_weekly_pr_by_day, get_monthly_pr_by_day
         
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Read signal-level AOG data (PR is calculated from AOG data)
+        logger.info("Reading signal-level AOG data for PR calculation...")
+        aog_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="arrivals_on_green",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not aog_data.empty:
+            # Ensure Date column exists and is datetime
+            if 'Date' in aog_data.columns:
+                aog_data['Date'] = pd.to_datetime(aog_data['Date'])
+            elif 'date' in aog_data.columns:
+                aog_data['Date'] = pd.to_datetime(aog_data['date'])
+                aog_data = aog_data.rename(columns={'date': 'Date'})
+            
+            # Add DOW and Week columns
+            aog_data['DOW'] = aog_data['Date'].dt.dayofweek + 1
+            aog_data['Week'] = aog_data['Date'].dt.isocalendar().week
+            aog_data['Year'] = aog_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly PR aggregations
+            weekly_pr_by_day = get_weekly_pr_by_day(aog_data)
+            monthly_pr_by_day = get_monthly_pr_by_day(aog_data)
+            
+            # Save signal-level files (needed by Package 2)
+            save_data(weekly_pr_by_day, "weekly_pr_by_day.pkl")
+            save_data(monthly_pr_by_day, "monthly_pr_by_day.pkl")
+            logger.info(f"Saved signal-level PR files: weekly ({len(weekly_pr_by_day)} rows), monthly ({len(monthly_pr_by_day)} rows)")
+        else:
+            logger.warning("No AOG data found for PR - creating empty signal-level files")
+            save_data(pd.DataFrame(), "weekly_pr_by_day.pkl")
+            save_data(pd.DataFrame(), "monthly_pr_by_day.pkl")
         
         # Corridor weekly PR
         cor_weekly_pr_by_day = keep_trying(
@@ -2366,10 +2726,35 @@ def process_hourly_progression_ratio(dates, config_data):
     try:
         logger.info("Using Athena optimization for hourly progression ratio")
         from package_athena_helpers import athena_get_corridor_hourly_avg
+        from monthly_report_package_1_helper import get_monthly_pr_by_hr
         
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Read signal-level AOG data for hourly PR aggregation
+        logger.info("Reading signal-level AOG data for hourly PR aggregation...")
+        aog_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="arrivals_on_green",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not aog_data.empty:
+            # Ensure Timeperiod column exists
+            if 'Timeperiod' in aog_data.columns:
+                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Timeperiod'])
+            elif 'Date' in aog_data.columns:
+                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Date'])
+            
+            # Create signal-level monthly PR by hour
+            monthly_pr_by_hr = get_monthly_pr_by_hr(aog_data)
+            save_data(monthly_pr_by_hr, "monthly_pr_by_hr.pkl")
+            logger.info(f"Saved signal-level monthly PR by hour: {len(monthly_pr_by_hr)} rows")
+        else:
+            logger.warning("No AOG data found for PR - creating empty monthly_pr_by_hr.pkl")
+            save_data(pd.DataFrame(), "monthly_pr_by_hr.pkl")
         
         # Corridor monthly PR by hour
         cor_monthly_pr_by_hr = keep_trying(
@@ -2479,11 +2864,47 @@ def process_daily_split_failures(dates, config_data):
         ).dropna(subset=['Corridor'])
         save_data(sub_monthly_sf_by_day, "sub_monthly_sfd.pkl")
         
+        # Create signal-level weekly and monthly SF files (needed by Package 2)
+        logger.info("Creating signal-level split failure files...")
+        sf_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="split_failures",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not sf_data.empty:
+            # Ensure Date column exists
+            if 'Date' in sf_data.columns:
+                sf_data['Date'] = pd.to_datetime(sf_data['Date'])
+            elif 'date' in sf_data.columns:
+                sf_data['Date'] = pd.to_datetime(sf_data['date'])
+                sf_data = sf_data.rename(columns={'date': 'Date'})
+            
+            # Add DOW and Week columns
+            sf_data['DOW'] = sf_data['Date'].dt.dayofweek + 1
+            sf_data['Week'] = sf_data['Date'].dt.isocalendar().week
+            sf_data['Year'] = sf_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly aggregations
+            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+            weekly_sf_by_day = get_weekly_avg_by_day(sf_data, "sf_freq", "cycles", peak_only=False)
+            monthly_sf_by_day = get_monthly_avg_by_day(sf_data, "sf_freq", "cycles", peak_only=False)
+            
+            # Save signal-level files
+            save_data(weekly_sf_by_day, "wsf.pkl")
+            save_data(monthly_sf_by_day, "monthly_sfd.pkl")
+            logger.info(f"Saved signal-level SF files: weekly ({len(weekly_sf_by_day)} rows), monthly ({len(monthly_sf_by_day)} rows)")
+        else:
+            logger.warning("No split failure data found - creating empty signal-level files")
+            save_data(pd.DataFrame(), "wsf.pkl")
+            save_data(pd.DataFrame(), "monthly_sfd.pkl")
+        
         # Calculate SFO (Split Failure Overflow = Off-Peak) - matches R code
         logger.info("Calculating split failure overflow (off-peak)...")
         
         # Need to get hourly SF data to filter by peak/off-peak
-        # Read from split_failures table with Hour column
+        # Read from split_failures table - try multiple column name variations
         sf_hourly = s3_read_parquet_parallel(
             bucket=conf.bucket,
             table_name="split_failures",
@@ -2491,7 +2912,19 @@ def process_daily_split_failures(dates, config_data):
             end_date=dates['report_end_date']
         )
         
-        if not sf_hourly.empty and 'Hour' in sf_hourly.columns:
+        # Check for hour column in various formats
+        has_hour_col = False
+        hour_col_name = None
+        
+        if not sf_hourly.empty:
+            # Check for different hour column names
+            for col in ['Hour', 'hour', 'date_hour', 'Date_Hour', 'Timeperiod']:
+                if col in sf_hourly.columns:
+                    has_hour_col = True
+                    hour_col_name = col
+                    break
+        
+        if not sf_hourly.empty and has_hour_col:
             # Load peak hours from config
             conf_dict_sf = conf.to_dict() if hasattr(conf, 'to_dict') else {'AM_PEAK_HOURS': [6, 7, 8, 9], 'PM_PEAK_HOURS': [15, 16, 17, 18, 19]}
             am_peak_hours = conf_dict_sf.get('AM_PEAK_HOURS', [6, 7, 8, 9])
@@ -2499,12 +2932,15 @@ def process_daily_split_failures(dates, config_data):
             all_peak_hours = am_peak_hours + pm_peak_hours
             
             # Split into peak (sfp) and off-peak (sfo)
-            # Extract hour from Date_Hour or Hour column
-            if 'Date_Hour' in sf_hourly.columns:
-                sf_hourly['hour_val'] = pd.to_datetime(sf_hourly['Date_Hour']).dt.hour
-            elif 'Hour' in sf_hourly.columns:
-                sf_hourly['hour_val'] = sf_hourly['Hour']
+            # Extract hour from various column formats
+            if hour_col_name == 'Timeperiod':
+                sf_hourly['hour_val'] = pd.to_datetime(sf_hourly['Timeperiod']).dt.hour
+            elif hour_col_name in ['Date_Hour', 'date_hour']:
+                sf_hourly['hour_val'] = pd.to_datetime(sf_hourly[hour_col_name]).dt.hour
+            elif hour_col_name in ['Hour', 'hour']:
+                sf_hourly['hour_val'] = sf_hourly[hour_col_name]
             else:
+                logger.warning(f"Could not extract hour from column {hour_col_name}, using default")
                 sf_hourly['hour_val'] = 0
             
             # SFO = off-peak (NOT in peak hours)
@@ -2516,6 +2952,11 @@ def process_daily_split_failures(dates, config_data):
             
             weekly_sfo_by_day = get_weekly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
             monthly_sfo_by_day = get_monthly_avg_by_day(sfo, "sf_freq", "cycles", peak_only=False)
+            
+            # Save signal-level SFO files (needed by Package 2)
+            save_data(weekly_sfo_by_day, "wsfo.pkl")
+            save_data(monthly_sfo_by_day, "monthly_sfo.pkl")
+            logger.info(f"Saved signal-level SFO files: weekly ({len(weekly_sfo_by_day)} rows), monthly ({len(monthly_sfo_by_day)} rows)")
             
             cor_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['corridors'])
             cor_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['corridors'])
@@ -2536,7 +2977,16 @@ def process_daily_split_failures(dates, config_data):
             
             logger.info("Split failure overflow (SFO) files created")
         else:
-            logger.warning("No hourly split failure data available for SFO calculation")
+            if sf_hourly.empty:
+                logger.warning("No hourly split failure data available for SFO calculation (data is empty)")
+            elif not has_hour_col:
+                logger.warning(f"No hour column found in split failure data. Available columns: {list(sf_hourly.columns)}")
+            else:
+                logger.warning("No hourly split failure data available for SFO calculation")
+            
+            # Save empty DataFrames to prevent downstream errors
+            save_data(pd.DataFrame(), "wsfo.pkl")  # Signal-level
+            save_data(pd.DataFrame(), "monthly_sfo.pkl")  # Signal-level
             save_data(pd.DataFrame(), "cor_wsfo.pkl")
             save_data(pd.DataFrame(), "cor_monthly_sfo.pkl")
             save_data(pd.DataFrame(), "sub_wsfo.pkl")
@@ -2559,10 +3009,35 @@ def process_hourly_split_failures(dates, config_data):
     try:
         logger.info("Using Athena optimization for hourly split failures")
         from package_athena_helpers import athena_get_corridor_hourly_avg
+        from monthly_report_package_1_helper import get_monthly_sf_by_hr
         
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Read signal-level SF data for hourly aggregation
+        logger.info("Reading signal-level split failure data for hourly aggregation...")
+        sf_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="split_failures",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not sf_data.empty:
+            # Ensure Timeperiod column exists
+            if 'Timeperiod' in sf_data.columns:
+                sf_data['Timeperiod'] = pd.to_datetime(sf_data['Timeperiod'])
+            elif 'Date' in sf_data.columns:
+                sf_data['Timeperiod'] = pd.to_datetime(sf_data['Date'])
+            
+            # Create signal-level monthly SF by hour
+            monthly_sf_by_hr = get_monthly_sf_by_hr(sf_data)
+            save_data(monthly_sf_by_hr, "msfh.pkl")
+            logger.info(f"Saved signal-level monthly SF by hour: {len(monthly_sf_by_hr)} rows")
+        else:
+            logger.warning("No split failure data found - creating empty msfh.pkl")
+            save_data(pd.DataFrame(), "msfh.pkl")
         
         # Corridor monthly SF by hour
         cor_msfh = keep_trying(
@@ -2611,10 +3086,56 @@ def process_daily_queue_spillback(dates, config_data):
     try:
         logger.info("Using Athena optimization for queue spillback")
         from package_athena_helpers import athena_get_corridor_weekly_avg, athena_get_corridor_monthly_avg
+        from monthly_report_package_1_helper import get_weekly_qs_by_day, get_monthly_qs_by_day, get_monthly_qs_by_hr
         
         conf_dict = conf.to_dict()
         start_date = dates['wk_calcs_start_date'].strftime('%Y-%m-%d') if hasattr(dates['wk_calcs_start_date'], 'strftime') else str(dates['wk_calcs_start_date'])
         end_date = dates['report_end_date'].strftime('%Y-%m-%d') if hasattr(dates['report_end_date'], 'strftime') else str(dates['report_end_date'])
+        
+        # Read signal-level QS data from S3
+        logger.info("Reading signal-level queue spillback data from S3...")
+        qs_data = s3_read_parquet_parallel(
+            bucket=conf.bucket,
+            table_name="queue_spillback",
+            start_date=dates['wk_calcs_start_date'],
+            end_date=dates['report_end_date']
+        )
+        
+        if not qs_data.empty:
+            # Ensure Date column exists
+            if 'Date' in qs_data.columns:
+                qs_data['Date'] = pd.to_datetime(qs_data['Date'])
+            elif 'date' in qs_data.columns:
+                qs_data['Date'] = pd.to_datetime(qs_data['date'])
+                qs_data = qs_data.rename(columns={'date': 'Date'})
+            
+            # Add DOW and Week columns
+            qs_data['DOW'] = qs_data['Date'].dt.dayofweek + 1
+            qs_data['Week'] = qs_data['Date'].dt.isocalendar().week
+            qs_data['Year'] = qs_data['Date'].dt.year
+            
+            # Create signal-level weekly and monthly aggregations
+            weekly_qs_by_day = get_weekly_qs_by_day(qs_data)
+            monthly_qs_by_day = get_monthly_qs_by_day(qs_data)
+            
+            # Save signal-level files
+            save_data(weekly_qs_by_day, "wqs.pkl")
+            save_data(monthly_qs_by_day, "monthly_qsd.pkl")
+            logger.info(f"Saved signal-level QS files: weekly ({len(weekly_qs_by_day)} rows), monthly ({len(monthly_qs_by_day)} rows)")
+            
+            # Create hourly QS if Timeperiod column exists
+            if 'Timeperiod' in qs_data.columns:
+                qs_data['Timeperiod'] = pd.to_datetime(qs_data['Timeperiod'])
+                monthly_qs_by_hr = get_monthly_qs_by_hr(qs_data)
+                save_data(monthly_qs_by_hr, "mqsh.pkl")
+                logger.info(f"Saved signal-level monthly QS by hour: {len(monthly_qs_by_hr)} rows")
+            else:
+                save_data(pd.DataFrame(), "mqsh.pkl")
+        else:
+            logger.warning("No queue spillback data found - creating empty signal-level files")
+            save_data(pd.DataFrame(), "wqs.pkl")
+            save_data(pd.DataFrame(), "monthly_qsd.pkl")
+            save_data(pd.DataFrame(), "mqsh.pkl")
         
         # Corridor weekly QS
         cor_weekly_qs = keep_trying(
@@ -3352,9 +3873,14 @@ def process_flash_events(dates, config_data):
         
         if monthly_flash.empty:
             logger.warning("No monthly flash data - saving empty dataframes")
+            save_data(pd.DataFrame(), "monthly_flash.pkl")  # Signal-level
             save_data(pd.DataFrame(), "cor_monthly_flash.pkl")
             save_data(pd.DataFrame(), "sub_monthly_flash.pkl")
             return
+        
+        # Save signal-level monthly flash file (needed by Package 2)
+        save_data(monthly_flash, "monthly_flash.pkl")
+        logger.info(f"Saved signal-level monthly flash: {len(monthly_flash)} rows")
         
         # Group into corridors
         cor_monthly_flash = get_cor_monthly_flash(monthly_flash, config_data['corridors'])

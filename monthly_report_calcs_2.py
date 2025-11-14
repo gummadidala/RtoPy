@@ -196,7 +196,7 @@ def get_detection_events_fallback(date_start: str, date_end: str, conf_athena: D
         logger.error(f"Error getting detection events: {e}")
         return pd.DataFrame()
 
-def process_single_date_queue_spillback(date_str: str, conf: Dict, signals_list: List[str]) -> bool:
+def process_single_date_queue_spillback(date_str: str, conf: Dict, signals_list: List[str]) -> Optional[bool]:
     """
     Process queue spillback for a single date with retry logic
     Module-level function for parallel processing
@@ -207,7 +207,7 @@ def process_single_date_queue_spillback(date_str: str, conf: Dict, signals_list:
         signals_list: List of signal IDs
     
     Returns:
-        True if successful, False otherwise
+        True if successful, None if no data (expected), False if error
     """
     try:
         logger.info(f"Processing queue spillback for: {date_str}")
@@ -224,8 +224,8 @@ def process_single_date_queue_spillback(date_str: str, conf: Dict, signals_list:
         )
         
         if detection_events is None or len(detection_events) == 0:
-            logger.info(f"No detection events for {date_str}")
-            return False
+            logger.info(f"No detection events for {date_str} - skipping (expected if data not yet available)")
+            return None  # None = no data (expected), not an error
         
         # Calculate queue spillback
         if get_qs is not None:
@@ -304,25 +304,31 @@ def get_queue_spillback_date_range(start_date: str, end_date: str, conf: Dict, s
             }
             
             success_count = 0
+            skipped_count = 0
             error_count = 0
             
             for future in as_completed(futures):
                 date_str = futures[future]
                 try:
                     result = future.result()
-                    if result:
+                    if result is True:
                         success_count += 1
+                    elif result is None:
+                        skipped_count += 1  # No data (expected)
                     else:
-                        error_count += 1
+                        error_count += 1  # Actual error
                 except Exception as e:
                     error_count += 1
                     logger.error(f"Exception for {date_str}: {e}")
             
-            logger.info(f"Queue spillback completed: {success_count} success, {error_count} errors")
+            if skipped_count > 0:
+                logger.info(f"Queue spillback completed: {success_count} success, {skipped_count} skipped (no data), {error_count} errors")
+            else:
+                logger.info(f"Queue spillback completed: {success_count} success, {error_count} errors")
     
     gc.collect()
 
-def process_single_date_ped_delay(date_str: str, conf: Dict, signals_list: List[str]) -> bool:
+def process_single_date_ped_delay(date_str: str, conf: Dict, signals_list: List[str]) -> Optional[bool]:
     """
     Process pedestrian delay for a single date with retry logic
     Module-level function for parallel processing
@@ -333,7 +339,7 @@ def process_single_date_ped_delay(date_str: str, conf: Dict, signals_list: List[
         signals_list: List of signal IDs
     
     Returns:
-        True if successful, False otherwise
+        True if successful, None if no data (expected), False if error
     """
     try:
         logger.info(f"Processing pedestrian delay for: {date_str}")
@@ -353,8 +359,8 @@ def process_single_date_ped_delay(date_str: str, conf: Dict, signals_list: List[
             return False
         
         if pd_data is None or len(pd_data) == 0:
-            logger.info(f"No pedestrian delay data for {date_str}")
-            return False
+            logger.info(f"No pedestrian delay data for {date_str} - skipping (expected if data not yet available)")
+            return None  # None = no data (expected), not an error
         
         # Upload results
         s3_upload_parquet_date_split(
@@ -415,21 +421,27 @@ def get_pd_date_range(start_date: str, end_date: str, conf: Dict, signals_list: 
             }
             
             success_count = 0
+            skipped_count = 0
             error_count = 0
             
             for future in as_completed(futures):
                 date_str = futures[future]
                 try:
                     result = future.result()
-                    if result:
+                    if result is True:
                         success_count += 1
+                    elif result is None:
+                        skipped_count += 1  # No data (expected)
                     else:
-                        error_count += 1
+                        error_count += 1  # Actual error
                 except Exception as e:
                     error_count += 1
                     logger.error(f"Exception for {date_str}: {e}")
             
-            logger.info(f"Pedestrian delay completed: {success_count} success, {error_count} errors")
+            if skipped_count > 0:
+                logger.info(f"Pedestrian delay completed: {success_count} success, {skipped_count} skipped (no data), {error_count} errors")
+            else:
+                logger.info(f"Pedestrian delay completed: {success_count} success, {error_count} errors")
     
     gc.collect()
 
