@@ -1666,24 +1666,39 @@ def process_pedestrian_delay(dates, config_data):
                 pd_data['Date'] = pd.to_datetime(pd_data['date'])
                 pd_data = pd_data.rename(columns={'date': 'Date'})
             
-            # Rename duration to pd for consistency
-            if 'duration' in pd_data.columns:
+            # Rename to pd for consistency (check multiple possible column names - matches R script)
+            if 'Avg.Max.Ped.Delay' in pd_data.columns:
+                pd_data = pd_data.rename(columns={'Avg.Max.Ped.Delay': 'pd'})
+            elif 'duration' in pd_data.columns:
                 pd_data = pd_data.rename(columns={'duration': 'pd'})
+            elif 'pd' not in pd_data.columns:
+                logger.warning("No 'pd' column found in ped_delay data. Available columns: " + str(list(pd_data.columns)))
+                # Try to use first numeric column as fallback
+                numeric_cols = pd_data.select_dtypes(include=[np.number]).columns.tolist()
+                if numeric_cols:
+                    pd_data = pd_data.rename(columns={numeric_cols[0]: 'pd'})
+                    logger.info(f"Using {numeric_cols[0]} as 'pd' column")
             
-            # Add DOW and Week columns
-            pd_data['DOW'] = pd_data['Date'].dt.dayofweek + 1
-            pd_data['Week'] = pd_data['Date'].dt.isocalendar().week
-            pd_data['Year'] = pd_data['Date'].dt.year
+            # Ensure 'pd' column exists before proceeding
+            if 'pd' not in pd_data.columns:
+                logger.error("Cannot proceed: 'pd' column not found in ped_delay data")
+                save_data(pd.DataFrame(), "weekly_pd_by_day.pkl")
+                save_data(pd.DataFrame(), "monthly_pd_by_day.pkl")
+            else:
+                # Add DOW and Week columns
+                pd_data['DOW'] = pd_data['Date'].dt.dayofweek + 1
+                pd_data['Week'] = pd_data['Date'].dt.isocalendar().week
+                pd_data['Year'] = pd_data['Date'].dt.year
+                
+                # Create signal-level weekly and monthly aggregations
+                from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
+                weekly_pd_by_day = get_weekly_avg_by_day(pd_data, "pd", None, peak_only=False)
+                monthly_pd_by_day = get_monthly_avg_by_day(pd_data, "pd", None, peak_only=False)
             
-            # Create signal-level weekly and monthly aggregations
-            from monthly_report_package_1_helper import get_weekly_avg_by_day, get_monthly_avg_by_day
-            weekly_pd_by_day = get_weekly_avg_by_day(pd_data, "pd", None, peak_only=False)
-            monthly_pd_by_day = get_monthly_avg_by_day(pd_data, "pd", None, peak_only=False)
-            
-            # Save signal-level files (needed by Package 2)
-            save_data(weekly_pd_by_day, "weekly_pd_by_day.pkl")
-            save_data(monthly_pd_by_day, "monthly_pd_by_day.pkl")
-            logger.info(f"Saved signal-level PD files: weekly ({len(weekly_pd_by_day)} rows), monthly ({len(monthly_pd_by_day)} rows)")
+                # Save signal-level files (needed by Package 2)
+                save_data(weekly_pd_by_day, "weekly_pd_by_day.pkl")
+                save_data(monthly_pd_by_day, "monthly_pd_by_day.pkl")
+                logger.info(f"Saved signal-level PD files: weekly ({len(weekly_pd_by_day)} rows), monthly ({len(monthly_pd_by_day)} rows)")
         else:
             logger.warning("No pedestrian delay data found - creating empty signal-level files")
             save_data(pd.DataFrame(), "weekly_pd_by_day.pkl")
@@ -2551,13 +2566,28 @@ def process_hourly_arrivals_on_green(dates, config_data):
         )
         
         if not aog_data.empty:
-            # Ensure Date/Timeperiod column exists
-            if 'Timeperiod' in aog_data.columns:
-                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Timeperiod'])
+            # Ensure Date column exists
+            if 'Date' not in aog_data.columns and 'date' in aog_data.columns:
+                aog_data['Date'] = pd.to_datetime(aog_data['date'])
             elif 'Date' in aog_data.columns:
-                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Date'])
+                aog_data['Date'] = pd.to_datetime(aog_data['Date'])
             
-            # Create signal-level monthly AOG by hour
+            # Extract Hour column from Date_Hour or Timeperiod (required by get_monthly_aog_by_hr)
+            if 'Date_Hour' in aog_data.columns:
+                aog_data['Hour'] = pd.to_datetime(aog_data['Date_Hour']).dt.hour
+            elif 'date_hour' in aog_data.columns:
+                aog_data['Hour'] = pd.to_datetime(aog_data['date_hour']).dt.hour
+            elif 'Timeperiod' in aog_data.columns:
+                # Timeperiod might be datetime or hour integer
+                if pd.api.types.is_datetime64_any_dtype(aog_data['Timeperiod']):
+                    aog_data['Hour'] = pd.to_datetime(aog_data['Timeperiod']).dt.hour
+                else:
+                    aog_data['Hour'] = pd.to_numeric(aog_data['Timeperiod'], errors='coerce')
+            else:
+                logger.warning("No Date_Hour or Timeperiod column found in AOG data for hourly aggregation")
+                aog_data['Hour'] = 0  # Default fallback
+            
+            # Create signal-level monthly AOG by hour (now Hour column exists)
             monthly_aog_by_hr = get_monthly_aog_by_hr(aog_data)
             save_data(monthly_aog_by_hr, "monthly_aog_by_hr.pkl")
             logger.info(f"Saved signal-level monthly AOG by hour: {len(monthly_aog_by_hr)} rows")
@@ -2742,13 +2772,28 @@ def process_hourly_progression_ratio(dates, config_data):
         )
         
         if not aog_data.empty:
-            # Ensure Timeperiod column exists
-            if 'Timeperiod' in aog_data.columns:
-                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Timeperiod'])
+            # Ensure Date column exists
+            if 'Date' not in aog_data.columns and 'date' in aog_data.columns:
+                aog_data['Date'] = pd.to_datetime(aog_data['date'])
             elif 'Date' in aog_data.columns:
-                aog_data['Timeperiod'] = pd.to_datetime(aog_data['Date'])
+                aog_data['Date'] = pd.to_datetime(aog_data['Date'])
             
-            # Create signal-level monthly PR by hour
+            # Extract Hour column from Date_Hour or Timeperiod (required by get_monthly_pr_by_hr)
+            if 'Date_Hour' in aog_data.columns:
+                aog_data['Hour'] = pd.to_datetime(aog_data['Date_Hour']).dt.hour
+            elif 'date_hour' in aog_data.columns:
+                aog_data['Hour'] = pd.to_datetime(aog_data['date_hour']).dt.hour
+            elif 'Timeperiod' in aog_data.columns:
+                # Timeperiod might be datetime or hour integer
+                if pd.api.types.is_datetime64_any_dtype(aog_data['Timeperiod']):
+                    aog_data['Hour'] = pd.to_datetime(aog_data['Timeperiod']).dt.hour
+                else:
+                    aog_data['Hour'] = pd.to_numeric(aog_data['Timeperiod'], errors='coerce')
+            else:
+                logger.warning("No Date_Hour or Timeperiod column found in AOG data for hourly PR aggregation")
+                aog_data['Hour'] = 0  # Default fallback
+            
+            # Create signal-level monthly PR by hour (now Hour column exists)
             monthly_pr_by_hr = get_monthly_pr_by_hr(aog_data)
             save_data(monthly_pr_by_hr, "monthly_pr_by_hr.pkl")
             logger.info(f"Saved signal-level monthly PR by hour: {len(monthly_pr_by_hr)} rows")
@@ -2958,14 +3003,26 @@ def process_daily_split_failures(dates, config_data):
             save_data(monthly_sfo_by_day, "monthly_sfo.pkl")
             logger.info(f"Saved signal-level SFO files: weekly ({len(weekly_sfo_by_day)} rows), monthly ({len(monthly_sfo_by_day)} rows)")
             
-            cor_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['corridors'])
-            cor_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['corridors'])
+            # Fix SignalID type mismatch: ensure both DataFrames have SignalID as string
+            if not weekly_sfo_by_day.empty:
+                weekly_sfo_by_day['SignalID'] = weekly_sfo_by_day['SignalID'].astype(str)
+            if not monthly_sfo_by_day.empty:
+                monthly_sfo_by_day['SignalID'] = monthly_sfo_by_day['SignalID'].astype(str)
             
-            sub_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, config_data['subcorridors'])
+            # Ensure corridors have SignalID as string for merge
+            corridors_str = config_data['corridors'].copy()
+            corridors_str['SignalID'] = corridors_str['SignalID'].astype(str)
+            subcorridors_str = config_data['subcorridors'].copy()
+            subcorridors_str['SignalID'] = subcorridors_str['SignalID'].astype(str)
+            
+            cor_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, corridors_str)
+            cor_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, corridors_str)
+            
+            sub_weekly_sfo_by_day = get_cor_weekly_sf_by_day(weekly_sfo_by_day, subcorridors_str)
             if not sub_weekly_sfo_by_day.empty and 'Corridor' in sub_weekly_sfo_by_day.columns:
                 sub_weekly_sfo_by_day = sub_weekly_sfo_by_day.dropna(subset=['Corridor'])
             
-            sub_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, config_data['subcorridors'])
+            sub_monthly_sfo_by_day = get_cor_monthly_sf_by_day(monthly_sfo_by_day, subcorridors_str)
             if not sub_monthly_sfo_by_day.empty and 'Corridor' in sub_monthly_sfo_by_day.columns:
                 sub_monthly_sfo_by_day = sub_monthly_sfo_by_day.dropna(subset=['Corridor'])
             
@@ -3025,13 +3082,28 @@ def process_hourly_split_failures(dates, config_data):
         )
         
         if not sf_data.empty:
-            # Ensure Timeperiod column exists
-            if 'Timeperiod' in sf_data.columns:
-                sf_data['Timeperiod'] = pd.to_datetime(sf_data['Timeperiod'])
+            # Ensure Date column exists
+            if 'Date' not in sf_data.columns and 'date' in sf_data.columns:
+                sf_data['Date'] = pd.to_datetime(sf_data['date'])
             elif 'Date' in sf_data.columns:
-                sf_data['Timeperiod'] = pd.to_datetime(sf_data['Date'])
+                sf_data['Date'] = pd.to_datetime(sf_data['Date'])
             
-            # Create signal-level monthly SF by hour
+            # Extract Hour column from Date_Hour or Timeperiod (required by get_monthly_sf_by_hr)
+            if 'Date_Hour' in sf_data.columns:
+                sf_data['Hour'] = pd.to_datetime(sf_data['Date_Hour']).dt.hour
+            elif 'date_hour' in sf_data.columns:
+                sf_data['Hour'] = pd.to_datetime(sf_data['date_hour']).dt.hour
+            elif 'Timeperiod' in sf_data.columns:
+                # Timeperiod might be datetime or hour integer
+                if pd.api.types.is_datetime64_any_dtype(sf_data['Timeperiod']):
+                    sf_data['Hour'] = pd.to_datetime(sf_data['Timeperiod']).dt.hour
+                else:
+                    sf_data['Hour'] = pd.to_numeric(sf_data['Timeperiod'], errors='coerce')
+            else:
+                logger.warning("No Date_Hour or Timeperiod column found in SF data for hourly aggregation")
+                sf_data['Hour'] = 0  # Default fallback
+            
+            # Create signal-level monthly SF by hour (now Hour column exists)
             monthly_sf_by_hr = get_monthly_sf_by_hr(sf_data)
             save_data(monthly_sf_by_hr, "msfh.pkl")
             logger.info(f"Saved signal-level monthly SF by hour: {len(monthly_sf_by_hr)} rows")
@@ -3123,14 +3195,25 @@ def process_daily_queue_spillback(dates, config_data):
             save_data(monthly_qs_by_day, "monthly_qsd.pkl")
             logger.info(f"Saved signal-level QS files: weekly ({len(weekly_qs_by_day)} rows), monthly ({len(monthly_qs_by_day)} rows)")
             
-            # Create hourly QS if Timeperiod column exists
-            if 'Timeperiod' in qs_data.columns:
-                qs_data['Timeperiod'] = pd.to_datetime(qs_data['Timeperiod'])
-                monthly_qs_by_hr = get_monthly_qs_by_hr(qs_data)
-                save_data(monthly_qs_by_hr, "mqsh.pkl")
-                logger.info(f"Saved signal-level monthly QS by hour: {len(monthly_qs_by_hr)} rows")
+            # Create hourly QS - extract Hour column from Date_Hour or Timeperiod
+            if 'Date_Hour' in qs_data.columns:
+                qs_data['Hour'] = pd.to_datetime(qs_data['Date_Hour']).dt.hour
+            elif 'date_hour' in qs_data.columns:
+                qs_data['Hour'] = pd.to_datetime(qs_data['date_hour']).dt.hour
+            elif 'Timeperiod' in qs_data.columns:
+                # Timeperiod might be datetime or hour integer
+                if pd.api.types.is_datetime64_any_dtype(qs_data['Timeperiod']):
+                    qs_data['Hour'] = pd.to_datetime(qs_data['Timeperiod']).dt.hour
+                else:
+                    qs_data['Hour'] = pd.to_numeric(qs_data['Timeperiod'], errors='coerce')
             else:
-                save_data(pd.DataFrame(), "mqsh.pkl")
+                logger.warning("No Date_Hour or Timeperiod column found in QS data for hourly aggregation")
+                qs_data['Hour'] = 0  # Default fallback
+            
+            # Create signal-level monthly QS by hour (now Hour column exists)
+            monthly_qs_by_hr = get_monthly_qs_by_hr(qs_data)
+            save_data(monthly_qs_by_hr, "mqsh.pkl")
+            logger.info(f"Saved signal-level monthly QS by hour: {len(monthly_qs_by_hr)} rows")
         else:
             logger.warning("No queue spillback data found - creating empty signal-level files")
             save_data(pd.DataFrame(), "wqs.pkl")
@@ -4295,39 +4378,75 @@ def process_crash_indices(dates, config_data):
                     del monthly_kabco_index
                     gc.collect()
                     
-                    # Calculate corridor indices
+                    # Calculate corridor indices - Fix SignalID type mismatch
                     monthly_crash_rate_index = load_data("monthly_crash_rate_index.pkl")
-                    cor_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
-                        monthly_crash_rate_index, config_data['corridors'], "cri"
-                    )
-                    save_data(cor_monthly_crash_rate_index, "cor_monthly_crash_rate_index.pkl")
-                    del monthly_crash_rate_index, cor_monthly_crash_rate_index
-                    gc.collect()
+                    if not monthly_crash_rate_index.empty:
+                        # Ensure SignalID is string type for merge
+                        monthly_crash_rate_index['SignalID'] = monthly_crash_rate_index['SignalID'].astype(str)
+                        corridors_crash = config_data['corridors'].copy()
+                        corridors_crash['SignalID'] = corridors_crash['SignalID'].astype(str)
+                        cor_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
+                            monthly_crash_rate_index, corridors_crash, "cri"
+                        )
+                        save_data(cor_monthly_crash_rate_index, "cor_monthly_crash_rate_index.pkl")
+                        del monthly_crash_rate_index, cor_monthly_crash_rate_index, corridors_crash
+                        gc.collect()
+                    else:
+                        save_data(pd.DataFrame(), "cor_monthly_crash_rate_index.pkl")
+                        del monthly_crash_rate_index
+                        gc.collect()
                     
                     monthly_kabco_index = load_data("monthly_kabco_index.pkl")
-                    cor_monthly_kabco_index = get_cor_monthly_avg_by_day(
-                        monthly_kabco_index, config_data['corridors'], "kabco"
-                    )
-                    save_data(cor_monthly_kabco_index, "cor_monthly_kabco_index.pkl")
-                    del monthly_kabco_index, cor_monthly_kabco_index
-                    gc.collect()
+                    if not monthly_kabco_index.empty:
+                        # Ensure SignalID is string type for merge
+                        monthly_kabco_index['SignalID'] = monthly_kabco_index['SignalID'].astype(str)
+                        corridors_crash = config_data['corridors'].copy()
+                        corridors_crash['SignalID'] = corridors_crash['SignalID'].astype(str)
+                        cor_monthly_kabco_index = get_cor_monthly_avg_by_day(
+                            monthly_kabco_index, corridors_crash, "kabco"
+                        )
+                        save_data(cor_monthly_kabco_index, "cor_monthly_kabco_index.pkl")
+                        del monthly_kabco_index, cor_monthly_kabco_index, corridors_crash
+                        gc.collect()
+                    else:
+                        save_data(pd.DataFrame(), "cor_monthly_kabco_index.pkl")
+                        del monthly_kabco_index
+                        gc.collect()
                     
-                    # Calculate subcorridor indices
+                    # Calculate subcorridor indices - Fix SignalID type mismatch
                     monthly_crash_rate_index = load_data("monthly_crash_rate_index.pkl")
-                    sub_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
-                        monthly_crash_rate_index, config_data['subcorridors'], "cri"
-                    )
-                    save_data(sub_monthly_crash_rate_index, "sub_monthly_crash_rate_index.pkl")
-                    del monthly_crash_rate_index, sub_monthly_crash_rate_index
-                    gc.collect()
+                    if not monthly_crash_rate_index.empty:
+                        # Ensure SignalID is string type for merge
+                        monthly_crash_rate_index['SignalID'] = monthly_crash_rate_index['SignalID'].astype(str)
+                        subcorridors_crash = config_data['subcorridors'].copy()
+                        subcorridors_crash['SignalID'] = subcorridors_crash['SignalID'].astype(str)
+                        sub_monthly_crash_rate_index = get_cor_monthly_avg_by_day(
+                            monthly_crash_rate_index, subcorridors_crash, "cri"
+                        )
+                        save_data(sub_monthly_crash_rate_index, "sub_monthly_crash_rate_index.pkl")
+                        del monthly_crash_rate_index, sub_monthly_crash_rate_index, subcorridors_crash
+                        gc.collect()
+                    else:
+                        save_data(pd.DataFrame(), "sub_monthly_crash_rate_index.pkl")
+                        del monthly_crash_rate_index
+                        gc.collect()
                     
                     monthly_kabco_index = load_data("monthly_kabco_index.pkl")
-                    sub_monthly_kabco_index = get_cor_monthly_avg_by_day(
-                        monthly_kabco_index, config_data['subcorridors'], "kabco"
-                    )
-                    save_data(sub_monthly_kabco_index, "sub_monthly_kabco_index.pkl")
-                    del monthly_crashes, monthly_kabco_index, sub_monthly_kabco_index
-                    gc.collect()
+                    if not monthly_kabco_index.empty:
+                        # Ensure SignalID is string type for merge
+                        monthly_kabco_index['SignalID'] = monthly_kabco_index['SignalID'].astype(str)
+                        subcorridors_crash = config_data['subcorridors'].copy()
+                        subcorridors_crash['SignalID'] = subcorridors_crash['SignalID'].astype(str)
+                        sub_monthly_kabco_index = get_cor_monthly_avg_by_day(
+                            monthly_kabco_index, subcorridors_crash, "kabco"
+                        )
+                        save_data(sub_monthly_kabco_index, "sub_monthly_kabco_index.pkl")
+                        del monthly_crashes, monthly_kabco_index, sub_monthly_kabco_index, subcorridors_crash
+                        gc.collect()
+                    else:
+                        save_data(pd.DataFrame(), "sub_monthly_kabco_index.pkl")
+                        del monthly_crashes, monthly_kabco_index
+                        gc.collect()
                     
                     log_memory_usage("End crash indices")
                     logger.info("Crash indices processing completed successfully")

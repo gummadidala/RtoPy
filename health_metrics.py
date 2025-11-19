@@ -18,6 +18,19 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Try to import Athena helpers for cloud processing
+try:
+    from health_metrics_athena import (
+        athena_get_summary_data,
+        athena_get_corridor_health_aggregation,
+        athena_merge_with_corridors
+    )
+    USE_ATHENA = True
+    logger.info("Athena optimization helpers loaded - cloud processing available")
+except ImportError:
+    USE_ATHENA = False
+    logger.debug("Athena helpers not available, using local processing only")
+
 # Load configuration
 def load_health_config() -> Dict[str, Any]:
     """Load health metrics configuration from YAML"""
@@ -34,7 +47,8 @@ health_conf = load_health_config()
 scoring_lookup = pd.DataFrame(health_conf.get('scoring_lookup', {}))
 weights_lookup = pd.DataFrame(health_conf.get('weights_lookup', {}))
 
-def get_summary_data(df: Dict[str, Dict[str, pd.DataFrame]], current_month: Optional[str] = None) -> pd.DataFrame:
+def get_summary_data(df: Dict[str, Dict[str, pd.DataFrame]], current_month: Optional[str] = None, 
+                     conf: Optional[dict] = None) -> pd.DataFrame:
     """
     Converts sub or cor data set to a single data frame for the current_month
     for use in get_subcorridor_summary_table function
@@ -48,112 +62,219 @@ def get_summary_data(df: Dict[str, Dict[str, pd.DataFrame]], current_month: Opti
     """
     
     try:
+        # Try Athena first if available and conf provided
+        if USE_ATHENA and conf is not None:
+            try:
+                # Check if df contains table names (strings) instead of DataFrames
+                # This indicates data is in Athena tables
+                sample_value = next(iter(df.get('mo', {}).values()), None)
+                if isinstance(sample_value, str):
+                    logger.info("Using Athena for summary data aggregation (table names detected)")
+                    return athena_get_summary_data(df, conf, current_month)
+                # If DataFrames are provided but conf is available, we could still use Athena
+                # by checking if data is too large. For now, fall through to local processing.
+            except Exception as e:
+                logger.warning(f"Athena aggregation failed, falling back to local processing: {e}")
+        
+        # Local processing (original implementation)
         # Extract monthly data and rename columns
         data_list = []
         
         # Maintenance metrics
-        if 'du' in df['mo']:
-            du_data = df['mo']['du'].rename(columns={'uptime': 'du', 'delta': 'du_delta'})
-            data_list.append(du_data[['Zone_Group', 'Corridor', 'Month', 'du', 'du_delta']])
+        if 'du' in df['mo'] and not df['mo']['du'].empty:
+            du_data = df['mo']['du'].copy()
+            if 'uptime' in du_data.columns:
+                du_data = du_data.rename(columns={'uptime': 'du'})
+            if 'delta' in du_data.columns:
+                du_data = du_data.rename(columns={'delta': 'du_delta'})
+            # Only select columns that exist
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'du', 'du_delta'] if c in du_data.columns]
+            if select_cols:
+                data_list.append(du_data[select_cols])
         
-        if 'pau' in df['mo']:
-            pau_data = df['mo']['pau'].rename(columns={'uptime': 'pau', 'delta': 'pau_delta'})
-            data_list.append(pau_data[['Zone_Group', 'Corridor', 'Month', 'pau', 'pau_delta']])
+        if 'pau' in df['mo'] and not df['mo']['pau'].empty:
+            pau_data = df['mo']['pau'].copy()
+            if 'uptime' in pau_data.columns:
+                pau_data = pau_data.rename(columns={'uptime': 'pau'})
+            if 'delta' in pau_data.columns:
+                pau_data = pau_data.rename(columns={'delta': 'pau_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'pau', 'pau_delta'] if c in pau_data.columns]
+            if select_cols:
+                data_list.append(pau_data[select_cols])
         
-        if 'cctv' in df['mo']:
-            cctv_data = df['mo']['cctv'].rename(columns={'uptime': 'cctv', 'delta': 'cctv_delta'})
-            data_list.append(cctv_data[['Zone_Group', 'Corridor', 'Month', 'cctv', 'cctv_delta']])
+        if 'cctv' in df['mo'] and not df['mo']['cctv'].empty:
+            cctv_data = df['mo']['cctv'].copy()
+            if 'uptime' in cctv_data.columns:
+                cctv_data = cctv_data.rename(columns={'uptime': 'cctv'})
+            if 'delta' in cctv_data.columns:
+                cctv_data = cctv_data.rename(columns={'delta': 'cctv_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'cctv', 'cctv_delta'] if c in cctv_data.columns]
+            if select_cols:
+                data_list.append(cctv_data[select_cols])
         
-        if 'cu' in df['mo']:
-            cu_data = df['mo']['cu'].rename(columns={'uptime': 'cu', 'delta': 'cu_delta'})
-            data_list.append(cu_data[['Zone_Group', 'Corridor', 'Month', 'cu', 'cu_delta']])
+        if 'cu' in df['mo'] and not df['mo']['cu'].empty:
+            cu_data = df['mo']['cu'].copy()
+            if 'uptime' in cu_data.columns:
+                cu_data = cu_data.rename(columns={'uptime': 'cu'})
+            if 'delta' in cu_data.columns:
+                cu_data = cu_data.rename(columns={'delta': 'cu_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'cu', 'cu_delta'] if c in cu_data.columns]
+            if select_cols:
+                data_list.append(cu_data[select_cols])
         
         # Operations metrics
-        if 'tp' in df['mo']:
-            tp_data = df['mo']['tp'].rename(columns={'delta': 'tp_delta'})
-            data_list.append(tp_data[['Zone_Group', 'Corridor', 'Month', 'tp_delta']])
+        if 'tp' in df['mo'] and not df['mo']['tp'].empty:
+            tp_data = df['mo']['tp'].copy()
+            if 'delta' in tp_data.columns:
+                tp_data = tp_data.rename(columns={'delta': 'tp_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'tp_delta'] if c in tp_data.columns]
+            if select_cols:
+                data_list.append(tp_data[select_cols])
         
-        if 'aogd' in df['mo']:
-            aog_data = df['mo']['aogd'].rename(columns={'delta': 'aog_delta'})
-            data_list.append(aog_data[['Zone_Group', 'Corridor', 'Month', 'aog_delta']])
+        if 'aogd' in df['mo'] and not df['mo']['aogd'].empty:
+            aog_data = df['mo']['aogd'].copy()
+            if 'delta' in aog_data.columns:
+                aog_data = aog_data.rename(columns={'delta': 'aog_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'aog_delta'] if c in aog_data.columns]
+            if select_cols:
+                data_list.append(aog_data[select_cols])
         
-        if 'prd' in df['mo']:
-            pr_data = df['mo']['prd'].rename(columns={'delta': 'pr_delta'})
-            data_list.append(pr_data[['Zone_Group', 'Corridor', 'Month', 'pr_delta']])
+        if 'prd' in df['mo'] and not df['mo']['prd'].empty:
+            pr_data = df['mo']['prd'].copy()
+            if 'delta' in pr_data.columns:
+                pr_data = pr_data.rename(columns={'delta': 'pr_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'pr_delta'] if c in pr_data.columns]
+            if select_cols:
+                data_list.append(pr_data[select_cols])
         
-        if 'qsd' in df['mo']:
-            qs_data = df['mo']['qsd'].rename(columns={'delta': 'qs_delta'})
-            data_list.append(qs_data[['Zone_Group', 'Corridor', 'Month', 'qs_delta']])
+        if 'qsd' in df['mo'] and not df['mo']['qsd'].empty:
+            qs_data = df['mo']['qsd'].copy()
+            if 'delta' in qs_data.columns:
+                qs_data = qs_data.rename(columns={'delta': 'qs_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'qs_delta'] if c in qs_data.columns]
+            if select_cols:
+                data_list.append(qs_data[select_cols])
         
-        if 'sfd' in df['mo']:
-            sf_data = df['mo']['sfd'].rename(columns={'delta': 'sf_delta'})
-            data_list.append(sf_data[['Zone_Group', 'Corridor', 'Month', 'sf_delta']])
+        if 'sfd' in df['mo'] and not df['mo']['sfd'].empty:
+            sf_data = df['mo']['sfd'].copy()
+            if 'delta' in sf_data.columns:
+                sf_data = sf_data.rename(columns={'delta': 'sf_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'sf_delta'] if c in sf_data.columns]
+            if select_cols:
+                data_list.append(sf_data[select_cols])
         
-        if 'pd' in df['mo']:
+        if 'pd' in df['mo'] and not df['mo']['pd'].empty:
             pd_data = df['mo']['pd'].copy()
             if 'delta' in pd_data.columns:
                 pd_data = pd_data.rename(columns={'delta': 'pd_delta'})
-            data_list.append(pd_data[['Zone_Group', 'Corridor', 'Month', 'pd', 'pd_delta']])
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'pd', 'pd_delta'] if c in pd_data.columns]
+            if select_cols:
+                data_list.append(pd_data[select_cols])
         
-        if 'flash' in df['mo']:
-            flash_data = df['mo']['flash'].rename(columns={'flash': 'flash_events', 'delta': 'flash_delta'})
-            data_list.append(flash_data[['Zone_Group', 'Corridor', 'Month', 'flash_events', 'flash_delta']])
+        if 'flash' in df['mo'] and not df['mo']['flash'].empty:
+            flash_data = df['mo']['flash'].copy()
+            if 'flash' in flash_data.columns:
+                flash_data = flash_data.rename(columns={'flash': 'flash_events'})
+            if 'delta' in flash_data.columns:
+                flash_data = flash_data.rename(columns={'delta': 'flash_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'flash_events', 'flash_delta'] if c in flash_data.columns]
+            if select_cols:
+                data_list.append(flash_data[select_cols])
         
         # Travel time metrics
         if 'tti' in df['mo'] and not df['mo']['tti'].empty:
-            tti_data = df['mo']['tti'].rename(columns={'delta': 'tti_delta'})
-            data_list.append(tti_data[['Zone_Group', 'Corridor', 'Month', 'tti', 'tti_delta']])
-        else:
-            # Create empty tti data for signals
-            empty_tti = pd.DataFrame(columns=['Zone_Group', 'Corridor', 'Month', 'tti', 'tti_delta'])
-            data_list.append(empty_tti)
+            tti_data = df['mo']['tti'].copy()
+            if 'delta' in tti_data.columns:
+                tti_data = tti_data.rename(columns={'delta': 'tti_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'tti', 'tti_delta'] if c in tti_data.columns]
+            if select_cols:
+                data_list.append(tti_data[select_cols])
         
         if 'pti' in df['mo'] and not df['mo']['pti'].empty:
-            pti_data = df['mo']['pti'].rename(columns={'delta': 'pti_delta'})
-            data_list.append(pti_data[['Zone_Group', 'Corridor', 'Month', 'pti', 'pti_delta']])
-        else:
-            # Create empty pti data for signals
-            empty_pti = pd.DataFrame(columns=['Zone_Group', 'Corridor', 'Month', 'pti', 'pti_delta'])
-            data_list.append(empty_pti)
+            pti_data = df['mo']['pti'].copy()
+            if 'delta' in pti_data.columns:
+                pti_data = pti_data.rename(columns={'delta': 'pti_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'pti', 'pti_delta'] if c in pti_data.columns]
+            if select_cols:
+                data_list.append(pti_data[select_cols])
         
         # Safety metrics
-        if 'kabco' in df['mo']:
-            kabco_data = df['mo']['kabco'].rename(columns={'delta': 'kabco_delta'})
-            data_list.append(kabco_data[['Zone_Group', 'Corridor', 'Month', 'kabco', 'kabco_delta']])
+        if 'kabco' in df['mo'] and not df['mo']['kabco'].empty:
+            kabco_data = df['mo']['kabco'].copy()
+            if 'delta' in kabco_data.columns:
+                kabco_data = kabco_data.rename(columns={'delta': 'kabco_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'kabco', 'kabco_delta'] if c in kabco_data.columns]
+            if select_cols:
+                data_list.append(kabco_data[select_cols])
         
-        if 'cri' in df['mo']:
-            cri_data = df['mo']['cri'].rename(columns={'delta': 'cri_delta'})
-            data_list.append(cri_data[['Zone_Group', 'Corridor', 'Month', 'cri', 'cri_delta']])
+        if 'cri' in df['mo'] and not df['mo']['cri'].empty:
+            cri_data = df['mo']['cri'].copy()
+            if 'delta' in cri_data.columns:
+                cri_data = cri_data.rename(columns={'delta': 'cri_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'cri', 'cri_delta'] if c in cri_data.columns]
+            if select_cols:
+                data_list.append(cri_data[select_cols])
         
-        if 'rsi' in df['mo']:
-            rsi_data = df['mo']['rsi'].rename(columns={'delta': 'rsi_delta'})
-            data_list.append(rsi_data[['Zone_Group', 'Corridor', 'Month', 'rsi', 'rsi_delta']])
-        else:
-            empty_rsi = pd.DataFrame(columns=['Zone_Group', 'Corridor', 'Month', 'rsi', 'rsi_delta'])
-            data_list.append(empty_rsi)
+        if 'rsi' in df['mo'] and not df['mo']['rsi'].empty:
+            rsi_data = df['mo']['rsi'].copy()
+            if 'delta' in rsi_data.columns:
+                rsi_data = rsi_data.rename(columns={'delta': 'rsi_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'rsi', 'rsi_delta'] if c in rsi_data.columns]
+            if select_cols:
+                data_list.append(rsi_data[select_cols])
         
-        if 'bpsi' in df['mo']:
-            bpsi_data = df['mo']['bpsi'].rename(columns={'delta': 'bpsi_delta'})
-            data_list.append(bpsi_data[['Zone_Group', 'Corridor', 'Month', 'bpsi', 'bpsi_delta']])
-        else:
-            empty_bpsi = pd.DataFrame(columns=['Zone_Group', 'Corridor', 'Month', 'bpsi', 'bpsi_delta'])
-            data_list.append(empty_bpsi)
+        if 'bpsi' in df['mo'] and not df['mo']['bpsi'].empty:
+            bpsi_data = df['mo']['bpsi'].copy()
+            if 'delta' in bpsi_data.columns:
+                bpsi_data = bpsi_data.rename(columns={'delta': 'bpsi_delta'})
+            select_cols = [c for c in ['Zone_Group', 'Corridor', 'Month', 'bpsi', 'bpsi_delta'] if c in bpsi_data.columns]
+            if select_cols:
+                data_list.append(bpsi_data[select_cols])
         
-        # Merge all data
+        # Merge all data - use a more memory-efficient approach
         if data_list:
+            # Filter out empty dataframes
+            data_list = [d for d in data_list if not d.empty]
+            
+            if not data_list:
+                return pd.DataFrame()
+            
             # Start with first dataframe
-            result = data_list[0]
+            result = data_list[0].copy()
+            
+            # Merge remaining dataframes one at a time
+            # Use inner join to reduce memory usage, or limit to essential columns
+            merge_keys = ['Zone_Group', 'Corridor', 'Month']
+            # Verify merge keys exist in all dataframes
+            valid_keys = [key for key in merge_keys if all(key in df.columns for df in data_list)]
+            
+            if not valid_keys:
+                # If no common keys, just concatenate (this shouldn't happen normally)
+                logger.warning("No common merge keys found, returning first dataframe")
+                return result
             
             # Merge remaining dataframes
             for data in data_list[1:]:
-                if not data.empty:
-                    result = pd.merge(result, data, on=['Zone_Group', 'Corridor', 'Month'], how='outer')
+                if not data.empty and all(key in data.columns for key in valid_keys):
+                    try:
+                        # Select only essential columns to reduce memory
+                        data_cols = valid_keys + [col for col in data.columns if col not in valid_keys and col not in result.columns]
+                        data_subset = data[data_cols] if len(data_cols) <= 20 else data[valid_keys + list(data.columns.difference(valid_keys))[:10]]
+                        result = pd.merge(result, data_subset, on=valid_keys, how='outer', suffixes=('', '_dup'))
+                        # Drop duplicate columns
+                        dup_cols = [col for col in result.columns if col.endswith('_dup')]
+                        if dup_cols:
+                            result = result.drop(columns=dup_cols)
+                    except MemoryError:
+                        logger.error(f"Memory error during merge, returning partial result")
+                        break
         else:
             result = pd.DataFrame()
         
         if not result.empty:
-            # Filter out rows where Zone_Group == Corridor
-            result = result[result['Zone_Group'].astype(str) != result['Corridor'].astype(str)]
+            # Filter out rows where Zone_Group == Corridor (if both columns exist)
+            if 'Zone_Group' in result.columns and 'Corridor' in result.columns:
+                result = result[result['Zone_Group'].astype(str) != result['Corridor'].astype(str)]
             
             # Remove unwanted columns
             columns_to_drop = [col for col in result.columns if any(pattern in col for pattern in [
@@ -377,35 +498,91 @@ def get_percent_health_subtotals(df: pd.DataFrame) -> pd.DataFrame:
     """
     
     try:
+        if df.empty or 'Percent_Health' not in df.columns:
+            return df
+        
+        # Check which columns exist - handle both 'Zone Group' (with space) and 'Zone_Group' (with underscore)
+        zone_group_col = None
+        for col in ['Zone Group', 'Zone_Group']:
+            if col in df.columns:
+                zone_group_col = col
+                break
+        
+        # Build groupby columns based on what exists
+        corridor_groupby = []
+        if zone_group_col:
+            corridor_groupby.append(zone_group_col)
+        if 'Zone' in df.columns:
+            corridor_groupby.append('Zone')
+        if 'Corridor' in df.columns:
+            corridor_groupby.append('Corridor')
+        if 'Month' in df.columns:
+            corridor_groupby.append('Month')
+        
+        if not corridor_groupby:
+            return df
+        
         # Corridor subtotals
-        corridor_subtotals = df.groupby(['Zone_Group', 'Zone', 'Corridor', 'Month']).agg({
+        corridor_subtotals = df.groupby(corridor_groupby).agg({
             'Percent_Health': 'mean'
         }).reset_index()
         
-        # Zone subtotals
-        zone_subtotals = corridor_subtotals.groupby(['Zone_Group', 'Zone', 'Month']).agg({
-            'Percent_Health': 'mean'
-        }).reset_index()
+        # Zone subtotals (if Zone column exists)
+        if 'Zone' in corridor_subtotals.columns:
+            zone_groupby = [col for col in corridor_groupby if col != 'Corridor']
+            if zone_groupby:
+                zone_subtotals = corridor_subtotals.groupby(zone_groupby).agg({
+                    'Percent_Health': 'mean'
+                }).reset_index()
+            else:
+                zone_subtotals = pd.DataFrame()
+        else:
+            zone_subtotals = pd.DataFrame()
         
         # Combine all data
-        combined = pd.concat([df, corridor_subtotals, zone_subtotals], ignore_index=True)
+        dataframes_to_concat = [df, corridor_subtotals]
+        if not zone_subtotals.empty:
+            dataframes_to_concat.append(zone_subtotals)
+        combined = pd.concat(dataframes_to_concat, ignore_index=True)
         
-        # Fill missing values
-        combined = combined.groupby('Zone').apply(lambda x: x.fillna(method='ffill')).reset_index(drop=True)
-        combined = combined.groupby('Corridor').apply(lambda x: x.fillna(method='ffill')).reset_index(drop=True)
+        # Fill missing values (only if columns exist)
+        if 'Zone' in combined.columns:
+            combined = combined.groupby('Zone').apply(lambda x: x.fillna(method='ffill')).reset_index(drop=True)
+        if 'Corridor' in combined.columns:
+            combined = combined.groupby('Corridor').apply(lambda x: x.fillna(method='ffill')).reset_index(drop=True)
         
         # Convert to factors and arrange
-        combined['Zone_Group'] = pd.Categorical(combined['Zone_Group'])
-        combined['Zone'] = pd.Categorical(combined['Zone'])
+        if zone_group_col and zone_group_col in combined.columns:
+            combined[zone_group_col] = pd.Categorical(combined[zone_group_col])
+        if 'Zone' in combined.columns:
+            combined['Zone'] = pd.Categorical(combined['Zone'])
         
-        combined = combined.sort_values(['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month'])
+        # Build sort columns
+        sort_cols = []
+        if zone_group_col and zone_group_col in combined.columns:
+            sort_cols.append(zone_group_col)
+        if 'Zone' in combined.columns:
+            sort_cols.append('Zone')
+        if 'Corridor' in combined.columns:
+            sort_cols.append('Corridor')
+        if 'Subcorridor' in combined.columns:
+            sort_cols.append('Subcorridor')
+        if 'Month' in combined.columns:
+            sort_cols.append('Month')
+        
+        if sort_cols:
+            combined = combined.sort_values(sort_cols)
         
         # Fill Corridor and Subcorridor
-        combined['Corridor'] = combined['Corridor'].fillna(combined['Zone'])
-        combined['Subcorridor'] = combined['Subcorridor'].fillna(combined['Corridor'])
+        if 'Corridor' in combined.columns and 'Zone' in combined.columns:
+            combined['Corridor'] = combined['Corridor'].fillna(combined['Zone'])
+        if 'Subcorridor' in combined.columns and 'Corridor' in combined.columns:
+            combined['Subcorridor'] = combined['Subcorridor'].fillna(combined['Corridor'])
         
-        combined['Corridor'] = pd.Categorical(combined['Corridor'])
-        combined['Subcorridor'] = pd.Categorical(combined['Subcorridor'])
+        if 'Corridor' in combined.columns:
+            combined['Corridor'] = pd.Categorical(combined['Corridor'])
+        if 'Subcorridor' in combined.columns:
+            combined['Subcorridor'] = pd.Categorical(combined['Subcorridor'])
         
         return combined
         
@@ -426,13 +603,26 @@ def get_health_maintenance(df: pd.DataFrame) -> pd.DataFrame:
     """
     
     try:
+        if df.empty:
+            return pd.DataFrame()
+        
         # Select maintenance-related columns
         maintenance_cols = [col for col in df.columns if any(metric in col for metric in [
             'Detection', 'Ped_Act', 'Comm', 'CCTV', 'Flash_Events'
         ])]
         
+        # Only select base columns that exist in the DataFrame
         base_cols = ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month', 'Context', 'Context_Category']
-        health = df[base_cols + maintenance_cols].copy()
+        available_base_cols = [col for col in base_cols if col in df.columns]
+        
+        # If no base columns exist, return empty DataFrame
+        if not available_base_cols:
+            logger.warning("No required base columns found in health data")
+            return pd.DataFrame()
+        
+        # Select only columns that exist
+        all_cols = available_base_cols + maintenance_cols
+        health = df[all_cols].copy()
         
         # Get score and weight columns
         score_cols = [col for col in health.columns if col.endswith('_Score')]
@@ -453,11 +643,16 @@ def get_health_maintenance(df: pd.DataFrame) -> pd.DataFrame:
         health['Percent_Health'] = weighted_sum / weight_sum / 10
         health['Missing_Data'] = 1 - weight_sum / 100
         
-        # Group by and calculate means
-        health = health.groupby(['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month']).agg({
+        # Group by and calculate means - only use columns that exist
+        groupby_cols = [col for col in ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month'] if col in health.columns]
+        if not groupby_cols:
+            logger.warning("No groupby columns available for health maintenance")
+            return pd.DataFrame()
+        
+        health = health.groupby(groupby_cols).agg({
             'Percent_Health': 'mean',
             'Missing_Data': 'mean',
-            **{col: 'first' for col in health.columns if col not in ['Percent_Health', 'Missing_Data']}
+            **{col: 'first' for col in health.columns if col not in ['Percent_Health', 'Missing_Data'] + groupby_cols}
         }).reset_index()
         
         # Add subtotals
@@ -508,13 +703,26 @@ def get_health_operations(df: pd.DataFrame) -> pd.DataFrame:
     """
     
     try:
+        if df.empty:
+            return pd.DataFrame()
+        
         # Select operations-related columns
         operations_cols = [col for col in df.columns if any(metric in col for metric in [
             'Platoon_Ratio', 'Ped_Delay', 'Split_Failures', 'TTI', 'BI'
         ])]
         
+        # Only select base columns that exist in the DataFrame
         base_cols = ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month', 'Context', 'Context_Category']
-        health = df[base_cols + operations_cols].copy()
+        available_base_cols = [col for col in base_cols if col in df.columns]
+        
+        # If no base columns exist, return empty DataFrame
+        if not available_base_cols:
+            logger.warning("No required base columns found in health data")
+            return pd.DataFrame()
+        
+        # Select only columns that exist
+        all_cols = available_base_cols + operations_cols
+        health = df[all_cols].copy()
         
         # Get score and weight columns
         score_cols = [col for col in health.columns if col.endswith('_Score')]
@@ -535,11 +743,16 @@ def get_health_operations(df: pd.DataFrame) -> pd.DataFrame:
         health['Percent_Health'] = weighted_sum / weight_sum / 10
         health['Missing_Data'] = 1 - weight_sum / 100
         
-        # Group by and calculate means
-        health = health.groupby(['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month']).agg({
+        # Group by and calculate means - only use columns that exist
+        groupby_cols = [col for col in ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month'] if col in health.columns]
+        if not groupby_cols:
+            logger.warning("No groupby columns available for health operations")
+            return pd.DataFrame()
+        
+        health = health.groupby(groupby_cols).agg({
             'Percent_Health': 'mean',
             'Missing_Data': 'mean',
-            **{col: 'first' for col in health.columns if col not in ['Percent_Health', 'Missing_Data']}
+            **{col: 'first' for col in health.columns if col not in ['Percent_Health', 'Missing_Data'] + groupby_cols}
         }).reset_index()
         
         # Add subtotals
@@ -590,13 +803,26 @@ def get_health_safety(df: pd.DataFrame) -> pd.DataFrame:
     """
     
     try:
+        if df.empty:
+            return pd.DataFrame()
+        
         # Select safety-related columns
         safety_cols = [col for col in df.columns if any(metric in col for metric in [
             'Crash_Rate', 'KABCO', 'High_Speed', 'Ped_Injury'
         ])]
         
+        # Only select base columns that exist in the DataFrame
         base_cols = ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month', 'Context', 'Context_Category']
-        health = df[base_cols + safety_cols].copy()
+        available_base_cols = [col for col in base_cols if col in df.columns]
+        
+        # If no base columns exist, return empty DataFrame
+        if not available_base_cols:
+            logger.warning("No required base columns found in health data")
+            return pd.DataFrame()
+        
+        # Select only columns that exist
+        all_cols = available_base_cols + safety_cols
+        health = df[all_cols].copy()
         
         # Get score and weight columns
         score_cols = [col for col in health.columns if col.endswith('_Score')]
@@ -617,11 +843,16 @@ def get_health_safety(df: pd.DataFrame) -> pd.DataFrame:
         health['Percent_Health'] = weighted_sum / weight_sum / 10
         health['Missing_Data'] = 1 - weight_sum / 100
         
-        # Group by and calculate means
-        health = health.groupby(['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month']).agg({
+        # Group by and calculate means - only use columns that exist
+        groupby_cols = [col for col in ['Zone_Group', 'Zone', 'Corridor', 'Subcorridor', 'Month'] if col in health.columns]
+        if not groupby_cols:
+            logger.warning("No groupby columns available for health safety")
+            return pd.DataFrame()
+        
+        health = health.groupby(groupby_cols).agg({
             'Percent_Health': 'mean',
             'Missing_Data': 'mean',
-            **{col: 'first' for col in health.columns if col not in ['Percent_Health', 'Missing_Data']}
+            **{col: 'first' for col in health.columns if col not in ['Percent_Health', 'Missing_Data'] + groupby_cols}
         }).reset_index()
         
         # Add subtotals
@@ -670,27 +901,48 @@ def get_health_metrics_plot_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     
     try:
+        if df.empty:
+            return pd.DataFrame()
+        
         plot_df = df.copy()
         
+        # Handle both 'Zone Group' (with space) and 'Zone_Group' (with underscore)
+        zone_group_col = None
+        for col in ['Zone Group', 'Zone_Group']:
+            if col in plot_df.columns:
+                zone_group_col = col
+                break
+        
         # Rename columns for subcorridor plotting
-        if 'Zone Group' in plot_df.columns and 'Corridor' in plot_df.columns:
+        if zone_group_col and 'Corridor' in plot_df.columns and 'Subcorridor' in plot_df.columns:
             plot_df = plot_df.rename(columns={
-                'Zone Group': 'Zone_Group',
+                zone_group_col: 'Zone_Group',
                 'Corridor': 'Zone_Group_New',
                 'Subcorridor': 'Corridor'
             })
             plot_df['Zone_Group'] = plot_df['Zone_Group_New']
-            plot_df = plot_df.drop('Zone_Group_New', axis=1)
+            plot_df = plot_df.drop('Zone_Group_New', axis=1, errors='ignore')
+        elif zone_group_col and zone_group_col != 'Zone_Group':
+            # Just rename to Zone_Group if needed
+            plot_df = plot_df.rename(columns={zone_group_col: 'Zone_Group'})
         
         # Remove Zone Group and Zone columns if they exist
         plot_df = plot_df.drop(['Zone'], axis=1, errors='ignore')
+        
+        # Check required columns exist before processing
+        if 'Zone_Group' not in plot_df.columns or 'Corridor' not in plot_df.columns:
+            logger.warning("Required columns (Zone_Group, Corridor) not found for plotting")
+            return df
         
         # Convert to categorical
         plot_df['Zone_Group'] = pd.Categorical(plot_df['Zone_Group'])
         plot_df['Corridor'] = pd.Categorical(plot_df['Corridor'])
         
-        # Sort data
-        plot_df = plot_df.sort_values(['Zone_Group', 'Corridor', 'Month'])
+        # Sort data - only use columns that exist
+        sort_cols = ['Zone_Group', 'Corridor']
+        if 'Month' in plot_df.columns:
+            sort_cols.append('Month')
+        plot_df = plot_df.sort_values(sort_cols)
         
         return plot_df
         
@@ -711,19 +963,42 @@ def get_cor_health_metrics_plot_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     
     try:
+        if df.empty:
+            return pd.DataFrame()
+        
         plot_df = df.copy()
         
-        # Remove Zone Group column and rename Zone to Zone_Group
+        # Handle both 'Zone Group' (with space) and 'Zone_Group' (with underscore)
+        zone_group_col = None
+        for col in ['Zone Group', 'Zone_Group']:
+            if col in plot_df.columns:
+                zone_group_col = col
+                break
+        
+        # Remove Zone Group column if it exists (with space)
         plot_df = plot_df.drop(['Zone Group'], axis=1, errors='ignore')
-        if 'Zone' in plot_df.columns:
+        
+        # Rename Zone to Zone_Group if Zone exists and Zone_Group doesn't
+        if 'Zone' in plot_df.columns and 'Zone_Group' not in plot_df.columns:
             plot_df = plot_df.rename(columns={'Zone': 'Zone_Group'})
+        elif zone_group_col and zone_group_col != 'Zone_Group':
+            # Rename the existing zone group column to Zone_Group
+            plot_df = plot_df.rename(columns={zone_group_col: 'Zone_Group'})
+        
+        # Check required columns exist before processing
+        if 'Zone_Group' not in plot_df.columns or 'Corridor' not in plot_df.columns:
+            logger.warning("Required columns (Zone_Group, Corridor) not found for corridor plotting")
+            return df
         
         # Convert to categorical
         plot_df['Zone_Group'] = pd.Categorical(plot_df['Zone_Group'])
         plot_df['Corridor'] = pd.Categorical(plot_df['Corridor'])
         
-        # Sort data
-        plot_df = plot_df.sort_values(['Zone_Group', 'Corridor', 'Month'])
+        # Sort data - only use columns that exist
+        sort_cols = ['Zone_Group', 'Corridor']
+        if 'Month' in plot_df.columns:
+            sort_cols.append('Month')
+        plot_df = plot_df.sort_values(sort_cols)
         
         return plot_df
         
@@ -745,18 +1020,53 @@ def add_subcorridor(df: pd.DataFrame, corridors: pd.DataFrame) -> pd.DataFrame:
     """
     
     try:
-        # Rename SignalID column
-        signal_df = df.rename(columns={'Subcorridor': 'SignalID'})
+        if df.empty or corridors.empty:
+            return df
+        
+        # Check if required columns exist in corridors
+        required_corridor_cols = ['Zone', 'Corridor', 'Subcorridor', 'SignalID']
+        available_corridor_cols = [col for col in required_corridor_cols if col in corridors.columns]
+        
+        if not available_corridor_cols or 'SignalID' not in available_corridor_cols:
+            logger.warning("Required columns not found in corridors DataFrame")
+            return df
+        
+        # Find the column to rename to SignalID
+        # Could be 'Subcorridor', 'SignalID', or another identifier
+        signal_id_col = None
+        for col in ['Subcorridor', 'SignalID', 'Signal', 'CameraID']:
+            if col in df.columns:
+                signal_id_col = col
+                break
+        
+        if not signal_id_col:
+            logger.warning("No signal identifier column found in DataFrame")
+            return df
+        
+        # Rename the identifier column to SignalID for merging
+        signal_df = df.copy()
+        if signal_id_col != 'SignalID':
+            signal_df = signal_df.rename(columns={signal_id_col: 'SignalID'})
+        
+        # Check merge keys exist
+        merge_keys = []
+        for key in ['Zone', 'Corridor', 'SignalID']:
+            if key in signal_df.columns and key in corridors.columns:
+                merge_keys.append(key)
+        
+        if not merge_keys:
+            logger.warning("No common merge keys found between signal data and corridors")
+            return df
         
         # Merge with corridors data
         result = pd.merge(
             signal_df,
-            corridors[['Zone', 'Corridor', 'Subcorridor', 'SignalID']],
-            on=['Zone', 'Corridor', 'SignalID'],
+            corridors[available_corridor_cols],
+            on=merge_keys,
             how='left'
         )
         
-        # Reorder columns to put Subcorridor after Corridor
+        # Reorder columns to put Subcorridor after Corridor if it exists
         cols = result.columns.tolist()
         if 'Subcorridor' in cols and 'Corridor' in cols:
             corridor_idx = cols.index('Corridor')
@@ -764,8 +1074,9 @@ def add_subcorridor(df: pd.DataFrame, corridors: pd.DataFrame) -> pd.DataFrame:
             cols.insert(corridor_idx + 1, 'Subcorridor')
             result = result[cols]
         
-        # Filter out rows with missing subcorridor
-        result = result.dropna(subset=['Subcorridor'])
+        # Filter out rows with missing subcorridor (only if Subcorridor column exists)
+        if 'Subcorridor' in result.columns:
+            result = result.dropna(subset=['Subcorridor'])
         
         return result
         
@@ -794,7 +1105,7 @@ def load_corridor_groupings() -> pd.DataFrame:
 
 
 def process_health_metrics(sub_data: Dict, sig_data: Dict, cam_config: pd.DataFrame, 
-                         corridors: pd.DataFrame) -> Dict[str, Dict[str, pd.DataFrame]]:
+                         corridors: pd.DataFrame, conf: Optional[dict] = None) -> Dict[str, Dict[str, pd.DataFrame]]:
     """
     Main function to process all health metrics
     
@@ -814,94 +1125,138 @@ def process_health_metrics(sub_data: Dict, sig_data: Dict, cam_config: pd.DataFr
         # Load corridor groupings
         corridor_groupings = load_corridor_groupings()
         
-        # Get summary data
-        csd = get_summary_data(sub_data)
-        ssd = get_summary_data(sig_data)
+        # Get summary data (will use Athena if conf provided and data is in tables)
+        csd = get_summary_data(sub_data, conf=conf)
+        ssd = get_summary_data(sig_data, conf=conf)
         
         # Process signal summary data
         if not ssd.empty and not cam_config.empty:
-            # Merge with camera config to get SignalID for CameraID
-            ssd = pd.merge(
-                ssd,
-                cam_config[['SignalID', 'CameraID']],
-                left_on='Corridor',
-                right_on='CameraID',
-                how='left'
-            )
-            
-            # Use SignalID where available, otherwise keep original Corridor
-            ssd['Corridor'] = ssd['SignalID'].fillna(ssd['Corridor'])
-            ssd = ssd.drop('SignalID', axis=1)
+            # Check if required columns exist
+            if 'SignalID' in cam_config.columns and 'CameraID' in cam_config.columns and 'Corridor' in ssd.columns:
+                # Merge with camera config to get SignalID for CameraID
+                ssd = pd.merge(
+                    ssd,
+                    cam_config[['SignalID', 'CameraID']],
+                    left_on='Corridor',
+                    right_on='CameraID',
+                    how='left'
+                )
+                
+                # Use SignalID where available, otherwise keep original Corridor
+                if 'SignalID' in ssd.columns:
+                    ssd['Corridor'] = ssd['SignalID'].fillna(ssd['Corridor'])
+                    ssd = ssd.drop('SignalID', axis=1)
             
             # Filter out camera-only entries
-            ssd = ssd[~ssd['Corridor'].astype(str).str.contains('CAM', na=False)]
+            if 'Corridor' in ssd.columns:
+                ssd = ssd[~ssd['Corridor'].astype(str).str.contains('CAM', na=False)]
             
-            # Group by and fill missing values
-            ssd = ssd.groupby(['Corridor', 'Zone_Group', 'Month']).apply(
-                lambda x: x.fillna(method='ffill').fillna(method='bfill')
-            ).reset_index(drop=True)
-            
-            # Take first row per group
-            ssd = ssd.groupby(['Corridor', 'Zone_Group', 'Month']).first().reset_index()
+            # Group by and fill missing values - check columns exist
+            groupby_cols = [col for col in ['Corridor', 'Zone_Group', 'Month'] if col in ssd.columns]
+            if groupby_cols:
+                ssd = ssd.groupby(groupby_cols).apply(
+                    lambda x: x.fillna(method='ffill').fillna(method='bfill')
+                ).reset_index(drop=True)
+                
+                # Take first row per group
+                ssd = ssd.groupby(groupby_cols).first().reset_index()
             
             # Replace infinite values with NaN
             numeric_cols = ssd.select_dtypes(include=[np.number]).columns
-            ssd[numeric_cols] = ssd[numeric_cols].replace([np.inf, -np.inf], np.nan)
+            if len(numeric_cols) > 0:
+                ssd[numeric_cols] = ssd[numeric_cols].replace([np.inf, -np.inf], np.nan)
         
         # Create health input dataframes
         if not corridor_groupings.empty:
-            # Subcorridor health data
-            sub_health_data = pd.merge(
-                csd,
-                corridor_groupings,
-                on=['Corridor', 'Subcorridor'],
-                how='inner'
-            )
+            # Check if required columns exist for subcorridor merge
+            sub_merge_keys = [col for col in ['Corridor', 'Subcorridor'] if col in csd.columns and col in corridor_groupings.columns]
+            if sub_merge_keys:
+                # Subcorridor health data
+                sub_health_data = pd.merge(
+                    csd,
+                    corridor_groupings,
+                    on=sub_merge_keys,
+                    how='inner'
+                )
+            else:
+                sub_health_data = csd
             
-            # Signal health data
-            sig_health_data = ssd.rename(columns={
-                'Corridor': 'SignalID',
-                'Zone_Group': 'Corridor'
-            })
+            # Signal health data - check columns exist before renaming
+            sig_health_data = ssd.copy()
+            rename_map = {}
+            if 'Corridor' in sig_health_data.columns:
+                rename_map['Corridor'] = 'SignalID'
+            # Handle both 'Zone Group' (with space) and 'Zone_Group' (with underscore)
+            zone_group_col = None
+            for col in ['Zone Group', 'Zone_Group']:
+                if col in sig_health_data.columns:
+                    zone_group_col = col
+                    break
+            if zone_group_col:
+                rename_map[zone_group_col] = 'Corridor'
             
-            # Merge with corridors and corridor groupings
-            sig_health_data = pd.merge(
-                sig_health_data,
-                corridors[['Corridor', 'SignalID', 'Subcorridor']],
-                on=['Corridor', 'SignalID'],
-                how='left'
-            )
+            if rename_map:
+                sig_health_data = sig_health_data.rename(columns=rename_map)
             
-            sig_health_data = pd.merge(
-                sig_health_data,
-                corridor_groupings,
-                on=['Corridor', 'Subcorridor'],
-                how='inner'
-            )
+            # Merge with corridors - check if SignalID exists
+            if 'SignalID' in sig_health_data.columns and 'Corridor' in sig_health_data.columns:
+                # Check what columns exist in corridors
+                available_corridor_cols = [col for col in ['Corridor', 'SignalID', 'Subcorridor'] if col in corridors.columns]
+                if available_corridor_cols:
+                    merge_keys = [col for col in ['Corridor', 'SignalID'] if col in sig_health_data.columns and col in corridors.columns]
+                    if merge_keys:
+                        sig_health_data = pd.merge(
+                            sig_health_data,
+                            corridors[available_corridor_cols],
+                            on=merge_keys,
+                            how='left'
+                        )
+            
+            # Merge with corridor groupings if Subcorridor exists
+            if 'Subcorridor' in sig_health_data.columns:
+                sig_merge_keys = [col for col in ['Corridor', 'Subcorridor'] if col in sig_health_data.columns and col in corridor_groupings.columns]
+                if sig_merge_keys:
+                    sig_health_data = pd.merge(
+                        sig_health_data,
+                        corridor_groupings,
+                        on=sig_merge_keys,
+                        how='inner'
+                    )
             
             # Add TTI/PTI from subcorridor data for contexts 1-4
-            tti_pti_data = sub_health_data[['Corridor', 'Subcorridor', 'Month', 'tti', 'pti']]
-            
-            sig_health_data = pd.merge(
-                sig_health_data,
-                tti_pti_data,
-                on=['Corridor', 'Subcorridor', 'Month'],
-                how='left',
-                suffixes=('_x', '_y')
-            )
-            
-            # Use subcorridor TTI/PTI for contexts 1-4
-            context_mask = sig_health_data['Context'].isin([1, 2, 3, 4])
-            sig_health_data.loc[context_mask, 'tti_x'] = sig_health_data.loc[context_mask, 'tti_y']
-            sig_health_data.loc[context_mask, 'pti_x'] = sig_health_data.loc[context_mask, 'pti_y']
+            if not sub_health_data.empty:
+                tti_pti_cols = [col for col in ['Corridor', 'Subcorridor', 'Month', 'tti', 'pti'] if col in sub_health_data.columns]
+                if len(tti_pti_cols) >= 3:  # At least Corridor, Subcorridor, Month
+                    tti_pti_data = sub_health_data[tti_pti_cols]
+                    
+                    merge_cols = [col for col in ['Corridor', 'Subcorridor', 'Month'] if col in sig_health_data.columns and col in tti_pti_data.columns]
+                    if merge_cols:
+                        sig_health_data = pd.merge(
+                            sig_health_data,
+                            tti_pti_data,
+                            on=merge_cols,
+                            how='left',
+                            suffixes=('_x', '_y')
+                        )
+                        
+                        # Use subcorridor TTI/PTI for contexts 1-4 if Context column exists
+                        if 'Context' in sig_health_data.columns:
+                            context_mask = sig_health_data['Context'].isin([1, 2, 3, 4])
+                            if 'tti_x' in sig_health_data.columns and 'tti_y' in sig_health_data.columns:
+                                sig_health_data.loc[context_mask, 'tti_x'] = sig_health_data.loc[context_mask, 'tti_y']
+                            if 'pti_x' in sig_health_data.columns and 'pti_y' in sig_health_data.columns:
+                                sig_health_data.loc[context_mask, 'pti_x'] = sig_health_data.loc[context_mask, 'pti_y']
             
             # Clean up columns
-            sig_health_data = sig_health_data.drop(['Subcorridor', 'tti_y', 'pti_y'], axis=1)
-            sig_health_data = sig_health_data.rename(columns={
-                'SignalID': 'Subcorridor',
-                'tti_x': 'tti',
-                'pti_x': 'pti'
-            })
+            sig_health_data = sig_health_data.drop(['Subcorridor', 'tti_y', 'pti_y'], axis=1, errors='ignore')
+            if 'SignalID' in sig_health_data.columns:
+                rename_final = {'SignalID': 'Subcorridor'}
+                if 'tti_x' in sig_health_data.columns:
+                    rename_final['tti_x'] = 'tti'
+                if 'pti_x' in sig_health_data.columns:
+                    rename_final['pti_x'] = 'pti'
+                if rename_final:
+                    sig_health_data = sig_health_data.rename(columns=rename_final)
         else:
             sub_health_data = csd
             sig_health_data = ssd
@@ -918,30 +1273,87 @@ def process_health_metrics(sub_data: Dict, sig_data: Dict, cam_config: pd.DataFr
         maintenance_sig = get_health_maintenance(health_all_sig)
         
         # Corridor maintenance (aggregated from subcorridor)
-        maintenance_cor = maintenance_sub.drop(['Subcorridor', 'Context'], axis=1, errors='ignore')
-        maintenance_cor = maintenance_cor.groupby(['Zone Group', 'Zone', 'Corridor', 'Month']).agg(
-            lambda x: x.mean() if x.dtype in ['float64', 'int64'] else x.first()
-        ).reset_index()
+        if maintenance_sub.empty:
+            maintenance_cor = pd.DataFrame()
+        else:
+            maintenance_cor = maintenance_sub.drop(['Subcorridor', 'Context'], axis=1, errors='ignore')
+            # Handle both 'Zone Group' (with space) and 'Zone_Group' (with underscore)
+            groupby_cols = []
+            for col in ['Zone Group', 'Zone_Group']:
+                if col in maintenance_cor.columns:
+                    groupby_cols.append(col)
+                    break
+            if 'Zone' in maintenance_cor.columns:
+                groupby_cols.append('Zone')
+            if 'Corridor' in maintenance_cor.columns:
+                groupby_cols.append('Corridor')
+            if 'Month' in maintenance_cor.columns:
+                groupby_cols.append('Month')
+            
+            if groupby_cols:
+                maintenance_cor = maintenance_cor.groupby(groupby_cols).agg(
+                    lambda x: x.mean() if x.dtype in ['float64', 'int64'] else x.first()
+                ).reset_index()
+            else:
+                maintenance_cor = pd.DataFrame()
         
         # Operations health
         operations_sub = get_health_operations(health_all_sub)
         operations_sig = get_health_operations(health_all_sig)
         
         # Corridor operations (aggregated from subcorridor)
-        operations_cor = operations_sub.drop(['Subcorridor', 'Context'], axis=1, errors='ignore')
-        operations_cor = operations_cor.groupby(['Zone Group', 'Zone', 'Corridor', 'Month']).agg(
-            lambda x: x.mean() if x.dtype in ['float64', 'int64'] else x.first()
-        ).reset_index()
+        if operations_sub.empty:
+            operations_cor = pd.DataFrame()
+        else:
+            operations_cor = operations_sub.drop(['Subcorridor', 'Context'], axis=1, errors='ignore')
+            # Handle both 'Zone Group' (with space) and 'Zone_Group' (with underscore)
+            groupby_cols = []
+            for col in ['Zone Group', 'Zone_Group']:
+                if col in operations_cor.columns:
+                    groupby_cols.append(col)
+                    break
+            if 'Zone' in operations_cor.columns:
+                groupby_cols.append('Zone')
+            if 'Corridor' in operations_cor.columns:
+                groupby_cols.append('Corridor')
+            if 'Month' in operations_cor.columns:
+                groupby_cols.append('Month')
+            
+            if groupby_cols:
+                operations_cor = operations_cor.groupby(groupby_cols).agg(
+                    lambda x: x.mean() if x.dtype in ['float64', 'int64'] else x.first()
+                ).reset_index()
+            else:
+                operations_cor = pd.DataFrame()
         
         # Safety health
         safety_sub = get_health_safety(health_all_sub)
         safety_sig = get_health_safety(health_all_sig)
         
         # Corridor safety (aggregated from subcorridor)
-        safety_cor = safety_sub.drop(['Subcorridor', 'Context'], axis=1, errors='ignore')
-        safety_cor = safety_cor.groupby(['Zone Group', 'Zone', 'Corridor', 'Month']).agg(
-            lambda x: x.mean() if x.dtype in ['float64', 'int64'] else x.first()
-        ).reset_index()
+        if safety_sub.empty:
+            safety_cor = pd.DataFrame()
+        else:
+            safety_cor = safety_sub.drop(['Subcorridor', 'Context'], axis=1, errors='ignore')
+            # Handle both 'Zone Group' (with space) and 'Zone_Group' (with underscore)
+            groupby_cols = []
+            for col in ['Zone Group', 'Zone_Group']:
+                if col in safety_cor.columns:
+                    groupby_cols.append(col)
+                    break
+            if 'Zone' in safety_cor.columns:
+                groupby_cols.append('Zone')
+            if 'Corridor' in safety_cor.columns:
+                groupby_cols.append('Corridor')
+            if 'Month' in safety_cor.columns:
+                groupby_cols.append('Month')
+            
+            if groupby_cols:
+                safety_cor = safety_cor.groupby(groupby_cols).agg(
+                    lambda x: x.mean() if x.dtype in ['float64', 'int64'] else x.first()
+                ).reset_index()
+            else:
+                safety_cor = pd.DataFrame()
         
         # Create plot dataframes
         plot_data = {

@@ -152,13 +152,24 @@ def sigify(signal_data, corridor_data, config_data, identifier='SignalID'):
             logger.warning(f"Identifier '{identifier}' not in config data")
             return signal_data
         
+        # Fix SignalID/CameraID type mismatch: ensure both DataFrames have same type
+        # Convert to string to avoid merge errors (matches R behavior where factors are strings)
+        signal_data_copy = signal_data.copy()
+        config_data_copy = config_data[config_cols].copy()
+        
+        # Convert identifier to string in both DataFrames
+        if identifier in signal_data_copy.columns:
+            signal_data_copy[identifier] = signal_data_copy[identifier].astype(str)
+        if identifier in config_data_copy.columns:
+            config_data_copy[identifier] = config_data_copy[identifier].astype(str)
+        
         # Merge with config to add corridor info
-        result = signal_data.merge(
-            config_data[config_cols],
-                on=identifier, 
+        result = signal_data_copy.merge(
+            config_data_copy,
+            on=identifier, 
             how='left',
             suffixes=('', '_config')
-            )
+        )
         
         return result
             
@@ -851,11 +862,13 @@ def main():
             from health_metrics import process_health_metrics
             
             # Process health metrics (matches R Health_Metrics.R)
+            # Pass conf to enable Athena optimization if available
             health_results = process_health_metrics(
                 sub_data=sub,
                 sig_data=sig,
                 cam_config=cam_config,
-                corridors=corridors if not corridors.empty else subcorridors
+                corridors=corridors if not corridors.empty else subcorridors,
+                conf=conf  # Pass config to enable Athena optimization
             )
             
             # Add health data to cor/sub/sig structures (matches R behavior)
