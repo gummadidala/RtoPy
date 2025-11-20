@@ -20,6 +20,7 @@ from s3_parquet_io import s3read_using, s3write_using
 from utilities import keep_trying
 from write_sigops_to_db import load_bulk_data
 from database_functions import get_aurora_connection
+from SigOps.athena_helpers import athena_read_table
 import pyarrow.parquet as pq
 import pyarrow.feather as feather
 
@@ -44,6 +45,100 @@ def read_zipped_feather(file_path: str) -> pd.DataFrame:
                 temp_file.write(f.read())
                 temp_file.flush()
                 return feather.read_feather(temp_file.name)
+
+def _process_alerts_dataframe(alerts: pd.DataFrame) -> pd.DataFrame:
+    """
+    Process alerts dataframe (shared between Athena and S3 methods)
+    
+    Args:
+        alerts: Raw alerts DataFrame
+    
+    Returns:
+        Processed alerts DataFrame
+    """
+    # Filter out rows where Corridor is NA
+    alerts = alerts.dropna(subset=['Corridor'])
+    
+    # Fill NA values
+    if 'Detector' not in alerts.columns:
+        alerts['Detector'] = 0
+    if 'CallPhase' not in alerts.columns:
+        alerts['CallPhase'] = 0
+        
+    alerts['Detector'] = alerts['Detector'].fillna(0).astype('category')
+    alerts['CallPhase'] = alerts['CallPhase'].fillna(0).astype('category')
+    
+    # Select and transform columns
+    columns_to_keep = [
+        'Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 
+        'Detector', 'Date', 'Name', 'Alert'
+    ]
+    
+    # Add ApproachDesc if it exists
+    if 'ApproachDesc' in alerts.columns:
+        columns_to_keep.append('ApproachDesc')
+    
+    # Keep only existing columns
+    existing_columns = [col for col in columns_to_keep if col in alerts.columns]
+    alerts = alerts[existing_columns].copy()
+    
+    # Convert categorical columns
+    categorical_columns = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 
+                         'CallPhase', 'Detector', 'Alert']
+    for col in categorical_columns:
+        if col in alerts.columns:
+            alerts[col] = alerts[col].astype('category')
+    
+    # Convert Name to string
+    if 'Name' in alerts.columns:
+        alerts['Name'] = alerts['Name'].astype(str)
+    
+    # Filter dates (last 180 days)
+    cutoff_date = pd.Timestamp(date.today() - timedelta(days=180))
+    alerts = alerts[alerts['Date'] > cutoff_date]
+    
+    # Remove duplicates
+    alerts = alerts.drop_duplicates()
+    
+    # Sort data
+    sort_columns = ['Alert', 'SignalID', 'CallPhase', 'Detector', 'Date']
+    existing_sort_columns = [col for col in sort_columns if col in alerts.columns]
+    alerts = alerts.sort_values(existing_sort_columns)
+    
+    # Calculate streaks
+    alerts = alerts.reset_index(drop=True)
+    
+    # Group by specified columns for streak calculation
+    group_columns = ['Zone_Group', 'Zone', 'SignalID', 'CallPhase', 'Detector', 'Alert']
+    existing_group_columns = [col for col in group_columns if col in alerts.columns]
+    
+    def calculate_streaks(group):
+        group = group.sort_values('Date')
+        
+        # Calculate date differences
+        date_diffs = group['Date'].diff().dt.days
+        
+        # Mark start of new streaks
+        start_streak = group['Date'].copy()
+        for i in range(1, len(group)):
+            if date_diffs.iloc[i] <= 1:  # If difference is 1 day or less
+                start_streak.iloc[i] = np.nan
+        
+        # Forward fill start_streak
+        start_streak = start_streak.ffill()
+        
+        # Calculate streak runs
+        streak = streak_run(start_streak, k=90)
+        group['streak'] = streak
+        
+        return group
+    
+    if existing_group_columns:
+        alerts = alerts.groupby(existing_group_columns, observed=True, group_keys=False).apply(calculate_streaks)
+        alerts = alerts.reset_index(drop=True)
+    
+    logger.info(f"Processed {len(alerts)} alert records")
+    return alerts
 
 def streak_run(start_dates: pd.Series, k: int = 90) -> pd.Series:
     """
@@ -92,167 +187,42 @@ def setup_logging():
 
 def get_alerts(conf: dict) -> pd.DataFrame:
     """
-    Get alerts data from S3 bucket
+    Get alerts data from Athena table ONLY
     
     Args:
-        conf: Configuration dictionary
+        conf: Configuration dictionary with Athena settings
     
     Returns:
         DataFrame with processed alerts
     """
     logger = logging.getLogger(__name__)
     
-    try:
-        s3_client = boto3.client('s3')
-        
-        # List objects with prefix 'sigops/watchdog/'
-        response = s3_client.list_objects_v2(
-            Bucket=conf['bucket'],
-            Prefix='sigops/watchdog/'
-        )
-        
-        if 'Contents' not in response:
-            logger.warning("No objects found with prefix 'sigops/watchdog/'")
-            return pd.DataFrame()
-        
-        alerts_list = []
-        
-        for obj in response['Contents']:
-            key = obj['Key']
-            logger.info(f"Processing: {key}")
-            
-            try:
-                if key.endswith("feather.zip"):
-                    # Read zipped feather file
-                    df = s3read_using(
-                        read_zipped_feather,
-                        bucket=conf['bucket'],
-                        object=key
-                    )
-                elif key.endswith("parquet") and not key.endswith("alerts.parquet"):
-                    # Read parquet file
-                    df = s3read_using(
-                        pd.read_parquet,
-                        bucket=conf['bucket'],
-                        object=key
-                    )
-                else:
-                    continue
-                
-                if df is not None and not df.empty:
-                    # Convert to proper data types
-                    df['SignalID'] = df['SignalID'].astype('category')
-                    if 'Detector' in df.columns:
-                        df['Detector'] = df['Detector'].astype('category')
-                    # df['Date'] = pd.to_datetime(df['Date']).dt.date
-                    df['Date'] = pd.to_datetime(df['Date'])
-                    
-                    alerts_list.append(df)
-                    
-            except Exception as e:
-                logger.error(f"Error processing {key}: {e}")
-                continue
-        
-        if not alerts_list:
-            logger.warning("No valid alert data found")
-            return pd.DataFrame()
-        
-        # Combine all dataframes
-        alerts = pd.concat(alerts_list, ignore_index=True)
-        
-        # Filter out rows where Corridor is NA
-        alerts = alerts.dropna(subset=['Corridor'])
-        
-        # Fill NA values
-        if 'Detector' not in alerts.columns:
-            alerts['Detector'] = 0
-        if 'CallPhase' not in alerts.columns:
-            alerts['CallPhase'] = 0
-            
-        alerts['Detector'] = alerts['Detector'].fillna(0).astype('category')
-        alerts['CallPhase'] = alerts['CallPhase'].fillna(0).astype('category')
-        
-        # Select and transform columns
-        columns_to_keep = [
-            'Zone_Group', 'Zone', 'Corridor', 'SignalID', 'CallPhase', 
-            'Detector', 'Date', 'Name', 'Alert'
-        ]
-        
-        # Add ApproachDesc if it exists
-        if 'ApproachDesc' in alerts.columns:
-            columns_to_keep.append('ApproachDesc')
-        
-        # Keep only existing columns
-        existing_columns = [col for col in columns_to_keep if col in alerts.columns]
-        alerts = alerts[existing_columns].copy()
-        
-        # Convert categorical columns
-        categorical_columns = ['Zone_Group', 'Zone', 'Corridor', 'SignalID', 
-                             'CallPhase', 'Detector', 'Alert']
-        for col in categorical_columns:
-            if col in alerts.columns:
-                alerts[col] = alerts[col].astype('category')
-        
-        # Convert Name to string
-        if 'Name' in alerts.columns:
-            alerts['Name'] = alerts['Name'].astype(str)
-        
-        # Filter dates (last 180 days)
-        # cutoff_date = date.today() - timedelta(days=180)
-        # alerts = alerts[alerts['Date'] > cutoff_date]
-        cutoff_date = pd.Timestamp(date.today() - timedelta(days=180))
-        alerts = alerts[alerts['Date'] > cutoff_date]
-        
-        # Remove duplicates
-        alerts = alerts.drop_duplicates()
-        
-        # Sort data
-        sort_columns = ['Alert', 'SignalID', 'CallPhase', 'Detector', 'Date']
-        existing_sort_columns = [col for col in sort_columns if col in alerts.columns]
-        alerts = alerts.sort_values(existing_sort_columns)
-        
-        # Calculate streaks
-        alerts = alerts.reset_index(drop=True)
-        
-        # Group by specified columns for streak calculation
-        group_columns = ['Zone_Group', 'Zone', 'SignalID', 'CallPhase', 'Detector', 'Alert']
-        existing_group_columns = [col for col in group_columns if col in alerts.columns]
-        
-        def calculate_streaks(group):
-            group = group.sort_values('Date')
-            
-            # Calculate date differences
-            date_diffs = group['Date'].diff().dt.days
-            
-            # Mark start of new streaks
-            start_streak = group['Date'].copy()
-            for i in range(1, len(group)):
-                if date_diffs.iloc[i] <= 1:  # If difference is 1 day or less
-                    start_streak.iloc[i] = np.nan
-            
-            # Forward fill start_streak
-            # start_streak = start_streak.fillna(method='ffill')
-            start_streak = start_streak.ffill()
-
-            
-            # Calculate streak runs
-            streak = streak_run(start_streak, k=90)
-            group['streak'] = streak
-            
-            return group
-        
-        if existing_group_columns:
-            # alerts = alerts.groupby(existing_group_columns, observed=True).apply(calculate_streaks)
-            alerts = alerts.groupby(existing_group_columns, observed=True, group_keys=False).apply(calculate_streaks)
-            alerts = alerts.reset_index(drop=True)
-        
-        logger.info(f"Processed {len(alerts)} alert records")
-        return alerts
-        
-    except Exception as e:
-        logger.error(f"Error in get_alerts: {e}")
-        logger.error(traceback.format_exc())
+    # Validate Athena configuration
+    if not conf.get('athena') or not conf.get('athena', {}).get('database'):
+        logger.error("Athena configuration is required. Cannot proceed without valid Athena configuration.")
+        raise ValueError("Athena database must be specified in configuration")
+    
+    # Read alerts from Athena table
+    logger.info("Reading alerts from Athena table")
+    cutoff_date = date.today() - timedelta(days=180)
+    cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
+    
+    alerts = athena_read_table(
+        table_name="watchdog_alerts",
+        start_date=cutoff_date,
+        end_date=date.today(),
+        signals_list=None,
+        conf=conf,
+        additional_filters=f"Date > '{cutoff_date_str}'"
+    )
+    
+    if alerts.empty:
+        logger.warning("No alerts found in Athena table")
         return pd.DataFrame()
+    
+    logger.info(f"Retrieved {len(alerts)} alerts from Athena")
+    # Process the alerts
+    return _process_alerts_dataframe(alerts)
 
 def main():
     """Main function to process alerts"""

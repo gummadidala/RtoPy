@@ -29,6 +29,7 @@ from utilities import (
 from s3_parquet_io import (
     S3ParquetHandler, s3_upload_parquet, s3_read_parquet_parallel
 )
+from SigOps.athena_helpers import s3_read_parquet_parallel_athena
 from configs import get_corridors
 from aggregations import (
     get_monthly_avg_by_day, get_cor_monthly_avg_by_day,
@@ -253,9 +254,34 @@ class MonthlyReportPackage:
                 logger.warning("No SignalID column found in corridors")
                 return []
                 
-            signals_list = self.corridors['SignalID'].unique().tolist()
-            logger.info(f"Loaded {len(signals_list)} signals to process")
-            return signals_list
+            signals_list = self.corridors['SignalID'].dropna().unique().tolist()
+            # Convert to strings properly - CRITICAL: Remove .0 suffix from floats
+            # Example: 2.0 -> '2', not '2.0'
+            clean_signals = []
+            for s in signals_list:
+                if pd.isna(s):
+                    continue
+                if isinstance(s, float):
+                    # If it's a whole number float (2.0), convert to int then string
+                    if s.is_integer():
+                        sig_str = str(int(s))
+                    else:
+                        # For non-integer floats, remove trailing zeros
+                        sig_str = str(s).rstrip('0').rstrip('.')
+                elif isinstance(s, int):
+                    sig_str = str(s)
+                else:
+                    # Already a string - remove .0 if present
+                    sig_str = str(s).strip()
+                    if sig_str.endswith('.0'):
+                        sig_str = sig_str[:-2]
+                clean_signals.append(sig_str)
+            
+            logger.info(f"Loaded {len(clean_signals)} signals to process")
+            # Log sample to verify conversion
+            if clean_signals:
+                logger.info(f"Sample converted SignalIDs: {clean_signals[:5]}")
+            return clean_signals
             
         except Exception as e:
             logger.warning(f"Could not load signals list: {e}")
@@ -369,12 +395,12 @@ class MonthlyReportPackage:
             chunk_size = 10000000  # Process 10M rows at a time
             
             # Read detector uptime data in chunks
-            avg_daily_detector_uptime = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            avg_daily_detector_uptime = s3_read_parquet_parallel_athena(
                 table_name="detector_uptime_pd",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list[:500] if len(self.signals_list) > 500 else self.signals_list,  # Limit signals for memory
+                conf=self.conf,
                 callback=None
             )
             
@@ -517,12 +543,12 @@ class MonthlyReportPackage:
             signals_subset = self.signals_list[:1000] if len(self.signals_list) > 1000 else self.signals_list
 
             # Read pedestrian counts hourly with limits
-            paph = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            paph = s3_read_parquet_parallel_athena(
                 table_name="counts_ped_1hr",
                 start_date=pau_start_date,
                 end_date=self.report_end_date,
                 signals_list=signals_subset,
+                conf=self.conf,
                 parallel=False
             )
             
@@ -891,12 +917,12 @@ class MonthlyReportPackage:
                 return x
 
             # Read pedestrian delay data
-            ped_delay = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
-                table_name="ped_delay",
+            ped_delay = s3_read_parquet_parallel_athena(
+                table_name="pedestrian_delay",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
+                conf=self.conf,
                 callback=callback
             )
             
@@ -969,12 +995,12 @@ class MonthlyReportPackage:
         
         try:
             # Read communication uptime data
-            cu = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            cu = s3_read_parquet_parallel_athena(
                 table_name="comm_uptime",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
+                signals_list=self.signals_list,
+                conf=self.conf
             )
 
             if cu.empty:
@@ -1054,12 +1080,12 @@ class MonthlyReportPackage:
         
         try:
             # Read daily vehicle volumes
-            vpd = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            vpd = s3_read_parquet_parallel_athena(
                 table_name="vehicles_pd",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
             if vpd.empty:
@@ -1130,12 +1156,12 @@ class MonthlyReportPackage:
         
         try:
             # Read hourly vehicle volumes
-            vph = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            vph = s3_read_parquet_parallel_athena(
                 table_name="vehicles_ph",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
             if vph.empty:
@@ -1256,12 +1282,12 @@ class MonthlyReportPackage:
         
         try:
             # Read throughput data
-            throughput = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            throughput = s3_read_parquet_parallel_athena(
                 table_name="throughput",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
             if throughput.empty:
@@ -1387,12 +1413,12 @@ class MonthlyReportPackage:
         
         try:
             # Read arrivals on green data
-            aog = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            aog = s3_read_parquet_parallel_athena(
                 table_name="arrivals_on_green",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
             if aog.empty:
@@ -1486,12 +1512,12 @@ class MonthlyReportPackage:
         
         try:
             ## Read split failures data
-            sf = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            sf = s3_read_parquet_parallel_athena(
                 table_name="split_failures",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
             if sf.empty:
@@ -1563,12 +1589,12 @@ class MonthlyReportPackage:
         
         try:
             # Read progression ratio data
-            pr = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            pr = s3_read_parquet_parallel_athena(
                 table_name="progression_ratio",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
             if pr.empty:
@@ -1625,13 +1651,26 @@ class MonthlyReportPackage:
         
         try:
             # Read queue spillback data
-            qs = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            qs = s3_read_parquet_parallel_athena(
                 table_name="queue_spillback",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
-            ).assign(
+                signals_list=self.signals_list,
+                conf=self.conf
+            )
+            
+            if qs.empty:
+                logger.warning("No queue spillback data found")
+                return
+            
+            # Check for required columns before processing
+            required_cols = ['SignalID', 'CallPhase', 'Date', 'qs_events', 'cycles']
+            missing_cols = [col for col in required_cols if col not in qs.columns]
+            if missing_cols:
+                logger.error(f"Missing required columns: {missing_cols}")
+                return
+            
+            qs = qs.assign(
                 SignalID=lambda x: pd.Categorical(x['SignalID']),
                 CallPhase=lambda x: pd.Categorical(x['CallPhase']),
                 Date=lambda x: pd.to_datetime(x['Date']).dt.date
@@ -1669,30 +1708,30 @@ class MonthlyReportPackage:
             # Read travel times data from different time resolutions
             
             # 1-hour travel times
-            tt_1hr = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            tt_1hr = s3_read_parquet_parallel_athena(
                 table_name="travel_times_1hr",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=None  # Travel times may not be signal-specific
+                signals_list=None,  # Travel times may not be signal-specific
+                conf=self.conf
             )
 
             # 15-minute travel times  
-            tt_15min = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            tt_15min = s3_read_parquet_parallel_athena(
                 table_name="travel_times_15min",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=None
+                signals_list=None,
+                conf=self.conf
             )
 
             # 1-minute travel times
-            tt_1min = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            tt_1min = s3_read_parquet_parallel_athena(
                 table_name="travel_times_1min",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=None
+                signals_list=None,
+                conf=self.conf
             )
 
             # Process and aggregate travel times by corridor
@@ -1723,13 +1762,26 @@ class MonthlyReportPackage:
         
         try:
             # Read tasks/maintenance data
-            tasks = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            tasks = s3_read_parquet_parallel_athena(
                 table_name="tasks",
                 start_date=self.calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list
-            ).assign(
+                signals_list=self.signals_list,
+                conf=self.conf
+            )
+            
+            if tasks.empty:
+                logger.warning("No tasks data found")
+                return
+            
+            # Check for required columns
+            required_cols = ['SignalID', 'Date', 'TaskType', 'Status', 'TaskID']
+            missing_cols = [col for col in required_cols if col not in tasks.columns]
+            if missing_cols:
+                logger.error(f"Missing required columns: {missing_cols}")
+                return
+            
+            tasks = tasks.assign(
                 SignalID=lambda x: pd.Categorical(x['SignalID']),
                 Date=lambda x: pd.to_datetime(x['Date']).dt.date
             )
@@ -1767,13 +1819,26 @@ class MonthlyReportPackage:
         
         try:
             # Read CCTV uptime data
-            cctv_uptime = s3_read_parquet_parallel(
-                bucket=self.conf['bucket'],
+            cctv_uptime = s3_read_parquet_parallel_athena(
                 table_name="cctv_uptime",
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=None  # CCTV may have different ID structure
-            ).assign(
+                signals_list=None,  # CCTV may have different ID structure
+                conf=self.conf
+            )
+            
+            if cctv_uptime.empty:
+                logger.warning("No CCTV uptime data found")
+                return
+            
+            # Check for required columns
+            required_cols = ['Date', 'uptime_hours', 'CameraID']
+            missing_cols = [col for col in required_cols if col not in cctv_uptime.columns]
+            if missing_cols:
+                logger.error(f"Missing required columns: {missing_cols}")
+                return
+            
+            cctv_uptime = cctv_uptime.assign(
                 Date=lambda x: pd.to_datetime(x['Date']).dt.date
             )
 
@@ -1812,13 +1877,24 @@ class MonthlyReportPackage:
         try:
             # Read safety/crash data if available
             try:
-                safety_data = s3_read_parquet_parallel(
-                    bucket=self.conf['bucket'],
-                    table_name="safety_incidents",
+                safety_data = s3_read_parquet_parallel_athena(
+                    table_name="safety_data",
                     start_date=self.calcs_start_date,
                     end_date=self.report_end_date,
-                    signals_list=self.signals_list
+                    signals_list=self.signals_list,
+                    conf=self.conf
                 )
+                
+                if safety_data.empty:
+                    logger.warning("No safety data found")
+                    return
+                
+                # Check for required columns
+                required_cols = ['Date', 'SignalID', 'IncidentType', 'IncidentID']
+                missing_cols = [col for col in required_cols if col not in safety_data.columns]
+                if missing_cols:
+                    logger.error(f"Missing required columns: {missing_cols}")
+                    return
                 
                 # Process safety metrics
                 safety_summary = safety_data.groupby(['Date', 'SignalID', 'IncidentType']).agg({
@@ -2194,12 +2270,12 @@ class MonthlyReportPackage:
                 ramp_meter_signals = ramp_meters['SignalID'].tolist()
                 
                 # Read ramp meter specific data
-                ramp_data = s3_read_parquet_parallel(
-                    bucket=self.conf['bucket'],
-                    table_name="ramp_meter_data",
+                ramp_data = s3_read_parquet_parallel_athena(
+                    table_name="ramp_data",
                     start_date=self.wk_calcs_start_date,
                     end_date=self.report_end_date,
-                    signals_list=ramp_meter_signals
+                    signals_list=ramp_meter_signals,
+                    conf=self.conf
                 ).assign(
                     SignalID=lambda x: pd.Categorical(x['SignalID']),
                     Date=lambda x: pd.to_datetime(x['Date']).dt.date
@@ -2349,8 +2425,8 @@ class MonthlyReportPackage:
                 'total_signals_processed': len(self.signals_list),
                 'total_corridors_processed': len(self.corridors['Corridor'].unique()),
                 'processing_period': {
-                    'start': self.calcs_start_date,
-                    'end': self.report_end_date
+                    'start': str(self.calcs_start_date),
+                    'end': str(self.report_end_date)
                 }
             }
             
@@ -2518,12 +2594,12 @@ class MonthlyReportPackage:
         
         while retry_count < max_retries:
             try:
-                data = s3_read_parquet_parallel(
-                    bucket=bucket,
+                data = s3_read_parquet_parallel_athena(
                     table_name=table_name,
                     start_date=start_date,
                     end_date=end_date,
                     signals_list=signals_list,
+                    conf=self.conf,
                     **kwargs
                 )
                 

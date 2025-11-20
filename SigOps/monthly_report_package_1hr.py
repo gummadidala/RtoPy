@@ -26,6 +26,7 @@ from SigOps.configs import get_date_from_string
 from configs import get_corridors
 from write_sigops_to_db import append_to_database
 from database_functions import get_aurora_connection
+from SigOps.athena_helpers import s3_read_parquet_parallel_athena
 import yaml
 
 def setup_logging(log_level: str = "INFO", log_file: Optional[str] = None):
@@ -248,12 +249,12 @@ def main():
         print(f"{datetime.now()} Hourly Pedestrian Activations [5 of 29 (sigops 1hr)]")
         
         try:
-            paph = s3_read_parquet_parallel(
-                bucket=conf['bucket'],
+            paph = s3_read_parquet_parallel_athena(
                 table_name="counts_ped_1hr",
                 start_date=rds_start_date,
                 end_date=report_end_date,
                 signals_list=signals_list,
+                conf=conf,
                 parallel=False
             )
             
@@ -271,12 +272,12 @@ def main():
                 paph['vol'] = pd.to_numeric(paph['vol'], errors='coerce')
                 
                 # Load bad ped detectors
-                bad_ped_detectors = s3_read_parquet_parallel(
-                    bucket=conf['bucket'],
+                bad_ped_detectors = s3_read_parquet_parallel_athena(
                     table_name="bad_ped_detectors",
                     start_date=rds_start_date,
                     end_date=report_end_date,
                     signals_list=signals_list,
+                    conf=conf,
                     parallel=False
                 )
                 
@@ -346,12 +347,12 @@ def main():
         print(f"{datetime.now()} Hourly Volumes [9 of 29 (sigops 1hr)]")
         
         try:
-            vph = s3_read_parquet_parallel(
-                bucket=conf['bucket'],
+            vph = s3_read_parquet_parallel_athena(
                 table_name="vehicles_ph",
                 start_date=rds_start_date,
                 end_date=report_end_date,
-                signals_list=signals_list
+                signals_list=signals_list,
+                conf=conf
             )
             
             if not vph.empty:
@@ -384,12 +385,12 @@ def main():
         print(f"{datetime.now()} Hourly AOG [12 of 29 (sigops 1hr)]")
         
         try:
-            aog = s3_read_parquet_parallel(
-                bucket=conf['bucket'],
+            aog = s3_read_parquet_parallel_athena(
                 table_name="arrivals_on_green",
                 start_date=rds_start_date,
                 end_date=report_end_date,
-                signals_list=signals_list
+                signals_list=signals_list,
+                conf=conf
             )
             
             if not aog.empty:
@@ -496,12 +497,12 @@ def main():
             def filter_callphase_0(df):
                 return df[df['CallPhase'] == 0] if 'CallPhase' in df.columns else df
             
-            sf = s3_read_parquet_parallel(
-                bucket=conf['bucket'],
+            sf = s3_read_parquet_parallel_athena(
                 table_name="split_failures",
                 start_date=rds_start_date,
                 end_date=report_end_date,
                 signals_list=signals_list,
+                conf=conf,
                 callback=filter_callphase_0
             )
             
@@ -557,12 +558,12 @@ def main():
         print(f"{datetime.now()} Hourly Queue Spillback [18 of 29 (sigops 1hr)]")
         
         try:
-            qs = s3_read_parquet_parallel(
-                bucket=conf['bucket'],
+            qs = s3_read_parquet_parallel_athena(
                 table_name="queue_spillback",
                 start_date=calcs_start_date,  # Note: using calcs_start_date here as in R
                 end_date=report_end_date,
-                signals_list=signals_list
+                signals_list=signals_list,
+                conf=conf
             )
             
             if not qs.empty:

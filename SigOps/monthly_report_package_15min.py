@@ -33,6 +33,7 @@ from SigOps.aggregations import sigify
 # from aggregations import *
 from configs import get_corridors
 from s3_parquet_io import s3_read_parquet_parallel
+from SigOps.athena_helpers import s3_read_parquet_parallel_athena
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -238,12 +239,12 @@ def main():
     print(f"{datetime.now()} 15-Minute Pedestrian Activations [5 of 29 (sigops 15min)]")
     
     try:
-        paph = s3_read_parquet_parallel(
-            bucket=conf['bucket'],
+        paph = s3_read_parquet_parallel_athena(
             table_name="counts_ped_15min",
             start_date=rds_start_date,
             end_date=report_end_date,
             signals_list=signals_list,
+            conf=conf,
             parallel=False
         )
         
@@ -257,12 +258,12 @@ def main():
             paph['Week'] = pd.to_datetime(paph['Date']).dt.isocalendar().week
             paph['vol'] = pd.to_numeric(paph['vol'])
             
-            bad_ped_detectors = s3_read_parquet_parallel(
-                bucket=conf['bucket'],
+            bad_ped_detectors = s3_read_parquet_parallel_athena(
                 table_name="bad_ped_detectors",
                 start_date=rds_start_date,
                 end_date=report_end_date,
                 signals_list=signals_list,
+                conf=conf,
                 parallel=False
             )
             
@@ -339,12 +340,12 @@ def main():
     print(f"{datetime.now()} 15-Minute Volumes [9 of 29 (sigops 15min)]")
     
     try:
-        vph = s3_read_parquet_parallel(
-            bucket=conf['bucket'],
+        vph = s3_read_parquet_parallel_athena(
             table_name="vehicles_15min",
             start_date=rds_start_date,
             end_date=report_end_date,
-            signals_list=signals_list
+            signals_list=signals_list,
+            conf=conf
         )
         
         if not vph.empty:
@@ -386,12 +387,12 @@ def main():
     print(f"{datetime.now()} 15-Minute AOG [12 of 29 (sigops 15min)]")
     
     try:
-        aog = s3_read_parquet_parallel(
-            bucket=conf['bucket'],
+        aog = s3_read_parquet_parallel_athena(
             table_name="arrivals_on_green_15min",
             start_date=rds_start_date,
             end_date=report_end_date,
-            signals_list=signals_list
+            signals_list=signals_list,
+            conf=conf
         )
         
         if not aog.empty:
@@ -529,12 +530,12 @@ def main():
     print(f"{datetime.now()} 15-Minute Split Failures [16 of 29 (sigops 15min)]")
     
     try:
-        sf = s3_read_parquet_parallel(
-            bucket=conf['bucket'],
+        sf = s3_read_parquet_parallel_athena(
             table_name="split_failures_15min",
             start_date=rds_start_date,
             end_date=report_end_date,
             signals_list=signals_list,
+            conf=conf,
             callback=lambda x: x[x['CallPhase'] == 0]
         )
         
@@ -590,12 +591,12 @@ def main():
     print(f"{datetime.now()} 15-Minute Queue Spillback [18 of 29 (sigops 15min)]")
     
     try:
-        qs = s3_read_parquet_parallel(
-            bucket=conf['bucket'],
+        qs = s3_read_parquet_parallel_athena(
             table_name="queue_spillback_15min",
             start_date=rds_start_date,
             end_date=report_end_date,
-            signals_list=signals_list
+            signals_list=signals_list,
+            conf=conf
         )
         
         if not qs.empty:
