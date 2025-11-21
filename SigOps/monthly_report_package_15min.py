@@ -810,16 +810,21 @@ def keep_trying(func, n_tries=3, **kwargs):
             time.sleep(2 ** attempt)  # Exponential backoff
 
 def load_config():
-    """Load configuration from YAML file"""
+    """Load configuration from YAML file with AWS credentials"""
     try:
-        # Source equivalent: Monthly_Report_Package_init.R
-        config_path = "Monthly_Report.yaml"
-        with open(config_path, 'r') as file:
-            conf = yaml.safe_load(file)
+        from SigOps.config_loader import load_merged_config
+        conf = load_merged_config()
         return conf
     except Exception as e:
         logger.error(f"Error loading configuration: {e}")
-        raise
+        # Fallback to old method
+        try:
+            config_path = "Monthly_Report.yaml"
+            with open(config_path, 'r') as file:
+                conf = yaml.safe_load(file)
+            return conf
+        except:
+            raise
 
 def get_date_from_string(date_string: str, table_include_regex_pattern: str = "", 
                         exceptions: int = 0) -> date:

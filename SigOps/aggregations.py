@@ -18,7 +18,16 @@ TUE, WED, THU = 2, 3, 4  # weekday numbers
 
 def get_period_sum(df: pd.DataFrame, value_col: str, period_col: str) -> pd.DataFrame:
     """
-    Get period sum aggregation
+    Get period sum aggregation - EXACT MATCH TO R get_period_sum()
+    
+    R code:
+    df %>% group_by(SignalID, !!per_) %>%
+        summarize(!!var_ := sum(!!var_, na.rm = TRUE),
+                  .groups = "drop_last") %>%
+        mutate(lag_ = lag(!!var_),
+               delta = ((!!var_) - lag_)/lag_) %>%
+        ungroup() %>%
+        select(SignalID, !!per_, !!var_, delta)
     
     Args:
         df: Input DataFrame
@@ -26,14 +35,24 @@ def get_period_sum(df: pd.DataFrame, value_col: str, period_col: str) -> pd.Data
         period_col: Period column for grouping
     
     Returns:
-        Aggregated DataFrame
+        Aggregated DataFrame with SignalID, period_col, value_col, delta
     """
     try:
         if df.empty:
             return pd.DataFrame()
         
-        # Group by SignalID and period, sum the values
-        result = df.groupby(['SignalID', period_col])[value_col].sum().reset_index()
+        # Group by SignalID and period, sum the values (matching R exactly)
+        result = df.groupby(['SignalID', period_col], dropna=False)[value_col].sum(numeric_only=True, skipna=True).reset_index()
+        
+        # Sort by SignalID and period for lag calculation (CRITICAL for matching R)
+        result = result.sort_values(['SignalID', period_col])
+        
+        # Calculate lag and delta (EXACT R MATCH)
+        result['lag_'] = result.groupby('SignalID')[value_col].shift(1)
+        result['delta'] = (result[value_col] - result['lag_']) / result['lag_']
+        
+        # Select only required columns (matching R output)
+        result = result[['SignalID', period_col, value_col, 'delta']]
         
         return result
         
@@ -44,39 +63,70 @@ def get_period_sum(df: pd.DataFrame, value_col: str, period_col: str) -> pd.Data
 def get_period_avg(df: pd.DataFrame, value_col: str, period_col: str, 
                   weight_col: Optional[str] = None) -> pd.DataFrame:
     """
-    Get period average aggregation
+    Get period average aggregation - EXACT MATCH TO R get_period_avg()
+    
+    R code:
+    df %>% group_by(SignalID, !!per_) %>%
+        summarize(!!var_ := weighted.mean(!!var_, !!wt_, na.rm = TRUE),
+                  !!wt_ := sum(!!wt_, na.rm = TRUE),
+                  .groups = "drop_last") %>%
+        mutate(lag_ = lag(!!var_),
+               delta = ((!!var_) - lag_)/lag_) %>%
+        ungroup() %>%
+        select(SignalID, !!per_, !!var_, !!wt_, delta)
     
     Args:
         df: Input DataFrame
         value_col: Column to average
         period_col: Period column for grouping
-        weight_col: Weight column for weighted average (optional)
+        weight_col: Weight column for weighted average (optional, defaults to ones)
     
     Returns:
-        Aggregated DataFrame
+        Aggregated DataFrame with SignalID, period_col, value_col, weight_col, delta
     """
     try:
         if df.empty:
             return pd.DataFrame()
         
-        if weight_col and weight_col in df.columns:
-            # Weighted average
-            def weighted_avg(group):
-                weights = group[weight_col]
-                values = group[value_col]
-                valid_mask = ~(pd.isna(values) | pd.isna(weights)) & (weights > 0)
-                
-                if valid_mask.sum() == 0:
-                    return np.nan
-                
-                return np.average(values[valid_mask], weights=weights[valid_mask])
+        # Create weight column if not provided (matching R behavior)
+        if weight_col is None or weight_col not in df.columns:
+            df = df.copy()
+            weight_col = 'ones'
+            df[weight_col] = 1
+        
+        # Weighted average by SignalID and period (matching R exactly)
+        def weighted_avg_group(group):
+            weights = group[weight_col]
+            values = group[value_col]
+            valid_mask = ~(pd.isna(values) | pd.isna(weights)) & (weights > 0)
             
-            result = df.groupby(['SignalID', period_col]).apply(
-                lambda x: pd.Series({value_col: weighted_avg(x)})
-            ).reset_index()
-        else:
-            # Simple average
-            result = df.groupby(['SignalID', period_col])[value_col].mean().reset_index()
+            if valid_mask.sum() == 0:
+                return pd.Series({
+                    value_col: np.nan,
+                    weight_col: 0
+                })
+            
+            weighted_mean = np.average(values[valid_mask], weights=weights[valid_mask])
+            weight_sum = weights[valid_mask].sum()
+            
+            return pd.Series({
+                value_col: weighted_mean,
+                weight_col: weight_sum
+            })
+        
+        result = df.groupby(['SignalID', period_col], dropna=False).apply(
+            weighted_avg_group
+        ).reset_index()
+        
+        # Sort by SignalID and period for lag calculation (CRITICAL for matching R)
+        result = result.sort_values(['SignalID', period_col])
+        
+        # Calculate lag and delta (EXACT R MATCH)
+        result['lag_'] = result.groupby('SignalID')[value_col].shift(1)
+        result['delta'] = (result[value_col] - result['lag_']) / result['lag_']
+        
+        # Select only required columns (matching R output)
+        result = result[['SignalID', period_col, value_col, weight_col, 'delta']]
         
         return result
         
@@ -219,8 +269,32 @@ def weighted_mean_by_corridor(df: pd.DataFrame,
         DataFrame with weighted means by corridor
     """
     
-    # Join with corridors
-    gdf = df.merge(corridors, how='left').dropna(subset=['Corridor'])
+    # Join with corridors - explicitly merge on SignalID
+    # Ensure SignalID is string type in both dataframes for consistent merging
+    df_copy = df.copy()
+    corridors_copy = corridors.copy()
+    
+    # Check if SignalID exists in both dataframes
+    if 'SignalID' not in df_copy.columns:
+        logger.error(f"SignalID column not found in input dataframe. Available columns: {list(df_copy.columns)}")
+        return pd.DataFrame()
+    if 'SignalID' not in corridors_copy.columns:
+        logger.error(f"SignalID column not found in corridors dataframe. Available columns: {list(corridors_copy.columns)}")
+        return pd.DataFrame()
+    
+    # Convert SignalID to string in both dataframes
+    df_copy['SignalID'] = df_copy['SignalID'].astype(str)
+    corridors_copy['SignalID'] = corridors_copy['SignalID'].astype(str)
+    
+    # Merge on SignalID
+    try:
+        gdf = df_copy.merge(corridors_copy, on='SignalID', how='left').dropna(subset=['Corridor'])
+    except Exception as e:
+        logger.error(f"Error merging with corridors: {e}")
+        logger.error(f"df columns: {list(df_copy.columns)}, corridors columns: {list(corridors_copy.columns)}")
+        logger.error(f"df SignalID sample: {df_copy['SignalID'].head(5).tolist()}")
+        logger.error(f"corridors SignalID sample: {corridors_copy['SignalID'].head(5).tolist()}")
+        return pd.DataFrame()
     gdf['Corridor'] = gdf['Corridor'].astype('category')
     
     # Group by Zone_Group, Zone, Corridor, and period
@@ -551,6 +625,10 @@ def get_tuesdays(df: pd.DataFrame) -> pd.DataFrame:
     df_copy = df.copy()
     if 'Date' not in df_copy.columns:
         raise ValueError("DataFrame must have 'Date' column")
+    
+    # Ensure Date is datetime before using .dt accessor
+    if not pd.api.types.is_datetime64_any_dtype(df_copy['Date']):
+        df_copy['Date'] = pd.to_datetime(df_copy['Date'])
     
     df_copy['Week'] = df_copy['Date'].dt.isocalendar().week
     df_copy['Year'] = df_copy['Date'].dt.year
@@ -1106,7 +1184,11 @@ def get_weekly_sum_by_day(df: pd.DataFrame, var_col: str) -> pd.DataFrame:
     tuesdays = get_tuesdays(df)
     
     df_with_week = df.copy()
-    df_with_week['Week'] = df_with_week['Date'].dt.isocalendar().week
+    # Ensure Date is datetime before using .dt accessor
+    if 'Date' in df_with_week.columns:
+        if not pd.api.types.is_datetime64_any_dtype(df_with_week['Date']):
+            df_with_week['Date'] = pd.to_datetime(df_with_week['Date'])
+        df_with_week['Week'] = df_with_week['Date'].dt.isocalendar().week
     
     # Group by SignalID, Week, CallPhase and take mean over 3 days
     grouped1 = df_with_week.groupby(['SignalID', 'Week', 'CallPhase'])[var_col].mean().reset_index()
@@ -1713,7 +1795,19 @@ def get_cor_monthly_qs_by_day(monthly_qs_by_day: pd.DataFrame, corridors: pd.Dat
 def get_weekly_detector_uptime(avg_daily_detector_uptime: pd.DataFrame) -> pd.DataFrame:
     """Get weekly detector uptime"""
     df = avg_daily_detector_uptime.copy()
-    df['CallPhase'] = 0
+    
+    # Ensure Date is datetime (not date object) for .dt operations
+    if 'Date' in df.columns:
+        if not pd.api.types.is_datetime64_any_dtype(df['Date']):
+            df['Date'] = pd.to_datetime(df['Date'])
+    
+    # Ensure required columns exist
+    if 'CallPhase' not in df.columns:
+        df['CallPhase'] = 0
+    if 'SignalID' not in df.columns:
+        logger.error("SignalID column missing in get_weekly_detector_uptime")
+        return pd.DataFrame()
+    
     df['Week'] = df['Date'].dt.isocalendar().week
     
     result = get_weekly_avg_by_day(df, 'uptime', 'all', peak_only=False)
@@ -1725,7 +1819,18 @@ def get_weekly_detector_uptime(avg_daily_detector_uptime: pd.DataFrame) -> pd.Da
 def get_monthly_detector_uptime(avg_daily_detector_uptime: pd.DataFrame) -> pd.DataFrame:
     """Get monthly detector uptime"""
     df = avg_daily_detector_uptime.copy()
-    df['CallPhase'] = 0
+    
+    # Ensure Date is datetime (not date object) for .dt operations
+    if 'Date' in df.columns:
+        if not pd.api.types.is_datetime64_any_dtype(df['Date']):
+            df['Date'] = pd.to_datetime(df['Date'])
+    
+    # Ensure required columns exist
+    if 'CallPhase' not in df.columns:
+        df['CallPhase'] = 0
+    if 'SignalID' not in df.columns:
+        logger.error("SignalID column missing in get_monthly_detector_uptime")
+        return pd.DataFrame()
     
     result = get_monthly_avg_by_day(df, 'uptime', 'all')
     
@@ -1891,14 +1996,40 @@ def get_cor_weekly_avg_by_day(data, corridors, metric, weight_col='ones'):
             if not pd.api.types.is_datetime64_any_dtype(result['Date']):
                 result['Date'] = pd.to_datetime(result['Date'])
             
-            # Now we can safely use .dt accessor
-            result['Week'] = result['Date'].dt.isocalendar().week
+            # Now we can safely use .dt accessor - only add Week if it doesn't exist
+            if 'Week' not in result.columns:
+                result['Week'] = result['Date'].dt.isocalendar().week
         
-        # Rest of your function logic here...
-        return result
+        # Add weight column if needed
+        if weight_col == 'ones' and 'ones' not in result.columns:
+            result['ones'] = 1
+        
+        # Use weighted_mean_by_corridor to get corridor averages
+        # This function joins with corridors and creates Corridor column
+        cor_result = weighted_mean_by_corridor(result, 'Date', corridors, metric, weight_col)
+        
+        # Check if Corridor column was created (should be created by weighted_mean_by_corridor)
+        if cor_result.empty:
+            return pd.DataFrame()
+        
+        if 'Corridor' not in cor_result.columns:
+            logger.warning("Corridor column not found after weighted_mean_by_corridor - join may have failed")
+            return pd.DataFrame()
+        
+        # Add Week column if Date is datetime
+        if 'Date' in cor_result.columns and pd.api.types.is_datetime64_any_dtype(cor_result['Date']):
+            if 'Week' not in cor_result.columns:
+                cor_result['Week'] = cor_result['Date'].dt.isocalendar().week
+        
+        # Group corridors using group_corridors function
+        cor_result = group_corridors(cor_result, 'Date', metric, weight_col)
+        
+        return cor_result
         
     except Exception as e:
         logger.error(f"Error in get_cor_weekly_avg_by_day: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return pd.DataFrame()
 
 def get_cor_avg_daily_detector_uptime(avg_daily_detector_uptime: pd.DataFrame, 

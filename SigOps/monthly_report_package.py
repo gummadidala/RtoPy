@@ -100,14 +100,20 @@ def setup_logging(log_level='INFO'):
 logger = logging.getLogger(__name__)
 
 def load_config():
-    """Load configuration from YAML file"""
+    """Load configuration from YAML file with AWS credentials"""
     try:
-        with open('Monthly_Report.yaml', 'r') as file:
-            config = yaml.safe_load(file)
+        from SigOps.config_loader import load_merged_config
+        config = load_merged_config()
         return config
     except Exception as e:
         logger.error(f"Error loading config: {e}")
-        return {}
+        # Fallback to old method
+        try:
+            with open('Monthly_Report.yaml', 'r') as file:
+                config = yaml.safe_load(file)
+            return config
+        except:
+            return {}
 
 class MonthlyReportPackage:
     """Main class for Monthly Report Package processing"""
@@ -387,61 +393,84 @@ class MonthlyReportPackage:
             logger.error(f"Error starting travel times processes: {e}")
 
     def process_detector_uptime(self):
-        """Process Vehicle Detector Uptime [1 of 29] - Fixed memory issues"""
+        """Process Vehicle Detector Uptime [1 of 29] - OPTIMIZED: Uses Athena aggregation"""
         logger.info("Vehicle Detector Uptime [1 of 29 (sigops)]")
         
         try:
-            # Fix: Process data in smaller chunks to avoid memory issues
-            chunk_size = 10000000  # Process 10M rows at a time
+            # OPTIMIZATION: Use Athena aggregation to get daily averages directly
+            # This returns ~100K rows instead of 15M+ rows
+            from SigOps.athena_aggregations import athena_get_detector_uptime_daily
             
-            # Read detector uptime data in chunks
-            avg_daily_detector_uptime = s3_read_parquet_parallel_athena(
-                table_name="detector_uptime_pd",
+            logger.info("Using Athena aggregation for detector uptime (fast, memory-efficient)")
+            avg_daily_detector_uptime = athena_get_detector_uptime_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list[:500] if len(self.signals_list) > 500 else self.signals_list,  # Limit signals for memory
-                conf=self.conf,
-                callback=None
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
             if avg_daily_detector_uptime.empty:
                 logger.warning("No detector uptime data found")
                 return
 
-            # Fix: Process data in smaller chunks
-            if len(avg_daily_detector_uptime) > chunk_size:
-                logger.info(f"Large dataset detected ({len(avg_daily_detector_uptime)} rows), processing in chunks")
-                
-                # Process basic transformations first
-                avg_daily_detector_uptime = avg_daily_detector_uptime.assign(
-                    SignalID=lambda x: pd.Categorical(x['SignalID'])
-                )
-                
-                # Convert Date column safely
-                if 'Date' in avg_daily_detector_uptime.columns:
-                    avg_daily_detector_uptime['Date'] = pd.to_datetime(
-                        avg_daily_detector_uptime['Date'], errors='coerce'
-                    )
-                    # Remove invalid dates
-                    avg_daily_detector_uptime = avg_daily_detector_uptime.dropna(subset=['Date'])
+            # Data is already aggregated from Athena - much smaller dataset
+            logger.info(f"Processing {len(avg_daily_detector_uptime)} daily aggregated records (vs 15M+ raw rows)")
             
-            # Fix: Skip memory-intensive aggregations if data is too large
-            if len(avg_daily_detector_uptime) > 50000000:  # 50M rows
-                logger.warning("Dataset too large for full processing, creating simplified aggregations")
-                
-                # Create simplified daily summary only
-                daily_summary = avg_daily_detector_uptime.groupby(['SignalID', 'Date']).agg({
-                    'uptime': 'mean',
-                    'all': 'sum'
-                }).reset_index()
-                
-                self.save_to_rds(
-                    daily_summary, "avg_daily_detector_uptime.pkl", "uptime",
-                    self.report_start_date, self.calcs_start_date
-                )
-                
-                logger.info("Simplified detector uptime processing completed due to memory constraints")
+            # Normalize column names - handle case variations
+            if 'date' in avg_daily_detector_uptime.columns and 'Date' not in avg_daily_detector_uptime.columns:
+                avg_daily_detector_uptime = avg_daily_detector_uptime.rename(columns={'date': 'Date'})
+            
+            # Ensure Date column exists and is datetime (not date object)
+            # Aggregation functions need datetime for .dt operations
+            if 'Date' in avg_daily_detector_uptime.columns:
+                # Convert to datetime - keep as datetime64[ns] for aggregation functions
+                avg_daily_detector_uptime['Date'] = pd.to_datetime(avg_daily_detector_uptime['Date'], errors='coerce')
+                # Drop any rows with invalid dates
+                avg_daily_detector_uptime = avg_daily_detector_uptime.dropna(subset=['Date'])
+            else:
+                logger.error("Cannot find 'Date' column in detector uptime data")
+                logger.error(f"Available columns: {list(avg_daily_detector_uptime.columns)}")
                 return
+            
+            # Ensure SignalID column exists and is string type for merging
+            if 'SignalID' not in avg_daily_detector_uptime.columns:
+                if 'signalid' in avg_daily_detector_uptime.columns:
+                    avg_daily_detector_uptime = avg_daily_detector_uptime.rename(columns={'signalid': 'SignalID'})
+                else:
+                    logger.error("Cannot find 'SignalID' column in detector uptime data")
+                    logger.error(f"Available columns: {list(avg_daily_detector_uptime.columns)}")
+                    return
+            
+            # Convert SignalID to string for consistent merging
+            avg_daily_detector_uptime['SignalID'] = avg_daily_detector_uptime['SignalID'].astype(str)
+            
+            # Ensure CallPhase column exists (needed for aggregations)
+            if 'CallPhase' not in avg_daily_detector_uptime.columns:
+                if 'callphase' in avg_daily_detector_uptime.columns:
+                    avg_daily_detector_uptime = avg_daily_detector_uptime.rename(columns={'callphase': 'CallPhase'})
+                else:
+                    # Default to 0 if not present
+                    avg_daily_detector_uptime['CallPhase'] = 0
+            
+            # Ensure required columns exist
+            if 'uptime' not in avg_daily_detector_uptime.columns:
+                # Try alternative names
+                for alt_name in ['Uptime', 'uptime', 'UPTIME']:
+                    if alt_name in avg_daily_detector_uptime.columns:
+                        avg_daily_detector_uptime = avg_daily_detector_uptime.rename(columns={alt_name: 'uptime'})
+                        break
+                else:
+                    logger.error("Cannot find 'uptime' column")
+                    logger.error(f"Available columns: {list(avg_daily_detector_uptime.columns)}")
+                    return
+            
+            # Ensure 'all' column exists (from Athena aggregation)
+            if 'all' not in avg_daily_detector_uptime.columns:
+                avg_daily_detector_uptime['all'] = 1
+            
+            logger.info(f"Data columns after normalization: {list(avg_daily_detector_uptime.columns)}")
+            logger.info(f"Date column type: {avg_daily_detector_uptime['Date'].dtype}")
+            logger.info(f"SignalID sample: {avg_daily_detector_uptime['SignalID'].head(5).tolist()}")
 
             # Continue with normal processing for smaller datasets
             try:
@@ -488,12 +517,18 @@ class MonthlyReportPackage:
                 monthly_detector_uptime = pd.DataFrame()
 
             # Save results with error handling
+            # Convert Date to date object only when saving (keep datetime for processing)
             try:
-                if 'Date' in avg_daily_detector_uptime.columns:
-                    avg_daily_detector_uptime['Date'] = avg_daily_detector_uptime['Date'].dt.date
+                save_data = avg_daily_detector_uptime.copy()
+                if 'Date' in save_data.columns:
+                    # Convert datetime to date object for saving
+                    if pd.api.types.is_datetime64_any_dtype(save_data['Date']):
+                        save_data['Date'] = save_data['Date'].dt.date
+                    else:
+                        save_data['Date'] = pd.to_datetime(save_data['Date']).dt.date
 
                 self.save_to_rds(
-                    avg_daily_detector_uptime, "avg_daily_detector_uptime.pkl", "uptime",
+                    save_data, "avg_daily_detector_uptime.pkl", "uptime",
                     self.report_start_date, self.calcs_start_date
                 )
             except Exception as e:
@@ -509,13 +544,23 @@ class MonthlyReportPackage:
             for name, data, start_date in data_to_save:
                 if not data.empty:
                     try:
-                        if 'Date' in data.columns:
-                            data['Date'] = pd.to_datetime(data['Date']).dt.date
+                        save_data = data.copy()
+                        # Convert Date to date object for saving
+                        if 'Date' in save_data.columns:
+                            if pd.api.types.is_datetime64_any_dtype(save_data['Date']):
+                                save_data['Date'] = save_data['Date'].dt.date
+                            else:
+                                save_data['Date'] = pd.to_datetime(save_data['Date']).dt.date
+                        # Handle Month column if present
+                        if 'Month' in save_data.columns:
+                            if pd.api.types.is_datetime64_any_dtype(save_data['Month']):
+                                save_data['Month'] = save_data['Month'].dt.date
+                        
                         self.save_to_rds(
-                            data, f"{name}.pkl", "uptime",
+                            save_data, f"{name}.pkl", "uptime",
                             self.report_start_date, start_date
                         )
-                        logger.info(f"Saved {name}: {data.shape}")
+                        logger.info(f"Saved {name}: {save_data.shape}")
                     except Exception as e:
                         logger.warning(f"Error saving {name}: {e}")
                 else:
@@ -529,70 +574,48 @@ class MonthlyReportPackage:
             logger.error(f"Traceback: {traceback.format_exc()}")
 
     def process_ped_pushbutton_uptime(self):
-        """Process Ped Pushbutton Uptime [2 of 29] - Fixed memory issues"""
+        """Process Ped Pushbutton Uptime [2 of 29] - OPTIMIZED: Uses Athena aggregation"""
         logger.info("Ped Pushbutton Uptime [2 of 29 (sigops)]")
         
         try:
-            # Fix: Limit the date range to avoid massive datasets
-            pau_start_date = max(
-                pd.to_datetime(self.calcs_start_date),
-                pd.to_datetime(self.report_end_date) - pd.DateOffset(months=3)  # Reduced from 6 months
-            ).strftime('%Y-%m-%d')
-
-            # Fix: Limit signals to process to avoid memory issues
-            signals_subset = self.signals_list[:1000] if len(self.signals_list) > 1000 else self.signals_list
-
-            # Read pedestrian counts hourly with limits
-            paph = s3_read_parquet_parallel_athena(
-                table_name="counts_ped_1hr",
-                start_date=pau_start_date,
+            # OPTIMIZATION: Use Athena aggregation to get daily sums directly
+            # This avoids pulling 762K+ rows and grid expansion memory errors
+            from SigOps.athena_aggregations import athena_get_ped_activations_daily
+            
+            logger.info("Using Athena aggregation for ped activations (fast, memory-efficient)")
+            papd = athena_get_ped_activations_daily(
+                start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=signals_subset,
-                conf=self.conf,
-                parallel=False
+                signals_list=self.signals_list,
+                conf=self.conf
             )
             
-            if paph.empty:
-                logger.warning("No pedestrian hourly data found")
+            if papd.empty:
+                logger.warning("No pedestrian daily data found")
                 return
-                
-            # Fix: Process data safely with memory checks
-            if len(paph) > 10000000:  # 10M rows
-                logger.warning(f"Large ped dataset ({len(paph)} rows), sampling for processing")
-                paph = paph.sample(n=5000000, random_state=42)  # Sample 5M rows
-                
-            paph = paph.dropna(subset=['CallPhase']).assign(
-                SignalID=lambda x: pd.Categorical(x['SignalID']),
-                Detector=lambda x: pd.Categorical(x['Detector']),
-                CallPhase=lambda x: pd.Categorical(x['CallPhase']),
-                Date=lambda x: pd.to_datetime(x['Date'], errors='coerce').dt.date,
-                DOW=lambda x: pd.to_datetime(x['Date'], errors='coerce').dt.dayofweek,
-                Week=lambda x: pd.to_datetime(x['Date'], errors='coerce').dt.isocalendar().week,
-                vol=lambda x: pd.to_numeric(x['vol'], errors='coerce')
-            ).dropna(subset=['Date', 'vol'])
-
-            # Process in smaller chunks for aggregation
-            chunk_size = 1000000
-            papd_chunks = []
             
-            for i in range(0, len(paph), chunk_size):
-                chunk = paph.iloc[i:i+chunk_size]
-                papd_chunk = chunk.groupby([
-                    'SignalID', 'Date', 'DOW', 'Week', 'Detector', 'CallPhase'
-                ]).agg({'vol': 'sum'}).rename(columns={'vol': 'papd'}).reset_index()
-                papd_chunks.append(papd_chunk)
-                
-            if papd_chunks:
-                papd = pd.concat(papd_chunks, ignore_index=True)
-            else:
-                logger.warning("No pedestrian daily data could be processed")
-                return
+            # Add DOW and Week columns (lightweight operation on small dataset)
+            # CRITICAL: Keep Date as datetime for .dt operations, only convert to date when saving
+            if 'Date' in papd.columns:
+                # Ensure Date is datetime (not date object) for .dt operations
+                if not pd.api.types.is_datetime64_any_dtype(papd['Date']):
+                    papd['Date'] = pd.to_datetime(papd['Date'], errors='coerce')
+                papd = papd.dropna(subset=['Date'])  # Remove invalid dates
+                papd['DOW'] = papd['Date'].dt.dayofweek + 1  # Monday=1
+                papd['Week'] = papd['Date'].dt.isocalendar().week
+            
+            # Convert to categorical for memory efficiency
+            papd = papd.assign(
+                SignalID=lambda x: pd.Categorical(x['SignalID']),
+                Detector=lambda x: pd.Categorical(x['Detector']) if 'Detector' in x.columns else pd.Categorical([0] * len(x)),
+                CallPhase=lambda x: pd.Categorical(x['CallPhase']) if 'CallPhase' in x.columns else pd.Categorical([0] * len(x))
+            )
 
-            # Save intermediate result to avoid reprocessing
+            # Save intermediate result
             with open("papd_temp.pkl", 'wb') as f:
                 pickle.dump(papd, f)
 
-            logger.info("Ped pushbutton uptime processing completed (simplified due to memory constraints)")
+            logger.info(f"Ped pushbutton uptime processing completed: {len(papd)} daily records (aggregated in Athena)")
 
         except Exception as e:
             logger.error(f"Error processing ped pushbutton uptime: {e}")
@@ -899,31 +922,43 @@ class MonthlyReportPackage:
         try:
             def callback(x):
                 """Callback function for processing ped delay"""
+                # Handle both processed data (Avg.Max.Ped.Delay) and raw data (duration)
                 if "Avg.Max.Ped.Delay" in x.columns:
-                    x = x.rename(columns={'Avg.Max.Ped.Delay': 'pd'}).assign(
-                        CallPhase=lambda df: pd.Categorical([0] * len(df))
-                    )
+                    x = x.rename(columns={'Avg.Max.Ped.Delay': 'pd'})
+                elif "duration" in x.columns:
+                    # Raw ped_delay table has 'duration' column - rename to 'pd'
+                    x = x.rename(columns={'duration': 'pd'})
                 
                 # Fix: Ensure Date is datetime before using dt accessor
                 if 'Date' in x.columns:
                     x['Date'] = pd.to_datetime(x['Date'], errors='coerce')
                     x = x.dropna(subset=['Date'])  # Remove invalid dates
                     
-                    x = x.assign(
-                        DOW=lambda df: df['Date'].dt.dayofweek,
-                        Week=lambda df: df['Date'].dt.isocalendar().week
-                    )
+                    # Only add DOW and Week if they don't already exist
+                    if 'DOW' not in x.columns:
+                        x['DOW'] = x['Date'].dt.dayofweek
+                    if 'Week' not in x.columns:
+                        x['Week'] = x['Date'].dt.isocalendar().week
+                
+                # Fix: Add CallPhase column if missing (required for aggregations)
+                # eventparam is normalized to CallPhase by column normalization, but check anyway
+                if 'CallPhase' not in x.columns:
+                    x['CallPhase'] = 0
+                
+                # Fix: Add Events column if missing (R code uses replace_na(list(Events = 1)))
+                if 'Events' not in x.columns:
+                    x['Events'] = 1
                 
                 return x
 
-            # Read pedestrian delay data
-            ped_delay = s3_read_parquet_parallel_athena(
-                table_name="pedestrian_delay",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_ped_delay_daily
+            logger.info("Using Athena CLOUD aggregation for ped delay (fast, memory-efficient)")
+            ped_delay = athena_get_ped_delay_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
-                conf=self.conf,
-                callback=callback
+                conf=self.conf
             )
             
             if ped_delay.empty:
@@ -994,9 +1029,10 @@ class MonthlyReportPackage:
         logger.info("Communication Uptime [7 of 29 (sigops)]")
         
         try:
-            # Read communication uptime data
-            cu = s3_read_parquet_parallel_athena(
-                table_name="comm_uptime",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_comm_uptime_daily
+            logger.info("Using Athena CLOUD aggregation for comm uptime (fast, memory-efficient)")
+            cu = athena_get_comm_uptime_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
@@ -1007,11 +1043,16 @@ class MonthlyReportPackage:
                 logger.warning("No communication uptime data found")
                 return
             
-            # Fix: Safely handle Date column conversion
+            # Fix: Safely handle Date column conversion - keep as datetime for .dt accessor
             if 'Date' in cu.columns:
                 cu['Date'] = pd.to_datetime(cu['Date'], errors='coerce')
                 cu = cu.dropna(subset=['Date'])  # Remove invalid dates
-                cu['Date'] = cu['Date'].dt.date
+                # Keep as datetime, don't convert to date object (needed for aggregations)
+            
+            # Check if CallPhase exists before using it
+            if 'CallPhase' not in cu.columns:
+                logger.warning("CallPhase column not found in comm_uptime data, adding default value")
+                cu['CallPhase'] = 0
                 
             cu = cu.assign(
                 SignalID=lambda x: pd.Categorical(x['SignalID']),
@@ -1026,26 +1067,77 @@ class MonthlyReportPackage:
             # Corridor aggregations
             from aggregations import get_cor_weekly_avg_by_day, get_cor_monthly_avg_by_day
             
-            cor_daily_comm_uptime = get_cor_weekly_avg_by_day(
-                daily_comm_uptime, self.corridors, "uptime"
-            )
-            cor_weekly_comm_uptime = get_cor_weekly_avg_by_day(
-                weekly_comm_uptime, self.corridors, "uptime"
-            )
-            cor_monthly_comm_uptime = get_cor_monthly_avg_by_day(
-                monthly_comm_uptime, self.corridors, "uptime"
-            )
+            # Ensure Date is datetime for corridor aggregations
+            if not daily_comm_uptime.empty and 'Date' in daily_comm_uptime.columns:
+                if not pd.api.types.is_datetime64_any_dtype(daily_comm_uptime['Date']):
+                    daily_comm_uptime['Date'] = pd.to_datetime(daily_comm_uptime['Date'])
+            if not weekly_comm_uptime.empty and 'Date' in weekly_comm_uptime.columns:
+                if not pd.api.types.is_datetime64_any_dtype(weekly_comm_uptime['Date']):
+                    weekly_comm_uptime['Date'] = pd.to_datetime(weekly_comm_uptime['Date'])
+            if not monthly_comm_uptime.empty and 'Month' in monthly_comm_uptime.columns:
+                if not pd.api.types.is_datetime64_any_dtype(monthly_comm_uptime['Month']):
+                    monthly_comm_uptime['Month'] = pd.to_datetime(monthly_comm_uptime['Month'])
+            
+            try:
+                cor_daily_comm_uptime = get_cor_weekly_avg_by_day(
+                    daily_comm_uptime, self.corridors, "uptime"
+                )
+            except Exception as e:
+                logger.error(f"Error in cor_daily_comm_uptime: {e}")
+                cor_daily_comm_uptime = pd.DataFrame()
+            
+            try:
+                cor_weekly_comm_uptime = get_cor_weekly_avg_by_day(
+                    weekly_comm_uptime, self.corridors, "uptime"
+                )
+            except Exception as e:
+                logger.error(f"Error in cor_weekly_comm_uptime: {e}")
+                cor_weekly_comm_uptime = pd.DataFrame()
+            
+            try:
+                cor_monthly_comm_uptime = get_cor_monthly_avg_by_day(
+                    monthly_comm_uptime, self.corridors, "uptime"
+                )
+            except Exception as e:
+                logger.error(f"Error in cor_monthly_comm_uptime: {e}")
+                cor_monthly_comm_uptime = pd.DataFrame()
 
             # Subcorridor aggregations
-            sub_daily_comm_uptime = get_cor_weekly_avg_by_day(
-                daily_comm_uptime, self.subcorridors, "uptime"
-            ).dropna(subset=['Corridor'])
-            sub_weekly_comm_uptime = get_cor_weekly_avg_by_day(
-                weekly_comm_uptime, self.subcorridors, "uptime"
-            ).dropna(subset=['Corridor'])
-            sub_monthly_comm_uptime = get_cor_monthly_avg_by_day(
-                monthly_comm_uptime, self.subcorridors, "uptime"
-            ).dropna(subset=['Corridor'])
+            try:
+                sub_daily_comm_uptime = get_cor_weekly_avg_by_day(
+                    daily_comm_uptime, self.subcorridors, "uptime"
+                )
+                if not sub_daily_comm_uptime.empty:
+                    sub_daily_comm_uptime = sub_daily_comm_uptime.dropna(subset=['Corridor'])
+                else:
+                    sub_daily_comm_uptime = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"Error in sub_daily_comm_uptime: {e}")
+                sub_daily_comm_uptime = pd.DataFrame()
+            
+            try:
+                sub_weekly_comm_uptime = get_cor_weekly_avg_by_day(
+                    weekly_comm_uptime, self.subcorridors, "uptime"
+                )
+                if not sub_weekly_comm_uptime.empty:
+                    sub_weekly_comm_uptime = sub_weekly_comm_uptime.dropna(subset=['Corridor'])
+                else:
+                    sub_weekly_comm_uptime = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"Error in sub_weekly_comm_uptime: {e}")
+                sub_weekly_comm_uptime = pd.DataFrame()
+            
+            try:
+                sub_monthly_comm_uptime = get_cor_monthly_avg_by_day(
+                    monthly_comm_uptime, self.subcorridors, "uptime"
+                )
+                if not sub_monthly_comm_uptime.empty:
+                    sub_monthly_comm_uptime = sub_monthly_comm_uptime.dropna(subset=['Corridor'])
+                else:
+                    sub_monthly_comm_uptime = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"Error in sub_monthly_comm_uptime: {e}")
+                sub_monthly_comm_uptime = pd.DataFrame()
 
             # Save all results
             self.save_to_rds(daily_comm_uptime, "daily_comm_uptime.pkl", "uptime",
@@ -1079,9 +1171,10 @@ class MonthlyReportPackage:
         logger.info("Daily Volumes [8 of 29 (sigops)]")
         
         try:
-            # Read daily vehicle volumes
-            vpd = s3_read_parquet_parallel_athena(
-                table_name="vehicles_pd",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_vehicles_pd_daily
+            logger.info("Using Athena CLOUD aggregation for daily volumes (fast, memory-efficient)")
+            vpd = athena_get_vehicles_pd_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
@@ -1092,12 +1185,25 @@ class MonthlyReportPackage:
                 logger.warning("No vehicle volume data found")
                 return
                 
-            # Fix: Safely handle Date column conversion
+            # Fix: Safely handle Date column conversion - calculate DOW before converting to date
             if 'Date' in vpd.columns:
-                vpd['Date'] = pd.to_datetime(vpd['Date'], errors='coerce')
+                # Ensure Date is datetime first
+                if not pd.api.types.is_datetime64_any_dtype(vpd['Date']):
+                    vpd['Date'] = pd.to_datetime(vpd['Date'], errors='coerce')
                 vpd = vpd.dropna(subset=['Date'])  # Remove invalid dates
+                # Calculate DOW and Week while Date is still datetime
+                if 'DOW' not in vpd.columns:
+                    vpd['DOW'] = vpd['Date'].dt.dayofweek
+                if 'Week' not in vpd.columns:
+                    vpd['Week'] = vpd['Date'].dt.isocalendar().week
+                # Now convert to date object for storage (but keep a datetime copy if needed)
                 vpd['Date'] = vpd['Date'].dt.date
                 
+            # Check if CallPhase exists before using it
+            if 'CallPhase' not in vpd.columns:
+                logger.warning("CallPhase column not found in vehicles_pd data, adding default value")
+                vpd['CallPhase'] = 0
+            
             vpd = vpd.assign(
                 SignalID=lambda x: pd.Categorical(x['SignalID']),
                 CallPhase=lambda x: pd.Categorical(x['CallPhase'])
@@ -1105,25 +1211,79 @@ class MonthlyReportPackage:
             # Calculate aggregations
             from aggregations import get_daily_sum, get_weekly_vpd, get_monthly_vpd, get_cor_weekly_vpd, get_cor_monthly_vpd
             
-            daily_vpd = get_daily_sum(vpd, "vpd")
-            weekly_vpd = get_weekly_vpd(vpd)
-            monthly_vpd = get_monthly_vpd(vpd)
+            # Ensure Date is datetime for aggregation functions that need .dt accessor
+            vpd_for_agg = vpd.copy()
+            if 'Date' in vpd_for_agg.columns:
+                # Convert back to datetime if it's a date object
+                if isinstance(vpd_for_agg['Date'].iloc[0] if len(vpd_for_agg) > 0 else None, date):
+                    vpd_for_agg['Date'] = pd.to_datetime(vpd_for_agg['Date'])
+            
+            daily_vpd = get_daily_sum(vpd_for_agg, "vpd")
+            weekly_vpd = get_weekly_vpd(vpd_for_agg)
+            monthly_vpd = get_monthly_vpd(vpd_for_agg)
 
-            # Group into corridors
-            cor_daily_vpd = get_cor_weekly_vpd(daily_vpd, self.corridors).drop(columns=['ones', 'Week'])
-            cor_weekly_vpd = get_cor_weekly_vpd(weekly_vpd, self.corridors)
-            cor_monthly_vpd = get_cor_monthly_vpd(monthly_vpd, self.corridors)
+            # Group into corridors - ensure Date is datetime for corridor functions
+            # These functions may need Date as datetime for Week calculation
+            if not daily_vpd.empty and 'Date' in daily_vpd.columns:
+                if not pd.api.types.is_datetime64_any_dtype(daily_vpd['Date']):
+                    daily_vpd['Date'] = pd.to_datetime(daily_vpd['Date'])
+            if not weekly_vpd.empty and 'Date' in weekly_vpd.columns:
+                if not pd.api.types.is_datetime64_any_dtype(weekly_vpd['Date']):
+                    weekly_vpd['Date'] = pd.to_datetime(weekly_vpd['Date'])
+            if not monthly_vpd.empty and 'Month' in monthly_vpd.columns:
+                if not pd.api.types.is_datetime64_any_dtype(monthly_vpd['Month']):
+                    monthly_vpd['Month'] = pd.to_datetime(monthly_vpd['Month'])
+            
+            try:
+                cor_daily_vpd = get_cor_weekly_vpd(daily_vpd, self.corridors)
+                if not cor_daily_vpd.empty:
+                    cor_daily_vpd = cor_daily_vpd.drop(columns=['ones', 'Week'], errors='ignore')
+            except Exception as e:
+                logger.error(f"Error in cor_daily_vpd: {e}")
+                cor_daily_vpd = pd.DataFrame()
+            
+            try:
+                cor_weekly_vpd = get_cor_weekly_vpd(weekly_vpd, self.corridors)
+            except Exception as e:
+                logger.error(f"Error in cor_weekly_vpd: {e}")
+                cor_weekly_vpd = pd.DataFrame()
+            
+            try:
+                cor_monthly_vpd = get_cor_monthly_vpd(monthly_vpd, self.corridors)
+            except Exception as e:
+                logger.error(f"Error in cor_monthly_vpd: {e}")
+                cor_monthly_vpd = pd.DataFrame()
 
             # Subcorridors
-            sub_daily_vpd = get_cor_weekly_vpd(
-                daily_vpd, self.subcorridors
-            ).drop(columns=['ones', 'Week']).dropna(subset=['Corridor'])
-            sub_weekly_vpd = get_cor_weekly_vpd(
-                weekly_vpd, self.subcorridors
-            ).dropna(subset=['Corridor'])
-            sub_monthly_vpd = get_cor_monthly_vpd(
-                monthly_vpd, self.subcorridors
-            ).dropna(subset=['Corridor'])
+            try:
+                sub_daily_vpd = get_cor_weekly_vpd(daily_vpd, self.subcorridors)
+                if not sub_daily_vpd.empty:
+                    sub_daily_vpd = sub_daily_vpd.drop(columns=['ones', 'Week'], errors='ignore').dropna(subset=['Corridor'])
+                else:
+                    sub_daily_vpd = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"Error in sub_daily_vpd: {e}")
+                sub_daily_vpd = pd.DataFrame()
+            
+            try:
+                sub_weekly_vpd = get_cor_weekly_vpd(weekly_vpd, self.subcorridors)
+                if not sub_weekly_vpd.empty:
+                    sub_weekly_vpd = sub_weekly_vpd.dropna(subset=['Corridor'])
+                else:
+                    sub_weekly_vpd = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"Error in sub_weekly_vpd: {e}")
+                sub_weekly_vpd = pd.DataFrame()
+            
+            try:
+                sub_monthly_vpd = get_cor_monthly_vpd(monthly_vpd, self.subcorridors)
+                if not sub_monthly_vpd.empty:
+                    sub_monthly_vpd = sub_monthly_vpd.dropna(subset=['Corridor'])
+                else:
+                    sub_monthly_vpd = pd.DataFrame()
+            except Exception as e:
+                logger.error(f"Error in sub_monthly_vpd: {e}")
+                sub_monthly_vpd = pd.DataFrame()
 
             # Save all results
             self.save_to_rds(daily_vpd, "daily_vpd.pkl", "vpd",
@@ -1155,9 +1315,10 @@ class MonthlyReportPackage:
         logger.info("Hourly Volumes [9 of 29 (sigops)]")
         
         try:
-            # Read hourly vehicle volumes
-            vph = s3_read_parquet_parallel_athena(
-                table_name="vehicles_ph",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_vehicles_ph_hourly
+            logger.info("Using Athena CLOUD aggregation for hourly volumes (fast, memory-efficient)")
+            vph = athena_get_vehicles_ph_hourly(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
@@ -1167,20 +1328,27 @@ class MonthlyReportPackage:
             if vph.empty:
                 logger.warning("No hourly vehicle volume data found")
                 return
-                
-            # Fix: Safely handle Date column conversion and avoid duplicate column insertion
+            
+            # Data is already aggregated by hour from Athena - much smaller dataset
+            logger.info(f"Processing {len(vph)} hourly aggregated records (vs millions of raw rows)")
+            
+            # Fix: Safely handle Date and Hour column conversion
             if 'Date' in vph.columns:
                 vph['Date'] = pd.to_datetime(vph['Date'], errors='coerce')
                 vph = vph.dropna(subset=['Date'])
-                # Don't convert to date yet - keep as datetime for processing
+            
+            if 'Hour' in vph.columns:
+                vph['Hour'] = pd.to_datetime(vph['Hour'], errors='coerce')
+                # Rename to Timeperiod for compatibility with get_hourly function
+                vph = vph.rename(columns={'Hour': 'Timeperiod'})
                 
             vph = vph.assign(
                 SignalID=lambda x: pd.Categorical(x['SignalID']),
-                CallPhase=lambda x: pd.Categorical([2] * len(x))
+                CallPhase=lambda x: pd.Categorical([2] * len(x)) if len(x) > 0 else pd.Categorical([])
             )
         
-            # Fix: Only add Date column if it doesn't exist or convert existing one
-            if 'Date' not in vph.columns or not isinstance(vph['Date'].iloc[0], date):
+            # Convert Date to date object for storage
+            if 'Date' in vph.columns and not isinstance(vph['Date'].iloc[0] if len(vph) > 0 else None, date):
                 vph['Date'] = pd.to_datetime(vph['Date']).dt.date
 
             # Import hourly volume functions
@@ -1190,8 +1358,13 @@ class MonthlyReportPackage:
                 get_cor_monthly_vph_peak
             )
 
-            # Process hourly data
-            hourly_vol = get_hourly(vph, "vph", self.corridors)
+            # Process hourly data - handle memory issues for large datasets
+            try:
+                hourly_vol = get_hourly(vph, "vph", self.corridors)
+            except MemoryError as me:
+                logger.error(f"Memory error processing hourly volumes: {me}")
+                logger.warning("Skipping hourly volumes processing due to memory constraints")
+                return
 
             cor_daily_vph = get_cor_weekly_vph(hourly_vol, self.corridors)
             sub_daily_vph = get_cor_weekly_vph(
@@ -1281,12 +1454,13 @@ class MonthlyReportPackage:
         logger.info("Daily Throughput [10 of 29 (sigops)]")
         
         try:
-            # Read throughput data
-            throughput = s3_read_parquet_parallel_athena(
-                table_name="throughput",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_throughput_daily
+            logger.info("Using Athena CLOUD aggregation for throughput (fast, memory-efficient)")
+            throughput = athena_get_throughput_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
-                signals_list=self.signals_list,
+                signals_list=self.signals_list,  # No need to limit - aggregation is fast
                 conf=self.conf
             )
             
@@ -1412,9 +1586,10 @@ class MonthlyReportPackage:
         logger.info("Arrivals on Green [11 of 29 (sigops)]")
         
         try:
-            # Read arrivals on green data
-            aog = s3_read_parquet_parallel_athena(
-                table_name="arrivals_on_green",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_arrivals_on_green_daily
+            logger.info("Using Athena CLOUD aggregation for arrivals on green (fast, memory-efficient)")
+            aog = athena_get_arrivals_on_green_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
@@ -1511,9 +1686,10 @@ class MonthlyReportPackage:
         logger.info("Split Failures [12 of 29 (sigops)]")
         
         try:
-            ## Read split failures data
-            sf = s3_read_parquet_parallel_athena(
-                table_name="split_failures",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_split_failures_daily
+            logger.info("Using Athena CLOUD aggregation for split failures (fast, memory-efficient)")
+            sf = athena_get_split_failures_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
@@ -1545,11 +1721,11 @@ class MonthlyReportPackage:
                     logger.warning("No sf_events column found, using default calculation")
                     sf['sf_events'] = 0  # Default value
 
-            # Calculate split failure percentage and hours
-            sf_processed = sf.assign(
-                sf_freq=lambda x: safe_divide(x['sf_events'], x['cycles']) * 100,
-                sf_hours=lambda x: safe_divide(x['sf_events'], x['cycles']) * 24
-            )
+            # sf_freq and sf_hours are already calculated in Athena aggregation
+            # Just ensure Events column exists for compatibility
+            if 'Events' not in sf.columns:
+                sf['Events'] = sf.get('cycles', 1)
+            sf_processed = sf
 
             # Calculate aggregations for both metrics
             daily_sf_freq = get_daily_avg(sf_processed, "sf_freq", "cycles")
@@ -1588,9 +1764,10 @@ class MonthlyReportPackage:
         logger.info("Progression Ratio [13 of 29 (sigops)]")
         
         try:
-            # Read progression ratio data
-            pr = s3_read_parquet_parallel_athena(
-                table_name="progression_ratio",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_progression_ratio_daily
+            logger.info("Using Athena CLOUD aggregation for progression ratio (fast, memory-efficient)")
+            pr = athena_get_progression_ratio_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
@@ -1650,9 +1827,10 @@ class MonthlyReportPackage:
         logger.info("Queue Spillback [14 of 29 (sigops)]")
         
         try:
-            # Read queue spillback data
-            qs = s3_read_parquet_parallel_athena(
-                table_name="queue_spillback",
+            # OPTIMIZATION: Use Athena aggregation instead of pulling raw data
+            from SigOps.athena_aggregations import athena_get_queue_spillback_daily
+            logger.info("Using Athena CLOUD aggregation for queue spillback (fast, memory-efficient)")
+            qs = athena_get_queue_spillback_daily(
                 start_date=self.wk_calcs_start_date,
                 end_date=self.report_end_date,
                 signals_list=self.signals_list,
@@ -1676,10 +1854,12 @@ class MonthlyReportPackage:
                 Date=lambda x: pd.to_datetime(x['Date']).dt.date
             )
 
-            # Calculate queue spillback percentage
-            qs_processed = qs.assign(
-                qs_freq=lambda x: safe_divide(x['qs_events'], x['cycles']) * 100
-            )
+            # qs_freq is already calculated in Athena aggregation
+            # Just ensure cycles column exists for compatibility
+            if 'cycles' not in qs.columns and 'qs_events' in qs.columns:
+                # Estimate cycles if missing (shouldn't happen with aggregation)
+                qs['cycles'] = qs['qs_events'] / (qs['qs_freq'] / 100) if 'qs_freq' in qs.columns else 1
+            qs_processed = qs
 
             # Calculate aggregations
             daily_qs = get_daily_avg(qs_processed, "qs_freq", "cycles")

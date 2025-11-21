@@ -187,11 +187,15 @@ def _normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
         'date_hour': 'Date_Hour',
         'callphase': 'CallPhase',
         'call_phase': 'CallPhase',
+        'eventparam': 'CallPhase',  # ped_delay table uses eventparam as CallPhase
         'detector': 'Detector',
         'vol': 'vol',  # Keep lowercase as expected
         'vpd': 'vpd',  # Keep lowercase as expected
         'uptime': 'uptime',  # Keep lowercase as expected
         'pd': 'pd',  # Keep lowercase as expected
+        'duration': 'duration',  # ped_delay table has duration column
+        'events': 'Events',  # Some tables have Events column
+        'all': 'all',  # Keep lowercase as expected
     }
     
     # Create rename dictionary for columns that exist
@@ -278,11 +282,16 @@ def athena_read_table(
         
         # Add signal filter if provided
         if signals_list and len(signals_list) > 0:
-            # Handle large signal lists by batching
-            if len(signals_list) > 1000:
-                logger.warning(f"Large signal list ({len(signals_list)}), using batching")
+            # Handle large signal lists by batching - reduce batch size for memory-intensive tables
+            # Some tables (like vehicles_ph, throughput) are very large, use smaller batches
+            large_tables = ['vehicles_ph', 'throughput', 'vehicles_pd', 'detector_uptime']
+            batch_threshold = 500 if table_name in large_tables else 1000
+            batch_size = 300 if table_name in large_tables else 500
+            
+            if len(signals_list) > batch_threshold:
+                logger.warning(f"Large signal list ({len(signals_list)}), using batching with batch size {batch_size}")
                 return _athena_read_table_batched(
-                    table_name, start_date, end_date, signals_list, conf, callback, additional_filters, columns
+                    table_name, start_date, end_date, signals_list, conf, callback, additional_filters, columns, batch_size=batch_size
                 )
             
             # Convert SignalIDs to strings properly - handle floats, integers, and strings
@@ -588,13 +597,13 @@ def _athena_read_table_batched(
     conf: dict,
     callback: Optional[Callable] = None,
     additional_filters: Optional[str] = None,
-    columns: Optional[List[str]] = None
+    columns: Optional[List[str]] = None,
+    batch_size: int = 500
 ) -> pd.DataFrame:
     """Read table with batched signal lists to avoid query limits"""
-    batch_size = 500
     all_results = []
     table_not_found = False
-    
+
     for i in range(0, len(signals_list), batch_size):
         batch = signals_list[i:i + batch_size]
         batch_num = (i // batch_size) + 1

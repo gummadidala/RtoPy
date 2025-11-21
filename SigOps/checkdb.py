@@ -340,11 +340,10 @@ def main():
     Main function to run the database check process
     """
     
-    # Load configuration (implement based on your config structure)
+    # Load configuration with AWS credentials
     try:
-        import yaml
-        with open('Monthly_Report.yaml', 'r') as f:
-            conf = yaml.safe_load(f)
+        from SigOps.config_loader import load_merged_config
+        conf = load_merged_config()
     except FileNotFoundError:
         logger.error("Configuration file not found")
         return

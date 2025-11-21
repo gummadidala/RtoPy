@@ -229,14 +229,13 @@ def main():
     logger = setup_logging()
     
     try:
-        # Read configuration
-        config_path = "Monthly_Report.yaml"
-        if not os.path.exists(config_path):
-            logger.error(f"Configuration file not found: {config_path}")
-            return
+        # Read configuration with AWS credentials
+        from SigOps.config_loader import load_merged_config
+        conf = load_merged_config()
         
-        with open(config_path, 'r') as file:
-            conf = yaml.safe_load(file)
+        if not conf:
+            logger.error("Failed to load configuration")
+            return
         
         # Get alerts data
         logger.info("Starting alerts processing...")
